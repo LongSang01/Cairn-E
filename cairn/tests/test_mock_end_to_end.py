@@ -12,7 +12,6 @@ from pydantic import TypeAdapter
 import pytest
 
 from cairn.dispatcher.config import DispatchConfig
-from cairn.dispatcher.models import ReasonCheckpoint
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.runtime.process import ProcessResult
 from cairn.dispatcher.scheduler.loop import DispatcherLoop
@@ -49,26 +48,42 @@ class InProcessClient:
         response.raise_for_status()
         return response.text
 
-    def heartbeat(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/intents/{intent_id}/heartbeat", {"worker": worker})
+    def heartbeat_step(self, project_id: str, step_id: str, worker: str) -> ApiResult:
+        return self._post(f"/projects/{project_id}/steps/{step_id}/heartbeat", {"worker": worker})
 
-    def claim_reason(self, project_id: str, worker: str, trigger: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/reason/claim", {"worker": worker, "trigger": trigger})
+    def release_step(self, project_id: str, step_id: str, worker: str) -> ApiResult:
+        return self._post(f"/projects/{project_id}/steps/{step_id}/release", {"worker": worker})
 
-    def reason_heartbeat(self, project_id: str, worker: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/reason/heartbeat", {"worker": worker})
-
-    def release_reason(self, project_id: str, worker: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/reason/release", {"worker": worker})
-
-    def release(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/intents/{intent_id}/release", {"worker": worker})
-
-    def conclude(self, project_id: str, intent_id: str, worker: str, description: str) -> ApiResult:
+    def conclude_step(
+        self,
+        project_id: str,
+        step_id: str,
+        worker: str,
+        *,
+        facts: list[str],
+        findings: list[dict[str, str]],
+        status: str = "done",
+        note: str | None = None,
+    ) -> ApiResult:
         return self._post(
-            f"/projects/{project_id}/intents/{intent_id}/conclude",
-            {"worker": worker, "description": description},
+            f"/projects/{project_id}/steps/{step_id}/conclude",
+            {
+                "worker": worker,
+                "status": status,
+                "facts": [{"description": description} for description in facts],
+                "findings": findings,
+                "note": note,
+            },
         )
+
+    def claim_decide(self, project_id: str, worker: str, trigger: str) -> ApiResult:
+        return self._post(f"/projects/{project_id}/decide/claim", {"worker": worker, "trigger": trigger})
+
+    def decide_heartbeat(self, project_id: str, worker: str) -> ApiResult:
+        return self._post(f"/projects/{project_id}/decide/heartbeat", {"worker": worker})
+
+    def release_decide(self, project_id: str, worker: str) -> ApiResult:
+        return self._post(f"/projects/{project_id}/decide/release", {"worker": worker})
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
         return self._post(
@@ -76,10 +91,62 @@ class InProcessClient:
             {"from": from_ids, "description": description, "worker": worker},
         )
 
-    def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:
+    def create_step(
+        self,
+        project_id: str,
+        *,
+        from_ids: list[str],
+        description: str,
+        creator: str,
+        goal: str | None = None,
+        rationale: str | None = None,
+        priority: int = 0,
+    ) -> ApiResult:
         return self._post(
-            f"/projects/{project_id}/intents",
-            {"from": from_ids, "description": description, "creator": creator, "worker": None},
+            f"/projects/{project_id}/steps",
+            {
+                "from": from_ids,
+                "description": description,
+                "creator": creator,
+                "goal": goal,
+                "rationale": rationale,
+                "priority": priority,
+                "worker": None,
+            },
+        )
+
+    def update_step(
+        self,
+        project_id: str,
+        step_id: str,
+        *,
+        priority: int | None = None,
+        status: str | None = None,
+        note: str | None = None,
+    ) -> ApiResult:
+        payload: dict[str, Any] = {}
+        if priority is not None:
+            payload["priority"] = priority
+        if status is not None:
+            payload["status"] = status
+        if note is not None:
+            payload["note"] = note
+        return self._post(f"/projects/{project_id}/steps/{step_id}/update", payload)
+
+    def create_goal(
+        self, project_id: str, *, description: str, creator: str, parent: str | None = None
+    ) -> ApiResult:
+        return self._post(
+            f"/projects/{project_id}/goals",
+            {"description": description, "creator": creator, "parent": parent},
+        )
+
+    def close_goal(
+        self, project_id: str, goal_id: str, *, status: str, worker: str, note: str | None = None
+    ) -> ApiResult:
+        return self._post(
+            f"/projects/{project_id}/goals/{goal_id}/close",
+            {"status": status, "worker": worker, "note": note},
         )
 
     def _post(self, path: str, payload: dict[str, Any]) -> ApiResult:
@@ -198,9 +265,8 @@ def _phase(
 
 def _config(
     *,
-    bootstrap: str,
-    reason: str,
-    explore: str,
+    decide: str,
+    execute: str,
     task_types: list[str] | None = None,
     worker_healthcheck: str = "startup_only",
     healthcheck: str | None = None,
@@ -218,9 +284,8 @@ def _config(
                 "prompt_group": "mock",
             },
             "tasks": {
-                "bootstrap": {"timeout": 2, "conclude_timeout": 2},
-                "reason": {"timeout": 2, "max_intents": 1},
-                "explore": {"timeout": 2, "conclude_timeout": 2},
+                "decide": {"timeout": 2, "max_steps": 1},
+                "execute": {"timeout": 2, "conclude_timeout": 2},
             },
             "container": {
                 "image": "unused",
@@ -231,14 +296,14 @@ def _config(
                 {
                     "name": "mock-worker",
                     "type": "mock",
-                    "task_types": task_types or ["bootstrap", "reason", "explore"],
+                    "task_types": task_types or ["decide", "execute"],
                     "max_running": 1,
                     "priority": 0,
                     "env": {
                         "MOCK_HEALTHCHECK": healthcheck or _phase("ok"),
-                        "MOCK_BOOTSTRAP": bootstrap,
-                        "MOCK_REASON": reason,
-                        "MOCK_EXPLORE_EXECUTE": explore,
+                        "MOCK_DECIDE": decide,
+                        "MOCK_EXECUTE": execute,
+                        "MOCK_EXECUTE_CONCLUDE": execute,
                     },
                 }
             ],
@@ -255,7 +320,7 @@ def _loop(config: DispatchConfig, client: InProcessClient, containers: LocalCont
     loop.cleanup_executor = ThreadPoolExecutor(max_workers=1)
     loop.futures = {}
     loop.cleanup_futures = {}
-    loop.reason_checkpoints = {}
+    loop.decide_checkpoints = {}
     loop.runtime_project_ids = set()
     loop.worker_unhealthy_until = {}
     loop.worker_rejected_until = {}
@@ -269,7 +334,7 @@ def _loop(config: DispatchConfig, client: InProcessClient, containers: LocalCont
 def _dispatch_and_wait(loop: DispatcherLoop) -> None:
     loop._reap_futures()
     summaries = loop.client.list_projects()
-    loop._initialize_reason_checkpoints(summaries)
+    loop._initialize_decide_checkpoints(summaries)
     loop._refresh_runtime_projects(summaries)
     loop._cancel_inactive_tasks(summaries)
     loop._queue_container_cleanups(summaries)
@@ -289,14 +354,13 @@ def _create_project(http: TestClient) -> str:
     return response.json()["project"]["id"]
 
 
-def test_mock_scheduler_bootstrap_completes_project_end_to_end(http_client: TestClient) -> None:
+def test_mock_decide_completes_project_end_to_end(http_client: TestClient) -> None:
     client = InProcessClient(http_client)
     containers = LocalContainerManager()
     loop = _loop(
         _config(
-            bootstrap=_phase("complete"),
-            reason=_phase("complete", zero_outcomes=["intent"]),
-            explore=_phase("fact"),
+            decide=_phase("complete", zero_outcomes=["steps"]),
+            execute=_phase("facts"),
         ),
         client,
         containers,
@@ -310,59 +374,19 @@ def test_mock_scheduler_bootstrap_completes_project_end_to_end(http_client: Test
         loop.close()
 
     assert project.project.status == "completed"
-    assert [fact.id for fact in project.facts] == ["origin", "goal", "f001"]
-    assert [(intent.id, intent.to) for intent in project.intents] == [("i001", "f001"), ("i002", "goal")]
+    assert [fact.id for fact in project.facts] == ["origin"]
+    assert project.goals[0].status == "achieved"
+    assert [step.kind for step in project.steps] == ["completion"]
+    assert any("/decide-" in path for _, path, _ in containers.writes)
 
 
-def test_mock_scheduler_runs_reason_explore_reason_complete_chain(http_client: TestClient) -> None:
+def test_mock_decide_execute_decide_complete_chain(http_client: TestClient) -> None:
     client = InProcessClient(http_client)
     containers = LocalContainerManager()
     loop = _loop(
         _config(
-            bootstrap=_phase("complete"),
-            reason=_phase("intent", rules=[{"fact_ids_gte": 3, "force": "complete"}]),
-            explore=_phase("fact"),
-        ),
-        client,
-        containers,
-    )
-    project_id = _create_project(http_client)
-    seed = client.create_intent(project_id, ["origin"], "seed", "seed-worker")
-    assert seed.ok
-    assert client.heartbeat(project_id, "i001", "seed-worker").ok
-    assert client.conclude(project_id, "i001", "seed-worker", "seed fact").ok
-
-    try:
-        _dispatch_and_wait(loop)
-        assert loop.reason_checkpoints[project_id] == ReasonCheckpoint(3, 0, 0)
-        _dispatch_and_wait(loop)
-        _dispatch_and_wait(loop)
-        project = client.get_project(project_id)
-    finally:
-        loop.close()
-
-    assert project.project.status == "completed"
-    assert [fact.id for fact in project.facts] == ["origin", "goal", "f001", "f002"]
-    assert [(intent.id, intent.to) for intent in project.intents] == [
-        ("i001", "f001"),
-        ("i002", "f002"),
-        ("i003", "goal"),
-    ]
-    assert any("/reason_execute-" in path and "f002" in content for _, path, content in containers.writes)
-    assert any("/explore_execute-" in path and "f001" in content for _, path, content in containers.writes)
-
-
-def test_mock_scheduler_enabled_project_skips_bootstrap_when_worker_does_not_support_it(
-    http_client: TestClient,
-) -> None:
-    client = InProcessClient(http_client)
-    containers = LocalContainerManager()
-    loop = _loop(
-        _config(
-            bootstrap=_phase("complete"),
-            reason=_phase("complete", zero_outcomes=["intent"]),
-            explore=_phase("fact"),
-            task_types=["reason", "explore"],
+            decide=_phase("steps", rules=[{"fact_ids_gte": 2, "force": "complete"}]),
+            execute=_phase("facts"),
         ),
         client,
         containers,
@@ -370,26 +394,35 @@ def test_mock_scheduler_enabled_project_skips_bootstrap_when_worker_does_not_sup
     project_id = _create_project(http_client)
 
     try:
-        _dispatch_and_wait(loop)
+        _dispatch_and_wait(loop)   # decide: one step from origin
+        project = client.get_project(project_id)
+        assert project.project.status == "active"
+        assert [(step.id, step.status) for step in project.steps] == [("s001", "pending")]
+
+        _dispatch_and_wait(loop)   # execute: fact + finding
+        project = client.get_project(project_id)
+        assert [fact.id for fact in project.facts] == ["origin", "f001"]
+        assert [finding.kind for finding in project.findings] == ["mock"]
+
+        _dispatch_and_wait(loop)   # decide: facts grew -> complete
         project = client.get_project(project_id)
     finally:
         loop.close()
 
     assert project.project.status == "completed"
-    assert [(intent.description, intent.to) for intent in project.intents] == [
-        ("mock complete from origin", "goal")
-    ]
+    assert [step.kind for step in project.steps] == ["action", "completion"]
+    assert any("/decide-" in path and "s001" in content for _, path, content in containers.writes)
+    assert any("/execute-" in path for _, path, _ in containers.writes)
 
 
-def test_task_healthcheck_healthy_worker_completes_end_to_end(http_client: TestClient) -> None:
+def test_mock_execute_only_worker_keeps_project_active(http_client: TestClient) -> None:
     client = InProcessClient(http_client)
     containers = LocalContainerManager()
     loop = _loop(
         _config(
-            bootstrap=_phase("complete"),
-            reason=_phase("complete", zero_outcomes=["intent"]),
-            explore=_phase("fact"),
-            worker_healthcheck="startup_and_task",
+            decide=_phase("steps"),
+            execute=_phase("facts"),
+            task_types=["execute"],
         ),
         client,
         containers,
@@ -397,23 +430,24 @@ def test_task_healthcheck_healthy_worker_completes_end_to_end(http_client: TestC
     project_id = _create_project(http_client)
 
     try:
-        _dispatch_and_wait(loop)
+        summaries = client.list_projects()
+        loop._dispatch_available(summaries)
         project = client.get_project(project_id)
     finally:
         loop.close()
 
-    # code-based check_health runs before the task, passes, and the bootstrap completes
-    assert project.project.status == "completed"
+    assert project.project.status == "active"
+    assert project.steps == []
+    assert not loop.futures
 
 
-def test_task_healthcheck_failure_aborts_task_and_cools_down_worker(http_client: TestClient) -> None:
+def test_task_healthcheck_failure_aborts_decide_and_cools_down_worker(http_client: TestClient) -> None:
     client = InProcessClient(http_client)
     containers = LocalContainerManager()
     loop = _loop(
         _config(
-            bootstrap=_phase("complete"),
-            reason=_phase("complete", zero_outcomes=["intent"]),
-            explore=_phase("fact"),
+            decide=_phase("complete", zero_outcomes=["steps"]),
+            execute=_phase("facts"),
             worker_healthcheck="startup_and_task",
             healthcheck=_phase("fail", zero_outcomes=["ok"]),
         ),
@@ -428,10 +462,32 @@ def test_task_healthcheck_failure_aborts_task_and_cools_down_worker(http_client:
     finally:
         loop.close()
 
-    # unhealthy worker -> task aborted before execution, no facts written, worker put on cooldown
     assert project.project.status == "active"
-    assert [fact.id for fact in project.facts] == ["origin", "goal"]
+    assert [fact.id for fact in project.facts] == ["origin"]
     assert "mock-worker" in loop.worker_unhealthy_until
+
+
+def test_task_healthcheck_healthy_worker_completes_end_to_end(http_client: TestClient) -> None:
+    client = InProcessClient(http_client)
+    containers = LocalContainerManager()
+    loop = _loop(
+        _config(
+            decide=_phase("complete", zero_outcomes=["steps"]),
+            execute=_phase("facts"),
+            worker_healthcheck="startup_and_task",
+        ),
+        client,
+        containers,
+    )
+    project_id = _create_project(http_client)
+
+    try:
+        _dispatch_and_wait(loop)
+        project = client.get_project(project_id)
+    finally:
+        loop.close()
+
+    assert project.project.status == "completed"
 
 
 def _failover_config() -> DispatchConfig:
@@ -439,14 +495,14 @@ def _failover_config() -> DispatchConfig:
         return {
             "name": name,
             "type": "mock",
-            "task_types": ["bootstrap", "reason", "explore"],
+            "task_types": ["decide", "execute"],
             "max_running": 1,
             "priority": priority,
             "env": {
                 "MOCK_HEALTHCHECK": healthcheck,
-                "MOCK_BOOTSTRAP": _phase("complete"),
-                "MOCK_REASON": _phase("complete", zero_outcomes=["intent"]),
-                "MOCK_EXPLORE_EXECUTE": _phase("fact"),
+                "MOCK_DECIDE": _phase("complete", zero_outcomes=["steps"]),
+                "MOCK_EXECUTE": _phase("facts"),
+                "MOCK_EXECUTE_CONCLUDE": _phase("facts"),
             },
         }
 
@@ -463,9 +519,8 @@ def _failover_config() -> DispatchConfig:
                 "prompt_group": "mock",
             },
             "tasks": {
-                "bootstrap": {"timeout": 2, "conclude_timeout": 2},
-                "reason": {"timeout": 2, "max_intents": 1},
-                "explore": {"timeout": 2, "conclude_timeout": 2},
+                "decide": {"timeout": 2, "max_steps": 1},
+                "execute": {"timeout": 2, "conclude_timeout": 2},
             },
             "container": {"image": "unused", "network_mode": "host", "completed_action": "stop"},
             "workers": [
@@ -495,4 +550,23 @@ def test_unhealthy_worker_fails_over_to_healthy_worker(http_client: TestClient) 
         loop.close()
 
     assert project.project.status == "completed"
-    assert any(intent.worker == "good" for intent in project.intents)
+
+
+def test_decide_checkpoint_tracks_graph_after_decide_run(http_client: TestClient) -> None:
+    client = InProcessClient(http_client)
+    loop = _loop(
+        _config(decide=_phase("steps"), execute=_phase("facts")),
+        client,
+        LocalContainerManager(),
+    )
+    project_id = _create_project(http_client)
+
+    try:
+        _dispatch_and_wait(loop)
+        checkpoint = loop.decide_checkpoints[project_id]
+        summary = client.list_projects()[0]
+    finally:
+        loop.close()
+
+    assert checkpoint.open_step_count == summary.pending_step_count == 1
+    assert checkpoint.fact_count == summary.fact_count

@@ -68,7 +68,7 @@ def test_proxies_from_env() -> None:
 
 def _worker(worker_type: str, env: dict[str, str]) -> WorkerConfig:
     return WorkerConfig.model_validate(
-        {"name": worker_type, "type": worker_type, "task_types": ["reason"], "max_running": 1, "priority": 0, "env": env}
+        {"name": worker_type, "type": worker_type, "task_types": ["decide"], "max_running": 1, "priority": 0, "env": env}
     )
 
 
@@ -156,15 +156,14 @@ def test_run_startup_healthchecks_reports_each_worker() -> None:
                 "prompt_group": "default",
             },
             "tasks": {
-                "bootstrap": {"timeout": 10, "conclude_timeout": 5},
-                "reason": {"timeout": 10, "max_intents": 3},
-                "explore": {"timeout": 10, "conclude_timeout": 5},
+                "decide": {"timeout": 10, "max_steps": 3},
+                "execute": {"timeout": 10, "conclude_timeout": 5},
             },
             "container": {"image": "img", "network_mode": "host", "completed_action": "stop"},
             "workers": [
-                {"name": "ok-worker", "type": "mock", "task_types": ["reason"], "max_running": 1, "priority": 0,
+                {"name": "ok-worker", "type": "mock", "task_types": ["decide"], "max_running": 1, "priority": 0,
                  "env": {"MOCK_HEALTHCHECK": '{"delay":[0,0],"outcomes":{"ok":1.0,"fail":0.0}}'}},
-                {"name": "fail-worker", "type": "mock", "task_types": ["reason"], "max_running": 1, "priority": 0,
+                {"name": "fail-worker", "type": "mock", "task_types": ["decide"], "max_running": 1, "priority": 0,
                  "env": {"MOCK_HEALTHCHECK": '{"delay":[0,0],"outcomes":{"ok":0.0,"fail":1.0}}'}},
             ],
         }

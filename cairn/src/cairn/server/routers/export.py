@@ -1,10 +1,11 @@
+from datetime import datetime
+
+import yaml
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
-from datetime import datetime
-import yaml
 
 from cairn.server.db import get_conn
-from cairn.server.services import expire_reason_leases, expire_workers, get_project_or_404
+from cairn.server.services import expire_decide_leases, expire_steps, get_project_or_404
 
 router = APIRouter(tags=["export"])
 
@@ -20,50 +21,37 @@ def format_export_timestamp(value: str | None) -> str | None:
 
 
 def _load_project_data(conn, project_id: str):
-    expire_workers(conn, project_id)
-    expire_reason_leases(conn, project_id)
+    expire_steps(conn, project_id)
+    expire_decide_leases(conn, project_id)
     proj = get_project_or_404(conn, project_id)
 
-    facts = conn.execute(
-        "SELECT id, description FROM facts WHERE project_id = ?", (project_id,)
-    ).fetchall()
-    hints = conn.execute(
-        "SELECT content, creator, created_at FROM hints WHERE project_id = ? ORDER BY created_at",
-        (project_id,),
-    ).fetchall()
-    intents = conn.execute(
-        "SELECT * FROM intents WHERE project_id = ? ORDER BY created_at",
-        (project_id,),
-    ).fetchall()
+    def rows(query: str):
+        return conn.execute(query, (project_id,)).fetchall()
 
-    sources_by_intent = {}
-    for i in intents:
-        rows = conn.execute(
-            "SELECT fact_id FROM intent_sources WHERE intent_id = ? AND project_id = ? ORDER BY rowid",
-            (i["id"], project_id),
+    facts = rows("SELECT id, description, step_id, created_at FROM facts WHERE project_id = ? ORDER BY rowid")
+    goals = rows("SELECT * FROM goals WHERE project_id = ? ORDER BY created_at, rowid")
+    steps = rows("SELECT * FROM steps WHERE project_id = ? ORDER BY created_at, rowid")
+    findings = rows("SELECT * FROM findings WHERE project_id = ? ORDER BY created_at, rowid")
+    hints = rows("SELECT content, creator, created_at FROM hints WHERE project_id = ? ORDER BY created_at")
+
+    sources_by_step: dict[str, list[str]] = {}
+    for step in steps:
+        source_rows = conn.execute(
+            "SELECT fact_id FROM step_sources WHERE step_id = ? AND project_id = ? ORDER BY rowid",
+            (step["id"], project_id),
         ).fetchall()
-        sources_by_intent[i["id"]] = [r["fact_id"] for r in rows]
+        sources_by_step[step["id"]] = [r["fact_id"] for r in source_rows]
 
-    return proj, facts, hints, intents, sources_by_intent
+    return proj, facts, goals, steps, findings, hints, sources_by_step
 
 
 def _export_yaml(conn, project_id: str) -> str:
-    proj, facts, hints, intents, sources_by_intent = _load_project_data(conn, project_id)
-
-    origin_desc = ""
-    goal_desc = ""
-    for f in facts:
-        if f["id"] == "origin":
-            origin_desc = f["description"]
-        elif f["id"] == "goal":
-            goal_desc = f["description"]
+    proj, facts, goals, steps, findings, hints, sources_by_step = _load_project_data(conn, project_id)
 
     data: dict = {
         "project": {
             "title": proj["title"],
-            "origin": origin_desc,
-            "goal": goal_desc,
-            "bootstrap_enabled": bool(proj["bootstrap_enabled"]),
+            "status": proj["status"],
         }
     }
 
@@ -77,37 +65,62 @@ def _export_yaml(conn, project_id: str) -> str:
             for h in hints
         ]
 
-    data["facts"] = [{"id": f["id"], "description": f["description"]} for f in facts]
-
-    intent_list = []
-    for i in intents:
-        entry: dict = {
-            "from": sources_by_intent.get(i["id"], []),
-            "to": i["to_fact_id"],
-            "description": i["description"],
-            "creator": i["creator"],
-            "worker": i["worker"],
-            "created_at": format_export_timestamp(i["created_at"]),
-            "concluded_at": format_export_timestamp(i["concluded_at"]),
+    data["facts"] = [
+        {"id": f["id"], "description": f["description"], "from_step": f["step_id"]} for f in facts
+    ]
+    data["goals"] = [
+        {
+            "id": g["id"],
+            "parent": g["parent_id"],
+            "description": g["description"],
+            "status": g["status"],
         }
-        intent_list.append(entry)
-
-    if intent_list:
-        data["intents"] = intent_list
+        for g in goals
+    ]
+    if steps:
+        data["steps"] = [
+            {
+                "id": s["id"],
+                "from": sources_by_step.get(s["id"], []),
+                "goal": s["goal_id"],
+                "kind": s["kind"],
+                "description": s["description"],
+                "rationale": s["rationale"],
+                "priority": s["priority"],
+                "status": s["status"],
+                "worker": s["worker"],
+                "result": s["result_fact_id"],
+                "note": s["note"],
+            }
+            for s in steps
+        ]
+    if findings:
+        data["findings"] = [
+            {
+                "id": d["id"],
+                "kind": d["kind"],
+                "description": d["description"],
+                "step": d["step_id"],
+                "created_at": format_export_timestamp(d["created_at"]),
+            }
+            for d in findings
+        ]
 
     return yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
 
 def _export_timeline(conn, project_id: str) -> str:
-    proj, facts, hints, intents, sources_by_intent = _load_project_data(conn, project_id)
+    proj, facts, goals, steps, findings, hints, sources_by_step = _load_project_data(conn, project_id)
 
     facts_by_id = {f["id"]: f["description"] for f in facts}
+    goals_by_id = {g["id"]: g["description"] for g in goals}
 
     events: list[tuple[str, int, str]] = []  # (timestamp, order, text)
     order = 0
 
     origin_desc = facts_by_id.get("origin", "")
-    goal_desc = facts_by_id.get("goal", "")
+    roots = [g for g in goals if g["parent_id"] is None]
+    goal_desc = roots[0]["description"] if roots else ""
     ts = format_export_timestamp(proj["created_at"]) or ""
     block = f"[{ts}] PROJECT CREATED\n  origin: {origin_desc}\n  goal: {goal_desc}"
     events.append((proj["created_at"] or "", order, block))
@@ -119,31 +132,61 @@ def _export_timeline(conn, project_id: str) -> str:
         events.append((h["created_at"] or "", order, block))
         order += 1
 
-    for i in intents:
-        src = sources_by_intent.get(i["id"], [])
-        from_str = ", ".join(src)
+    for g in goals:
+        ts = format_export_timestamp(g["created_at"]) or ""
+        parent = g["parent_id"] or "-"
+        block = (
+            f"[{ts}] GOAL DECLARED {g['id']} by {g['creator']}\n"
+            f"  parent: {parent}\n  {g['description']}"
+        )
+        events.append((g["created_at"] or "", order, block))
+        order += 1
+        if g["status"] == "achieved" and g["parent_id"] is not None:
+            ts = format_export_timestamp(g["closed_at"]) or ""
+            events.append((g["closed_at"] or "", order, f"[{ts}] GOAL ACHIEVED {g['id']}"))
+            order += 1
+        elif g["status"] == "abandoned":
+            ts = format_export_timestamp(g["closed_at"]) or ""
+            events.append((g["closed_at"] or "", order, f"[{ts}] GOAL DROPPED {g['id']}"))
+            order += 1
 
-        ts = format_export_timestamp(i["created_at"]) or ""
-        meta = f"  from: {from_str}"
-        if i["worker"] and not i["concluded_at"]:
-            meta += f"\n  worker: {i['worker']} (in progress)"
-        block = f"[{ts}] INTENT DECLARED {i['id']} by {i['creator']}\n{meta}\n  {i['description']}"
-        events.append((i["created_at"] or "", order, block))
+    for s in steps:
+        src = sources_by_step.get(s["id"], [])
+        from_str = ", ".join(src)
+        ts = format_export_timestamp(s["created_at"]) or ""
+        meta = f"  from: {from_str}\n  priority: {s['priority']}"
+        if s["worker"] and s["status"] == "running":
+            meta += f"\n  worker: {s['worker']} (in progress)"
+        block = f"[{ts}] STEP DECLARED {s['id']} by {s['creator']}\n{meta}\n  {s['description']}"
+        events.append((s["created_at"] or "", order, block))
         order += 1
 
-        if not i["concluded_at"] or not i["to_fact_id"]:
+        if s["status"] not in ("done", "abandoned"):
             continue
 
-        ts = format_export_timestamp(i["concluded_at"]) or ""
-        actor = i["worker"] or i["creator"]
-
-        if i["to_fact_id"] == "goal":
-            block = f"[{ts}] PROJECT COMPLETED by {actor}\n  via: {i['id']} from {from_str}"
+        ts = format_export_timestamp(s["concluded_at"]) or ""
+        actor = s["worker"] or s["creator"]
+        if s["kind"] == "completion":
+            block = f"[{ts}] PROJECT COMPLETED by {actor}\n  via: {s['id']} from {from_str}\n  {s['description']}"
+        elif s["status"] == "abandoned":
+            block = f"[{ts}] STEP ABANDONED {s['id']} by {actor}\n  {s['note'] or ''}"
         else:
-            fact_desc = facts_by_id.get(i["to_fact_id"], "")
-            block = f"[{ts}] INTENT CONCLUDED {i['id']} by {actor}\n  from: {from_str}\n  produced: {i['to_fact_id']}\n  {fact_desc}"
+            fact_desc = facts_by_id.get(s["result_fact_id"] or "", "")
+            produced = s["result_fact_id"] or "no fact"
+            block = (
+                f"[{ts}] STEP CONCLUDED {s['id']} by {actor}\n"
+                f"  from: {from_str}\n  produced: {produced}\n  {fact_desc}"
+            )
+        events.append((s["concluded_at"] or "", order, block))
+        order += 1
 
-        events.append((i["concluded_at"] or "", order, block))
+    for d in findings:
+        ts = format_export_timestamp(d["created_at"]) or ""
+        block = (
+            f"[{ts}] FINDING {d['id']} ({d['kind']}) by {d['creator']}\n"
+            f"  step: {d['step_id'] or '-'}\n  {d['description']}"
+        )
+        events.append((d["created_at"] or "", order, block))
         order += 1
 
     events.sort(key=lambda e: (e[0], e[1]))

@@ -22,12 +22,12 @@ delay=phase_cfg["delay"]
 time.sleep(random.uniform(delay["min"],delay["max"]))
 
 weights=dict(phase_cfg["outcomes"])
-if phase=="reason":
-    if not prompt.get("open_intents"):
+if phase=="decide":
+    if not prompt.get("open_steps"):
         weights.pop("noop",None)
     if not prompt.get("fact_ids"):
         weights.pop("complete",None)
-        weights.pop("intent",None)
+        weights.pop("steps",None)
 choices=[(name,weight) for name,weight in weights.items() if weight>0]
 if not choices:
     print(f"mock {phase} has no legal outcomes for prompt context", file=sys.stderr)
@@ -35,12 +35,12 @@ if not choices:
 
 def _rule_matches(rule, prompt):
     fact_ids = prompt.get("fact_ids") or []
-    open_intents = prompt.get("open_intents") or []
+    open_steps = prompt.get("open_steps") or []
     if "fact_ids_gte" in rule and len(fact_ids) < rule["fact_ids_gte"]:
         return False
     if "fact_ids_lte" in rule and len(fact_ids) > rule["fact_ids_lte"]:
         return False
-    if "open_intents_empty" in rule and (len(open_intents) == 0) != rule["open_intents_empty"]:
+    if "open_steps_empty" in rule and (len(open_steps) == 0) != rule["open_steps_empty"]:
         return False
     return True
 
@@ -71,19 +71,23 @@ if outcome=="command_fail":
 if outcome=="invalid_json":
     print("{invalid json")
     raise SystemExit(0)
-if phase=="reason":
+if phase=="decide":
     fact_ids=prompt.get("fact_ids") or []
-    max_i=prompt.get("max_intents",3)
+    open_steps=prompt.get("open_steps") or []
+    max_s=prompt.get("max_steps",3)
     from_ids=[random.choice(fact_ids)] if fact_ids else []
     if outcome=="complete":
         print(json.dumps({"accepted":True,"data":{"complete":{"from":from_ids,"description":f"mock complete from {from_ids[0]}"}}}, ensure_ascii=False))
-    elif outcome=="intent":
-        count=random.randint(1,max(1,max_i))
-        intents=[]
+    elif outcome=="steps":
+        count=random.randint(1,max(1,max_s))
+        steps=[]
         for idx in range(count):
             fi=[random.choice(fact_ids)] if fact_ids else []
-            intents.append({"from":fi,"description":f"mock intent {idx+1} from {fi[0] if fi else 'none'}"})
-        print(json.dumps({"accepted":True,"data":{"intents":intents}}, ensure_ascii=False))
+            steps.append({"from":fi,"description":f"mock step {idx+1} from {fi[0] if fi else 'none'}","priority":idx})
+        payload={"steps":steps}
+        if open_steps:
+            payload["steps"]={"add":steps,"update":[{"id":open_steps[0]["id"],"priority":1}]}
+        print(json.dumps({"accepted":True,"data":payload}, ensure_ascii=False))
     elif outcome=="noop":
         print(json.dumps({"accepted":True,"data":{}}, ensure_ascii=False))
     elif outcome=="rejected":
@@ -92,29 +96,9 @@ if phase=="reason":
         print(json.dumps({"accepted":True,"data":{"complete":{"description":"mock invalid payload"}}}, ensure_ascii=False))
     raise SystemExit(0)
 
-if phase=="bootstrap":
-    if outcome=="complete":
-        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact for bootstrap"},"complete":{"description":"mock bootstrap complete from fact"}}}, ensure_ascii=False))
-    elif outcome=="fact":
-        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact-only bootstrap result"}}}, ensure_ascii=False))
-    elif outcome=="rejected":
-        print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
-    else:
-        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock invalid payload"}}}, ensure_ascii=False))
-    raise SystemExit(0)
-
-if phase=="bootstrap_conclude":
-    if outcome=="fact":
-        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact for bootstrap_conclude"}}}, ensure_ascii=False))
-    elif outcome=="rejected":
-        print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
-    else:
-        print(json.dumps({"accepted":True,"data":{"complete":{"description":"mock invalid payload"}}}, ensure_ascii=False))
-    raise SystemExit(0)
-
-if outcome=="fact":
-    label = prompt.get("intent_id") or phase
-    print(json.dumps({"accepted":True,"data":{"description":f"mock fact for {label}"}} , ensure_ascii=False))
+if outcome=="facts":
+    label = prompt.get("step_id") or phase
+    print(json.dumps({"accepted":True,"data":{"facts":[{"description":f"mock fact for {label}"}],"findings":[{"kind":"mock","description":f"mock finding for {label}"}],"status":"done"}}, ensure_ascii=False))
 elif outcome=="rejected":
     print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
 else:

@@ -26,12 +26,10 @@ runtime:
   prompt_group: "default"
 
 tasks:
-  bootstrap:
+  decide:
     timeout: 120
-    conclude_timeout: 30
-  reason:
-    timeout: 45
-  explore:
+    max_steps: 3
+  execute:
     timeout: 600
     conclude_timeout: 120
 
@@ -54,18 +52,18 @@ local:
 workers:
   - name: "local-claude"
     type: "claudecode"
-    task_types: [bootstrap, reason, explore]
+    task_types: [decide, execute]
     max_running: 1
     priority: 0
 
   # - name: "local-codex"
   #   type: "codex"
-  #   task_types: [explore]
+  #   task_types: [execute]
   #   max_running: 1
   #   priority: 1
 
   # - name: "local-pi"
   #   type: "pi"
-  #   task_types: [reason]
+  #   task_types: [decide]
   #   max_running: 1
   #   priority: 2

@@ -10,7 +10,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-TaskType = Literal["reason", "explore", "bootstrap"]
+TaskType = Literal["decide", "execute"]
 WorkerType = Literal["claudecode", "codex", "pi", "mock"]
 CompletedAction = Literal["remove", "stop"]
 WorkerHealthcheckMode = Literal["startup_and_task", "startup_only", "disabled"]
@@ -38,30 +38,24 @@ WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
 }
 
 DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
-    "reason.md": ("{graph_yaml}", "{fact_ids}", "{open_intents}", "{max_intents}"),
-    "explore.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
-    "explore_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
-    "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
-    "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
+    "decide.md": ("{graph_yaml}", "{fact_ids}", "{open_steps}", "{max_steps}"),
+    "execute.md": ("{graph_yaml}", "{step_id}", "{step_description}"),
+    "execute_conclude.md": ("{graph_yaml}", "{step_id}", "{step_description}"),
 }
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
     "mock": {
-        "reason.md": ("{fact_ids}", "{open_intents}", "{max_intents}"),
-        "explore.md": ("{intent_id}",),
-        "explore_conclude.md": ("{intent_id}",),
-        "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
-        "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
+        "decide.md": ("{fact_ids}", "{open_steps}", "{max_steps}"),
+        "execute.md": ("{step_id}",),
+        "execute_conclude.md": ("{step_id}",),
     }
 }
 
 MOCK_ALLOWED_OUTCOMES: dict[str, frozenset[str]] = {
     "healthcheck": frozenset({"ok", "fail"}),
-    "reason": frozenset({"complete", "intent", "noop", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "explore_execute": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "explore_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "bootstrap": frozenset({"complete", "fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "bootstrap_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "decide": frozenset({"complete", "steps", "noop", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "execute": frozenset({"facts", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "execute_conclude": frozenset({"facts", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
 }
 
 MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
@@ -69,11 +63,11 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
         "delay": [0.05, 0.15],
         "outcomes": {"ok": "1.0", "fail": "0.0"},
     },
-    "reason": {
+    "decide": {
         "delay": [0.05, 0.3],
         "outcomes": {
             "complete": "0.0",
-            "intent": "1.0",
+            "steps": "1.0",
             "noop": "0.0",
             "rejected": "0.0",
             "invalid_json": "0.0",
@@ -81,41 +75,20 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
             "command_fail": "0.0",
         },
     },
-    "explore_execute": {
+    "execute": {
         "delay": [0.05, 0.3],
         "outcomes": {
-            "fact": "1.0",
+            "facts": "1.0",
             "rejected": "0.0",
             "invalid_json": "0.0",
             "invalid_payload": "0.0",
             "command_fail": "0.0",
         },
     },
-    "explore_conclude": {
+    "execute_conclude": {
         "delay": [0.05, 0.3],
         "outcomes": {
-            "fact": "1.0",
-            "rejected": "0.0",
-            "invalid_json": "0.0",
-            "invalid_payload": "0.0",
-            "command_fail": "0.0",
-        },
-    },
-    "bootstrap": {
-        "delay": [0.05, 0.3],
-        "outcomes": {
-            "complete": "1.0",
-            "fact": "0.0",
-            "rejected": "0.0",
-            "invalid_json": "0.0",
-            "invalid_payload": "0.0",
-            "command_fail": "0.0",
-        },
-    },
-    "bootstrap_conclude": {
-        "delay": [0.05, 0.3],
-        "outcomes": {
-            "fact": "1.0",
+            "facts": "1.0",
             "rejected": "0.0",
             "invalid_json": "0.0",
             "invalid_payload": "0.0",
@@ -129,25 +102,23 @@ MOCK_ALLOWED_ENV_KEYS = frozenset(
 )
 
 
-class ReasonTaskConfig(BaseModel):
+class DecideTaskConfig(BaseModel):
+    """Decide inspects the FGS graph and evolves it. It has no world tools."""
+
     timeout: int = Field(gt=0)
-    max_intents: int = Field(gt=0, default=3)
+    max_steps: int = Field(gt=0, default=3)
 
 
-class ExploreTaskConfig(BaseModel):
-    timeout: int = Field(gt=0)
-    conclude_timeout: int = Field(gt=0)
+class ExecuteTaskConfig(BaseModel):
+    """Execute claims one step, acts on the world and submits facts/findings."""
 
-
-class BootstrapTaskConfig(BaseModel):
     timeout: int = Field(gt=0)
     conclude_timeout: int = Field(gt=0)
 
 
 class TasksConfig(BaseModel):
-    bootstrap: BootstrapTaskConfig
-    reason: ReasonTaskConfig
-    explore: ExploreTaskConfig
+    decide: DecideTaskConfig
+    execute: ExecuteTaskConfig
 
 
 class ContainerConfig(BaseModel):
@@ -366,11 +337,11 @@ def resolve_mock_behavior(worker_name: str, env: dict[str, str]) -> dict[str, di
                     if not isinstance(value, int) or value < 0:
                         raise ValueError(f"worker {worker_name} {prefix}.rules[{index}].fact_ids_lte must be a non-negative integer")
                     entry["fact_ids_lte"] = value
-                if "open_intents_empty" in rule:
-                    value = rule["open_intents_empty"]
+                if "open_steps_empty" in rule:
+                    value = rule["open_steps_empty"]
                     if not isinstance(value, bool):
-                        raise ValueError(f"worker {worker_name} {prefix}.rules[{index}].open_intents_empty must be boolean")
-                    entry["open_intents_empty"] = value
+                        raise ValueError(f"worker {worker_name} {prefix}.rules[{index}].open_steps_empty must be boolean")
+                    entry["open_steps_empty"] = value
                 normalized_rules.append(entry)
             behavior[phase]["rules"] = normalized_rules
     return behavior

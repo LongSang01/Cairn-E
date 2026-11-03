@@ -52,7 +52,7 @@ def test_pi_worker_rejects_invalid_context_window() -> None:
             {
                 "name": "pi",
                 "type": "pi",
-                "task_types": ["explore"],
+                "task_types": ["execute"],
                 "max_running": 1,
                 "priority": 0,
                 "env": {
@@ -72,7 +72,7 @@ def test_mock_worker_rejects_unknown_phase_configuration() -> None:
             {
                 "name": "mock",
                 "type": "mock",
-                "task_types": ["explore"],
+                "task_types": ["execute"],
                 "max_running": 1,
                 "priority": 0,
                 "env": {"MOCK_UNKNOWN": "{}"},
@@ -90,7 +90,7 @@ def test_pi_driver_models_json_and_execute_argv_include_context_window_and_tools
         {
             "name": "pi-worker",
             "type": "pi",
-            "task_types": ["explore"],
+            "task_types": ["execute"],
             "max_running": 1,
             "priority": 0,
             "env": {
@@ -116,7 +116,7 @@ def test_codex_driver_execute_argv_passes_model_endpoint_and_prompt() -> None:
         {
             "name": "codex",
             "type": "codex",
-            "task_types": ["reason"],
+            "task_types": ["decide"],
             "max_running": 1,
             "priority": 0,
             "env": {

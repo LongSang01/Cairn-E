@@ -9,7 +9,7 @@ from pydantic import TypeAdapter
 import requests
 from requests.adapters import HTTPAdapter
 
-from cairn.server.models import Intent, ProjectDetail, ProjectSummary, Settings
+from cairn.server.models import ProjectDetail, ProjectSummary, Settings
 
 LOG = logging.getLogger(__name__)
 
@@ -72,46 +72,119 @@ class CairnClient:
         response.raise_for_status()
         return response.text
 
-    def heartbeat(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
+    # --- Execute: claim / keep / release a step, then submit its result -------------
+
+    def heartbeat_step(self, project_id: str, step_id: str, worker: str) -> ApiResult:
         return self._request_json(
-            "POST",
-            f"/projects/{project_id}/intents/{intent_id}/heartbeat",
-            json={"worker": worker},
+            "POST", f"/projects/{project_id}/steps/{step_id}/heartbeat", json={"worker": worker}
         )
 
-    def claim_reason(self, project_id: str, worker: str, trigger: str) -> ApiResult:
+    def release_step(self, project_id: str, step_id: str, worker: str) -> ApiResult:
         return self._request_json(
-            "POST",
-            f"/projects/{project_id}/reason/claim",
-            json={"worker": worker, "trigger": trigger},
+            "POST", f"/projects/{project_id}/steps/{step_id}/release", json={"worker": worker}
         )
 
-    def reason_heartbeat(self, project_id: str, worker: str) -> ApiResult:
+    def conclude_step(
+        self,
+        project_id: str,
+        step_id: str,
+        worker: str,
+        *,
+        facts: list[str],
+        findings: list[dict[str, str]],
+        status: str = "done",
+        note: str | None = None,
+    ) -> ApiResult:
         return self._request_json(
             "POST",
-            f"/projects/{project_id}/reason/heartbeat",
-            json={"worker": worker},
+            f"/projects/{project_id}/steps/{step_id}/conclude",
+            json={
+                "worker": worker,
+                "status": status,
+                "facts": [{"description": description} for description in facts],
+                "findings": findings,
+                "note": note,
+            },
         )
 
-    def release_reason(self, project_id: str, worker: str) -> ApiResult:
+    # --- Decide: serial lease per project, then graph mutations --------------------
+
+    def claim_decide(self, project_id: str, worker: str, trigger: str) -> ApiResult:
         return self._request_json(
-            "POST",
-            f"/projects/{project_id}/reason/release",
-            json={"worker": worker},
+            "POST", f"/projects/{project_id}/decide/claim", json={"worker": worker, "trigger": trigger}
         )
 
-    def release(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
+    def decide_heartbeat(self, project_id: str, worker: str) -> ApiResult:
         return self._request_json(
-            "POST",
-            f"/projects/{project_id}/intents/{intent_id}/release",
-            json={"worker": worker},
+            "POST", f"/projects/{project_id}/decide/heartbeat", json={"worker": worker}
         )
 
-    def conclude(self, project_id: str, intent_id: str, worker: str, description: str) -> ApiResult:
+    def release_decide(self, project_id: str, worker: str) -> ApiResult:
+        return self._request_json(
+            "POST", f"/projects/{project_id}/decide/release", json={"worker": worker}
+        )
+
+    def create_step(
+        self,
+        project_id: str,
+        *,
+        from_ids: list[str],
+        description: str,
+        creator: str,
+        goal: str | None = None,
+        rationale: str | None = None,
+        priority: int = 0,
+    ) -> ApiResult:
         return self._request_json(
             "POST",
-            f"/projects/{project_id}/intents/{intent_id}/conclude",
-            json={"worker": worker, "description": description},
+            f"/projects/{project_id}/steps",
+            json={
+                "from": from_ids,
+                "description": description,
+                "creator": creator,
+                "goal": goal,
+                "rationale": rationale,
+                "priority": priority,
+                "worker": None,
+            },
+        )
+
+    def update_step(
+        self,
+        project_id: str,
+        step_id: str,
+        *,
+        priority: int | None = None,
+        status: str | None = None,
+        note: str | None = None,
+    ) -> ApiResult:
+        payload: dict[str, Any] = {}
+        if priority is not None:
+            payload["priority"] = priority
+        if status is not None:
+            payload["status"] = status
+        if note is not None:
+            payload["note"] = note
+        return self._request_json(
+            "POST", f"/projects/{project_id}/steps/{step_id}/update", json=payload
+        )
+
+    def create_goal(
+        self, project_id: str, *, description: str, creator: str, parent: str | None = None
+    ) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/goals",
+            json={"description": description, "creator": creator, "parent": parent},
+        )
+
+    def close_goal(
+        self, project_id: str, goal_id: str, *, status: str, worker: str, note: str | None = None
+    ) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/goals/{goal_id}/close",
+            json={"status": status, "worker": worker, "note": note},
         )
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
@@ -119,13 +192,6 @@ class CairnClient:
             "POST",
             f"/projects/{project_id}/complete",
             json={"from": from_ids, "description": description, "worker": worker},
-        )
-
-    def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:
-        return self._request_json(
-            "POST",
-            f"/projects/{project_id}/intents",
-            json={"from": from_ids, "description": description, "creator": creator, "worker": None},
         )
 
     def _request_json(self, method: str, path: str, json: dict[str, Any]) -> ApiResult:

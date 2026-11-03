@@ -48,17 +48,17 @@ This structure is not unique to penetration testing. Vulnerability research, mat
 
 Cairn is built for this class of problems. Penetration testing is the first domain it has been validated on.
 
-The engine is built on a **Blackboard Architecture** with an explicit fact-intent graph. Three primitives are all it needs:
+The engine is built on a **Blackboard Architecture** with an explicit **FGS graph** (Fact-Goal-Step). Three primitives are all it needs:
 
 | Concept | Meaning |
 |---------|---------|
-| **Fact** | A confirmed, objective finding written to the board |
-| **Intent** | A declared direction of exploration, not yet executed |
+| **Fact** | The confirmed world state, append-only |
+| **Goal** | A completion condition; the root goal is the task goal, and sub goals can be added or dropped at runtime |
+| **Step** | The next action and how it derives new facts from facts already on the board |
+| **Finding** | A structured product of the search, whose kind is defined by the task |
 | **Hint** | Human judgment injected at any time; absorbed by agents on the next read |
 
-The graph grows from `origin` toward `goal`. Every new Fact is a stepping stone; every Intent is a step into the unknown.
-
-Agent Workers run an OODA loop — Observe the full graph, Orient to the current state, Decide on next intents, Act to explore — and write their findings back as new Facts. Workers have no fixed roles. Tasks are generated at runtime from the graph's current state, not from predefined job descriptions.
+The graph grows from `origin` toward the root goal. Every Fact is a stepping stone; every Step is a causal edge from known facts to a new fact; Findings record what the search produced along the way.
 
 Agents coordinate exclusively through the shared board (Stigmergy). No direct communication. No information silos.
 
@@ -69,28 +69,29 @@ https://github.com/user-attachments/assets/e557b1ac-dda4-41cb-87dd-9d56dbf05133
 
 ## How It Works
 
-Three task types, all executed by the same Worker:
+Two activities, both the same runner injected with different prompts and tools — not fixed-role subagents:
 
-| Task | What it does | Output |
-|------|-------------|--------|
-| **Bootstrap** | At project start, attempts to solve the problem directly | Fact + possible Complete |
-| **Reason** | Reads the full graph: is the goal met? What should be explored next? | Complete / new Intents / no-op |
-| **Explore** | Claims one Intent, executes the exploration, reports findings | One Fact |
+| Activity | What it does | Tools | Output |
+|----------|--------------|-------|--------|
+| **Decide** | Reads the whole graph, then evaluates it: is the goal met? which steps matter? which sub goals are needed? | Graph only | Complete / add-reprioritize-abandon Steps / add-close Goals / no-op |
+| **Execute** | Claims one Step, acts on the real world, reports what it confirmed | World tools (read/bash/edit/write) + `submit_fact` / `submit_finding` | Facts + Findings + Step closure |
+
+Neither activity keeps a cross-session memory. The FGS graph is their shared, externalized memory; every run starts from a clean context.
 
 System architecture:
 
 ```
           ┌──────────────────────────────────┐
           │           Cairn Server           │
-          │    Facts + Intents + Hints       │
+          │ Facts + Goals + Steps + Findings │
           └─────────────────┬────────────────┘
                             │
                      Read / Write API
                             │
           ┌─────────────────┴────────────────┐
           │             Dispatcher           │
-          │   Schedules tasks, manages       │
-          │   containers, writes protocol    │
+          │   Schedules Decide/Execute,      │
+          │   manages containers, protocol   │
           └──────────┬───────────────┬───────┘
                      │               │
      ┌───────────────┴──┐     ┌──────┴──────────────┐

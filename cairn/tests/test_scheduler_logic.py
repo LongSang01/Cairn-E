@@ -2,18 +2,18 @@ from __future__ import annotations
 
 from concurrent.futures import Future
 
-from cairn.dispatcher.models import ReasonCheckpoint, RunningTask
+from cairn.dispatcher.models import DecideCheckpoint, RunningTask
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.scheduler.loop import DispatcherLoop
 from cairn.dispatcher.scheduler.worker_select import choose_worker
-from cairn.server.models import Fact, ProjectSummary
+from cairn.server.models import Fact, Finding, ProjectSummary
 
-from conftest import make_config, make_intent, make_project
+from conftest import make_config, make_project, make_step
 
 
 def _loop() -> DispatcherLoop:
     loop = DispatcherLoop.__new__(DispatcherLoop)
-    loop.reason_checkpoints = {}
+    loop.decide_checkpoints = {}
     loop.runtime_project_ids = set()
     loop.cleanup_futures = {}
     loop._cleanup_pending = set()
@@ -22,6 +22,7 @@ def _loop() -> DispatcherLoop:
     loop.worker_rejected_until = {}
     loop._log_state = {}
     loop.project_cursor = 0
+    loop.container_manager = type("Containers", (), {"container_name": lambda _self, project_id: project_id})()
     return loop
 
 
@@ -30,40 +31,51 @@ def _summary(project_id: str, status: str) -> ProjectSummary:
         id=project_id,
         title=project_id,
         status=status,
-        bootstrap_enabled=True,
         created_at="2026-01-01T00:00:00Z",
         fact_count=2,
-        intent_count=0,
-        working_intent_count=0,
-        unclaimed_intent_count=0,
+        goal_count=1,
+        open_goal_count=1,
+        step_count=0,
+        running_step_count=0,
+        pending_step_count=0,
+        finding_count=0,
         hint_count=0,
     )
 
 
-def test_reason_trigger_detects_new_facts_and_open_intent_completion() -> None:
+def test_decide_trigger_detects_new_facts_and_drained_steps() -> None:
     loop = _loop()
-    project = make_project(intents=[make_intent()])
-    loop.reason_checkpoints["proj_001"] = ReasonCheckpoint(
-        fact_count=3,
-        hint_count=1,
-        open_intent_count=1,
+    project = make_project(steps=[make_step()])
+    loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
+        fact_count=2, hint_count=1, finding_count=0, open_step_count=1
     )
     project.facts.append(Fact(id="f002", description="new"))
-    project.intents = []
+    project.steps = []
 
-    assert loop._reason_trigger(project) == "facts:3->4,open_intents:1->0"
+    assert loop._decide_trigger(project) == "facts:2->3,open_steps:1->0"
 
 
-def test_reason_trigger_returns_none_when_graph_is_unchanged() -> None:
+def test_decide_trigger_detects_new_findings() -> None:
     loop = _loop()
-    project = make_project(intents=[make_intent()])
-    loop.reason_checkpoints["proj_001"] = ReasonCheckpoint(
-        fact_count=3,
-        hint_count=1,
-        open_intent_count=1,
+    project = make_project()
+    loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
+        fact_count=2, hint_count=1, finding_count=0, open_step_count=0
+    )
+    project.findings.append(
+        Finding(id="d001", kind="flaw", description="found", step="s001", creator="w", created_at="2026-01-01T00:00:00Z")
     )
 
-    assert loop._reason_trigger(project) is None
+    assert loop._decide_trigger(project) == "findings:0->1"
+
+
+def test_decide_trigger_returns_none_when_graph_is_unchanged() -> None:
+    loop = _loop()
+    project = make_project(steps=[make_step()])
+    loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
+        fact_count=2, hint_count=1, finding_count=0, open_step_count=1
+    )
+
+    assert loop._decide_trigger(project) is None
 
 
 def test_refresh_runtime_projects_discards_active_and_changed_cleanup_markers() -> None:
@@ -122,17 +134,14 @@ def test_choose_worker_prefers_priority_then_lower_running_count() -> None:
     assert [worker.name for worker in ordered] == ["first", "busy", "lower"]
 
 
-def test_new_fact_dispatches_reason_before_unclaimed_explore_intent() -> None:
+def test_new_fact_dispatches_decide_before_pending_step() -> None:
     loop = _loop()
     loop.config = make_config()
     loop.futures = {}
-    project = make_project(intents=[make_intent()])
-    project.intents[0].worker = None
+    project = make_project(steps=[make_step()])
     project.facts.append(Fact(id="f002", description="new"))
-    loop.reason_checkpoints["proj_001"] = ReasonCheckpoint(
-        fact_count=3,
-        hint_count=1,
-        open_intent_count=1,
+    loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
+        fact_count=2, hint_count=1, finding_count=0, open_step_count=1
     )
     loop.container_manager = type("Containers", (), {"container_name": lambda _self, project_id: project_id})()
     loop.client = type(
@@ -144,50 +153,18 @@ def test_new_fact_dispatches_reason_before_unclaimed_explore_intent() -> None:
         },
     )()
     dispatched: list[tuple[str, str]] = []
-    loop._dispatch_reason = lambda _project, _graph, trigger: dispatched.append(("reason", trigger)) or True
-    loop._dispatch_explore = lambda *_args: dispatched.append(("explore", "")) or True
+    loop._dispatch_decide = lambda _project, _graph, trigger: dispatched.append(("decide", trigger)) or True
+    loop._dispatch_execute = lambda *_args: dispatched.append(("execute", "")) or True
 
     assert loop._try_dispatch_project(_summary("proj_001", "active"))
-    assert dispatched == [("reason", "facts:3->4")]
+    assert dispatched == [("decide", "facts:2->3")]
 
 
-def test_initial_enabled_project_without_bootstrap_worker_dispatches_reason() -> None:
-    loop = _loop()
-    config = make_config()
-    loop.config = config.model_copy(
-        update={
-            "workers": [
-                config.workers[0].model_copy(update={"task_types": ["reason", "explore"]})
-            ]
-        }
-    )
-    loop.futures = {}
-    project = make_project()
-    project.facts = project.facts[:2]
-    loop.container_manager = type("Containers", (), {"container_name": lambda _self, project_id: project_id})()
-    loop.client = type(
-        "Client",
-        (),
-        {
-            "get_project": lambda _self, _project_id: project,
-            "export_project": lambda _self, _project_id: "graph",
-        },
-    )()
-    dispatched: list[tuple[str, str]] = []
-    loop._dispatch_initial_project = lambda _project: dispatched.append(("bootstrap", "")) or True
-    loop._dispatch_reason = lambda _project, _graph, trigger: dispatched.append(("reason", trigger)) or True
-
-    assert loop._try_dispatch_project(_summary("proj_001", "active"))
-    assert dispatched == [("reason", "initial")]
-
-
-def test_initial_disabled_project_skips_configured_bootstrap_worker() -> None:
+def test_initial_project_dispatches_decide() -> None:
     loop = _loop()
     loop.config = make_config()
     loop.futures = {}
     project = make_project()
-    project.project.bootstrap_enabled = False
-    project.facts = project.facts[:2]
     loop.container_manager = type("Containers", (), {"container_name": lambda _self, project_id: project_id})()
     loop.client = type(
         "Client",
@@ -198,48 +175,37 @@ def test_initial_disabled_project_skips_configured_bootstrap_worker() -> None:
         },
     )()
     dispatched: list[tuple[str, str]] = []
-    loop._dispatch_initial_project = lambda _project: dispatched.append(("bootstrap", "")) or True
-    loop._dispatch_reason = lambda _project, _graph, trigger: dispatched.append(("reason", trigger)) or True
+    loop._dispatch_decide = lambda _project, _graph, trigger: dispatched.append(("decide", trigger)) or True
+    loop._dispatch_execute = lambda *_args: dispatched.append(("execute", "")) or True
 
     assert loop._try_dispatch_project(_summary("proj_001", "active"))
-    assert dispatched == [("reason", "initial")]
+    assert dispatched == [("decide", "initial")]
 
 
-def test_initial_enabled_project_without_bootstrap_worker_skips_bootstrap() -> None:
+def test_project_with_pending_step_and_unchanged_graph_dispatches_execute_by_priority() -> None:
     loop = _loop()
-    config = make_config()
-    loop.config = config.model_copy(
-        update={
-            "workers": [
-                config.workers[0].model_copy(update={"task_types": ["reason", "explore"]})
-            ]
-        }
+    loop.config = make_config()
+    loop.futures = {}
+    low = make_step("s001").model_copy(update={"priority": 1})
+    high = make_step("s002").model_copy(update={"priority": 8})
+    project = make_project(steps=[low, high])
+    loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
+        fact_count=2, hint_count=1, finding_count=0, open_step_count=2
     )
-    project = make_project()
-    project.project.bootstrap_enabled = True
-    project.facts = project.facts[:2]
+    loop.client = type(
+        "Client",
+        (),
+        {
+            "get_project": lambda _self, _project_id: project,
+            "export_project": lambda _self, _project_id: "graph",
+        },
+    )()
+    dispatched: list[tuple[str, str]] = []
+    loop._dispatch_decide = lambda *_args: dispatched.append(("decide", "")) or True
+    loop._dispatch_execute = lambda _project, _graph, step: dispatched.append(("execute", step.id)) or True
 
-    assert not loop._project_requires_bootstrap(project)
-
-
-def test_initial_enabled_project_keeps_existing_bootstrap_intent_when_workers_change() -> None:
-    loop = _loop()
-    config = make_config()
-    loop.config = config.model_copy(
-        update={
-            "workers": [
-                config.workers[0].model_copy(update={"task_types": ["reason", "explore"]})
-            ]
-        }
-    )
-    project = make_project(intents=[make_intent()])
-    project.project.bootstrap_enabled = True
-    project.facts = project.facts[:2]
-    project.intents[0].description = "bootstrap"
-    project.intents[0].creator = "dispatcher.bootstrap"
-    project.intents[0].from_ = ["origin"]
-
-    assert loop._project_requires_bootstrap(project)
+    assert loop._try_dispatch_project(_summary("proj_001", "active"))
+    assert dispatched == [("execute", "s002")]
 
 
 def test_cancel_inactive_tasks_marks_stopped_and_deleted_projects() -> None:
@@ -247,8 +213,8 @@ def test_cancel_inactive_tasks_marks_stopped_and_deleted_projects() -> None:
     stopped = TaskCancellation()
     deleted = TaskCancellation()
     loop.futures = {
-        Future(): RunningTask("stopped", "explore", "worker", stopped),
-        Future(): RunningTask("deleted", "reason", "worker", deleted),
+        Future(): RunningTask("stopped", "execute", "worker", stopped),
+        Future(): RunningTask("deleted", "decide", "worker", deleted),
     }
 
     loop._cancel_inactive_tasks([_summary("stopped", "stopped")])
@@ -257,12 +223,12 @@ def test_cancel_inactive_tasks_marks_stopped_and_deleted_projects() -> None:
     assert deleted.reason == "deleted"
 
 
-def test_initialize_reason_checkpoint_only_for_active_projects_with_open_intents() -> None:
+def test_initialize_decide_checkpoint_only_for_active_projects_with_open_steps() -> None:
     loop = _loop()
     active = _summary("active", "active")
-    active.unclaimed_intent_count = 1
+    active.pending_step_count = 1
 
-    loop._initialize_reason_checkpoints(
+    loop._initialize_decide_checkpoints(
         [
             active,
             _summary("idle", "active"),
@@ -270,25 +236,25 @@ def test_initialize_reason_checkpoint_only_for_active_projects_with_open_intents
         ]
     )
 
-    assert loop.reason_checkpoints == {
-        "active": ReasonCheckpoint(fact_count=2, hint_count=0, open_intent_count=1)
+    assert loop.decide_checkpoints == {
+        "active": DecideCheckpoint(fact_count=2, hint_count=0, finding_count=0, open_step_count=1)
     }
 
 
 def test_select_worker_reports_busy_unhealthy_rejected_and_unsupported_workers(monkeypatch) -> None:
     loop = _loop()
     base = make_config()
-    busy = base.workers[0].model_copy(update={"name": "busy", "task_types": ["reason"]})
-    unhealthy = base.workers[0].model_copy(update={"name": "unhealthy", "task_types": ["reason"]})
-    rejected = base.workers[0].model_copy(update={"name": "rejected", "task_types": ["reason"]})
-    unsupported = base.workers[0].model_copy(update={"name": "unsupported", "task_types": ["explore"]})
+    busy = base.workers[0].model_copy(update={"name": "busy", "task_types": ["decide"]})
+    unhealthy = base.workers[0].model_copy(update={"name": "unhealthy", "task_types": ["decide"]})
+    rejected = base.workers[0].model_copy(update={"name": "rejected", "task_types": ["decide"]})
+    unsupported = base.workers[0].model_copy(update={"name": "unsupported", "task_types": ["execute"]})
     loop.config = base.model_copy(update={"workers": [busy, unhealthy, rejected, unsupported]})
-    loop.futures = {Future(): RunningTask("proj", "reason", "busy", TaskCancellation())}
+    loop.futures = {Future(): RunningTask("proj", "decide", "busy", TaskCancellation())}
     loop.worker_unhealthy_until = {"unhealthy": 110.0}
-    loop.worker_rejected_until = {("proj", "reason", "rejected"): 120.0}
+    loop.worker_rejected_until = {("proj", "decide", "rejected"): 120.0}
     monkeypatch.setattr("cairn.dispatcher.scheduler.loop.time.time", lambda: 100.0)
 
-    selection = loop._select_worker("proj", "reason")
+    selection = loop._select_worker("proj", "decide")
 
     assert selection.worker is None
     assert selection.blocked_busy == ["busy(1/1)"]

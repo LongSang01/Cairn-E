@@ -11,13 +11,13 @@ from cairn.dispatcher.config import DispatchConfig, LocalConfig, WorkerConfig
 from cairn.dispatcher.runtime.local_backend import LocalBackend
 from cairn.dispatcher.runtime.local_process import LocalProcess
 from cairn.dispatcher.scheduler import loop as loop_module
-from cairn.dispatcher.tasks import common, explore
+from cairn.dispatcher.tasks import common, execute
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.workers.adapters.codex import CodexDriver
 from cairn.dispatcher.workers.adapters.pi import PiDriver
 from cairn.dispatcher.workers.registry import get_driver
 
-from conftest import FakeClient, make_config, make_intent, make_project
+from conftest import FakeClient, make_config, make_project, make_step
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -224,14 +224,13 @@ def _local_payload() -> dict:
             "prompt_group": "default",
         },
         "tasks": {
-            "bootstrap": {"timeout": 10, "conclude_timeout": 5},
-            "reason": {"timeout": 10, "max_intents": 3},
-            "explore": {"timeout": 10, "conclude_timeout": 5},
+            "decide": {"timeout": 10, "max_steps": 3},
+            "execute": {"timeout": 10, "conclude_timeout": 5},
         },
         "workers": [
-            {"name": "local-claude", "type": "claudecode", "task_types": ["explore"], "max_running": 1, "priority": 0},
-            {"name": "local-codex", "type": "codex", "task_types": ["explore"], "max_running": 1, "priority": 1},
-            {"name": "local-pi", "type": "pi", "task_types": ["reason"], "max_running": 1, "priority": 2},
+            {"name": "local-claude", "type": "claudecode", "task_types": ["execute"], "max_running": 1, "priority": 0},
+            {"name": "local-codex", "type": "codex", "task_types": ["execute"], "max_running": 1, "priority": 1},
+            {"name": "local-pi", "type": "pi", "task_types": ["decide"], "max_running": 1, "priority": 2},
         ],
     }
 
@@ -293,7 +292,7 @@ def _bare_loop(config: DispatchConfig) -> loop_module.DispatcherLoop:
 
 def test_local_cli_check_passes_when_cli_present() -> None:
     payload = _local_payload()
-    payload["workers"] = [{"name": "m", "type": "mock", "task_types": ["reason"], "max_running": 1, "priority": 0}]
+    payload["workers"] = [{"name": "m", "type": "mock", "task_types": ["decide"], "max_running": 1, "priority": 0}]
     config = DispatchConfig.model_validate(payload)
 
     _bare_loop(config)._run_local_binary_check()  # mock -> python3 --help runs; must not raise
@@ -312,7 +311,7 @@ def test_local_cli_check_exits_when_no_cli_installed(monkeypatch) -> None:
 
 def _bare_worker(worker_type: str) -> WorkerConfig:
     return WorkerConfig.model_validate(
-        {"name": worker_type, "type": worker_type, "task_types": ["explore"], "max_running": 1, "priority": 0}
+        {"name": worker_type, "type": worker_type, "task_types": ["execute"], "max_running": 1, "priority": 0}
     )
 
 
@@ -368,12 +367,11 @@ def _local_config_for_worker(name: str, worker_type: str) -> DispatchConfig:
                 "prompt_group": "default",
             },
             "tasks": {
-                "bootstrap": {"timeout": 30, "conclude_timeout": 10},
-                "reason": {"timeout": 30, "max_intents": 3},
-                "explore": {"timeout": 30, "conclude_timeout": 10},
+                "decide": {"timeout": 30, "max_steps": 3},
+                "execute": {"timeout": 30, "conclude_timeout": 10},
             },
             "workers": [
-                {"name": name, "type": worker_type, "task_types": ["explore"], "max_running": 1, "priority": 0}
+                {"name": name, "type": worker_type, "task_types": ["execute"], "max_running": 1, "priority": 0}
             ],
         }
     )
@@ -388,42 +386,42 @@ def _install_fake_cli(tmp_path: Path, monkeypatch, name: str, body: str) -> None
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
 
-def test_explore_runs_real_local_cli_end_to_end(tmp_path: Path, monkeypatch) -> None:
+def test_execute_runs_real_local_cli_end_to_end(tmp_path: Path, monkeypatch) -> None:
     # A fake `claude` on PATH stands in for the real CLI: the whole local path is exercised
     # for real — driver argv -> LocalBackend -> LocalProcess subprocess -> stdout parsing.
     _install_fake_cli(
         tmp_path,
         monkeypatch,
         "claude",
-        "echo '{\"accepted\":true,\"data\":{\"description\":\"local fake fact\"}}'",
+        "echo '{\"accepted\":true,\"data\":{\"facts\":[{\"description\":\"local fake fact\"}]}}'",
     )
     monkeypatch.setattr(common, "GRAPH_SNAPSHOT_ROOT", str(tmp_path / "prompts"))
 
     config = _local_config_for_worker("test-worker", "claudecode")
     backend = LocalBackend(LocalConfig(workspace_root=str(tmp_path / "work")))
-    intent = make_intent()
-    project = make_project(intents=[intent])
+    step = make_step(status="running", worker="test-worker")
+    project = make_project(steps=[step])
     client = FakeClient(project)
 
-    outcome = explore.run_explore_task(
+    outcome = execute.run_execute_task(
         config,
         client,
         backend,
         project,
         "facts:\n- id: f001\n",
-        intent,
+        step,
         config.workers[0],
         TaskCancellation(),
     )
 
     assert outcome == "success"
-    assert client.concluded == [("proj_001", "i001", "test-worker", "local fake fact")]
+    assert client.concluded == [("proj_001", "s001", "test-worker", ["local fake fact"], [])]
     # graph snapshot was materialised on the host under the patched root
     snapshot_root = tmp_path / "prompts"
     assert any(p.name == "graph.yaml" for p in snapshot_root.rglob("*"))
 
 
-def test_explore_local_cli_rejection_releases_intent(tmp_path: Path, monkeypatch) -> None:
+def test_execute_local_cli_rejection_releases_step(tmp_path: Path, monkeypatch) -> None:
     _install_fake_cli(
         tmp_path,
         monkeypatch,
@@ -434,21 +432,21 @@ def test_explore_local_cli_rejection_releases_intent(tmp_path: Path, monkeypatch
 
     config = _local_config_for_worker("test-worker", "claudecode")
     backend = LocalBackend(LocalConfig(workspace_root=str(tmp_path / "work")))
-    intent = make_intent()
-    project = make_project(intents=[intent])
+    step = make_step(status="running", worker="test-worker")
+    project = make_project(steps=[step])
     client = FakeClient(project)
 
-    outcome = explore.run_explore_task(
+    outcome = execute.run_execute_task(
         config,
         client,
         backend,
         project,
         "facts:\n- id: f001\n",
-        intent,
+        step,
         config.workers[0],
         TaskCancellation(),
     )
 
     assert outcome == "rejected"
     assert client.concluded == []
-    assert client.released == [("proj_001", "i001", "test-worker")]
+    assert client.released == [("proj_001", "s001", "test-worker")]

@@ -23,21 +23,17 @@ runtime:
   # Prompt set loaded from cairn/src/cairn/dispatcher/prompts/.
   prompt_group: "default"
 
+# Two activities, one runner: Decide only edits the FGS graph, Execute acts on the world.
 tasks:
-  bootstrap:
-    # Main execution timeout for the initial direct solve attempt.
+  decide:
+    # Decide reads the whole graph and returns graph mutations. It never touches the world.
     timeout: 300
-    # Time budget for conclude fallback after the main phase times out or returns unusable output.
-    conclude_timeout: 90
-  reason:
-    # Reason decides whether the goal is met and whether new intents should be proposed.
-    timeout: 300
-    # Hard cap on how many new intents one reason step may create.
-    max_intents: 2
-  explore:
-    # Main execution timeout for exploring a claimed intent.
-    timeout: 300
-    # Time budget for conclude fallback used to summarize confirmed findings from the same session.
+    # Hard cap on how many new steps one Decide run may add.
+    max_steps: 3
+  execute:
+    # Main timeout for executing a claimed step.
+    timeout: 600
+    # Time budget for the conclude fallback after the main phase times out or returns unusable output.
     conclude_timeout: 90
 
 container:
@@ -55,9 +51,10 @@ container:
 workers:
   # Worker priority is ascending: lower numbers are preferred first.
   # max_running is per-worker concurrency. Slower backends such as Pi usually benefit from lower values.
+  # Decide benefits from a strong reasoning model; Execute benefits from a model that is good with tools.
   - name: "claudecode_deepseek-v4-pro"
     type: "claudecode"
-    task_types: [bootstrap, reason, explore]
+    task_types: [decide, execute]
     max_running: 2
     priority: 0
     env:
@@ -67,7 +64,7 @@ workers:
 
   # - name: "codex_qwen3.6-plus"
   #   type: "codex"
-  #   task_types: [bootstrap,reason,explore]
+  #   task_types: [decide,execute]
   #   max_running: 2
   #   priority: 0
   #   env:
@@ -77,7 +74,7 @@ workers:
 
   # - name: "pi_qwen3.6-plus"
   #   type: "pi"
-  #   task_types: [bootstrap,reason,explore]
+  #   task_types: [decide,execute]
   #   max_running: 2
   #   priority: 0
   #   env:

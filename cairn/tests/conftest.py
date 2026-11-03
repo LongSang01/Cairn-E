@@ -6,7 +6,7 @@ from cairn.dispatcher.config import DispatchConfig
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.workers.base import DriverResult
 from cairn.dispatcher.workers.health import HealthResult
-from cairn.server.models import Fact, Hint, Intent, ProjectDetail, ProjectMeta
+from cairn.server.models import Fact, Finding, Goal, Hint, ProjectDetail, ProjectMeta, Step
 
 
 def make_config() -> DispatchConfig:
@@ -22,9 +22,8 @@ def make_config() -> DispatchConfig:
                 "prompt_group": "default",
             },
             "tasks": {
-                "bootstrap": {"timeout": 10, "conclude_timeout": 5},
-                "reason": {"timeout": 10, "max_intents": 3},
-                "explore": {"timeout": 10, "conclude_timeout": 5},
+                "decide": {"timeout": 10, "max_steps": 3},
+                "execute": {"timeout": 10, "conclude_timeout": 5},
             },
             "container": {
                 "image": "test-image",
@@ -35,7 +34,7 @@ def make_config() -> DispatchConfig:
                 {
                     "name": "test-worker",
                     "type": "mock",
-                    "task_types": ["bootstrap", "reason", "explore"],
+                    "task_types": ["decide", "execute"],
                     "max_running": 1,
                     "priority": 0,
                 }
@@ -44,21 +43,34 @@ def make_config() -> DispatchConfig:
     )
 
 
-def make_project(*, intents: list[Intent] | None = None) -> ProjectDetail:
+def make_project(
+    *,
+    steps: list[Step] | None = None,
+    findings: list[Finding] | None = None,
+) -> ProjectDetail:
     return ProjectDetail(
         project=ProjectMeta(
             id="proj_001",
             title="test",
             status="active",
-            bootstrap_enabled=True,
             created_at="2026-01-01T00:00:00Z",
         ),
         facts=[
             Fact(id="origin", description="start"),
-            Fact(id="goal", description="finish"),
             Fact(id="f001", description="known fact"),
         ],
-        intents=intents or [],
+        goals=[
+            Goal(
+                id="g001",
+                parent=None,
+                description="finish the task",
+                status="active",
+                creator="system",
+                created_at="2026-01-01T00:00:00Z",
+            )
+        ],
+        steps=steps or [],
+        findings=findings or [],
         hints=[
             Hint(
                 id="h001",
@@ -70,13 +82,16 @@ def make_project(*, intents: list[Intent] | None = None) -> ProjectDetail:
     )
 
 
-def make_intent(intent_id: str = "i001") -> Intent:
-    return Intent(
-        id=intent_id,
+def make_step(step_id: str = "s001", *, status: str = "pending", worker: str | None = None) -> Step:
+    return Step(
+        id=step_id,
         from_=["f001"],
         description="investigate",
-        creator="reasoner",
-        worker="test-worker",
+        goal="g001",
+        priority=0,
+        status=status,  # type: ignore[arg-type]
+        creator="decider",
+        worker=worker,
         created_at="2026-01-01T00:00:02Z",
     )
 
@@ -111,39 +126,97 @@ class FakeContainerManager:
 @dataclass
 class FakeClient:
     project: ProjectDetail
-    concluded: list[tuple[str, str, str, str]] = field(default_factory=list)
+    concluded: list[tuple[str, str, str, list[str], list[dict]]] = field(default_factory=list)
     completed: list[tuple[str, list[str], str, str]] = field(default_factory=list)
-    created_intents: list[tuple[str, list[str], str, str]] = field(default_factory=list)
+    created_steps: list[tuple[str, list[str], str, str]] = field(default_factory=list)
+    updated_steps: list[tuple[str, str, object, object]] = field(default_factory=list)
+    created_goals: list[tuple[str, str, str]] = field(default_factory=list)
+    closed_goals: list[tuple[str, str, str]] = field(default_factory=list)
     released: list[tuple[str, str, str]] = field(default_factory=list)
-    released_reasons: list[tuple[str, str]] = field(default_factory=list)
+    released_decide: list[tuple[str, str]] = field(default_factory=list)
+    conclude_status: int = 200
+    conclude_fact_ids: list[str] = field(default_factory=lambda: ["f002"])
 
     def get_project(self, _project_id: str) -> ProjectDetail:
         return self.project
 
-    def conclude(self, project_id: str, intent_id: str, worker: str, description: str) -> ApiResult:
-        self.concluded.append((project_id, intent_id, worker, description))
-        return ApiResult(200, {"fact": {"id": "f002"}})
+    def conclude_step(
+        self,
+        project_id: str,
+        step_id: str,
+        worker: str,
+        *,
+        facts: list[str],
+        findings: list[dict[str, str]],
+        status: str = "done",
+        note: str | None = None,
+    ) -> ApiResult:
+        self.concluded.append((project_id, step_id, worker, facts, findings))
+        if self.conclude_status != 200:
+            return ApiResult(self.conclude_status, text="inactive")
+        return ApiResult(
+            200,
+            {
+                "facts": [{"id": fid, "description": description} for fid, description in zip(self.conclude_fact_ids, facts)],
+                "findings": findings,
+                "step": {"id": step_id, "status": status},
+            },
+        )
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
         self.completed.append((project_id, from_ids, description, worker))
         return ApiResult(200, {})
 
-    def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:
-        self.created_intents.append((project_id, from_ids, description, creator))
+    def create_step(
+        self,
+        project_id: str,
+        *,
+        from_ids: list[str],
+        description: str,
+        creator: str,
+        goal: str | None = None,
+        rationale: str | None = None,
+        priority: int = 0,
+    ) -> ApiResult:
+        self.created_steps.append((project_id, from_ids, description, creator))
         return ApiResult(201, {})
 
-    def release(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
-        self.released.append((project_id, intent_id, worker))
+    def update_step(
+        self,
+        project_id: str,
+        step_id: str,
+        *,
+        priority: int | None = None,
+        status: str | None = None,
+        note: str | None = None,
+    ) -> ApiResult:
+        self.updated_steps.append((project_id, step_id, priority, status))
         return ApiResult(200, {})
 
-    def release_reason(self, project_id: str, worker: str) -> ApiResult:
-        self.released_reasons.append((project_id, worker))
+    def create_goal(
+        self, project_id: str, *, description: str, creator: str, parent: str | None = None
+    ) -> ApiResult:
+        self.created_goals.append((project_id, description, creator))
+        return ApiResult(201, {})
+
+    def close_goal(
+        self, project_id: str, goal_id: str, *, status: str, worker: str, note: str | None = None
+    ) -> ApiResult:
+        self.closed_goals.append((project_id, goal_id, status))
         return ApiResult(200, {})
 
-    def heartbeat(self, _project_id: str, _intent_id: str, _worker: str) -> ApiResult:
+    def release_step(self, project_id: str, step_id: str, worker: str) -> ApiResult:
+        self.released.append((project_id, step_id, worker))
         return ApiResult(200, {})
 
-    def reason_heartbeat(self, _project_id: str, _worker: str) -> ApiResult:
+    def release_decide(self, project_id: str, worker: str) -> ApiResult:
+        self.released_decide.append((project_id, worker))
+        return ApiResult(200, {})
+
+    def heartbeat_step(self, _project_id: str, _step_id: str, _worker: str) -> ApiResult:
+        return ApiResult(200, {})
+
+    def decide_heartbeat(self, _project_id: str, _worker: str) -> ApiResult:
         return ApiResult(200, {})
 
 

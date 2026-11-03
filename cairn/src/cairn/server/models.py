@@ -4,29 +4,65 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+GoalStatus = Literal["active", "achieved", "abandoned"]
+StepStatus = Literal["pending", "running", "done", "abandoned"]
+
 
 class Settings(BaseModel):
-    intent_timeout: int = Field(ge=5)
-    reason_timeout: int = Field(ge=5)
+    step_timeout: int = Field(ge=5)
+    decide_timeout: int = Field(ge=5)
 
 
 class Fact(BaseModel):
+    """A confirmed fact about the world. Append-only."""
+
     id: str
     description: str
 
 
-class Intent(BaseModel):
+class Goal(BaseModel):
+    """A completion condition. The root goal holds the project goal; goals form a tree."""
+
     id: str
-    from_: list[str] = Field(alias="from")
+    parent: str | None = None
+    description: str
+    status: GoalStatus
+    creator: str
+    created_at: str
+    closed_at: str | None = None
+
+
+class Step(BaseModel):
+    """The next action: how to derive new facts from facts already on the board."""
+
+    id: str
+    from_: list[str] = Field(default_factory=list, alias="from")
     to: str | None = None
+    goal: str | None = None
+    kind: Literal["action", "completion"] = "action"
     description: str
+    rationale: str | None = None
+    priority: int = 0
+    status: StepStatus
     creator: str
     worker: str | None = None
     last_heartbeat_at: str | None = None
     created_at: str
     concluded_at: str | None = None
+    note: str | None = None
 
     model_config = {"populate_by_name": True}
+
+
+class Finding(BaseModel):
+    """A structured product of the search, whose definition is task-defined."""
+
+    id: str
+    kind: str
+    description: str
+    step: str | None = None
+    creator: str
+    created_at: str
 
 
 class Hint(BaseModel):
@@ -36,7 +72,7 @@ class Hint(BaseModel):
     created_at: str
 
 
-class ProjectReason(BaseModel):
+class ProjectDecide(BaseModel):
     worker: str
     trigger: str
     started_at: str
@@ -47,23 +83,27 @@ class ProjectMeta(BaseModel):
     id: str
     title: str
     status: Literal["active", "stopped", "completed"]
-    bootstrap_enabled: bool
     created_at: str
-    reason: ProjectReason | None = None
+    decide: ProjectDecide | None = None
 
 
 class ProjectSummary(ProjectMeta):
     fact_count: int
-    intent_count: int
-    working_intent_count: int
-    unclaimed_intent_count: int
+    goal_count: int
+    open_goal_count: int
+    step_count: int
+    running_step_count: int
+    pending_step_count: int
+    finding_count: int
     hint_count: int
 
 
 class ProjectDetail(BaseModel):
     project: ProjectMeta
     facts: list[Fact]
-    intents: list[Intent]
+    goals: list[Goal]
+    steps: list[Step]
+    findings: list[Finding]
     hints: list[Hint]
 
 
@@ -84,7 +124,6 @@ class CreateProjectRequest(BaseModel):
     title: str
     origin: str
     goal: str
-    bootstrap_enabled: bool = True
     hints: list[CreateHintInline] | None = None
 
     @field_validator("title", "origin", "goal")
@@ -109,17 +148,20 @@ class CreateHintRequest(BaseModel):
         return text
 
 
-class CreateIntentRequest(BaseModel):
-    from_: list[str] = Field(alias="from", min_length=1)
+class CreateStepRequest(BaseModel):
+    from_: list[str] = Field(default_factory=list, alias="from")
+    goal: str | None = None
     description: str
+    rationale: str | None = None
+    priority: int = 0
     creator: str
     worker: str | None = None
 
     model_config = {"populate_by_name": True}
 
-    @field_validator("description", "creator", "worker")
+    @field_validator("description", "creator", "rationale", "worker", "goal")
     @classmethod
-    def validate_non_empty_text(cls, value: str | None) -> str | None:
+    def validate_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
         text = value.strip()
@@ -130,13 +172,22 @@ class CreateIntentRequest(BaseModel):
     @field_validator("from_")
     @classmethod
     def validate_fact_ids(cls, value: list[str]) -> list[str]:
-        cleaned = []
+        cleaned: list[str] = []
         for item in value:
             text = item.strip()
             if not text:
                 raise ValueError("fact ids must not be empty")
-            cleaned.append(text)
+            if text not in cleaned:
+                cleaned.append(text)
         return cleaned
+
+
+class UpdateStepRequest(BaseModel):
+    """Used by Decide: reprioritize or abandon a step. The step itself is never deleted."""
+
+    priority: int | None = None
+    status: Literal["abandoned"] | None = None
+    note: str | None = None
 
 
 class HeartbeatRequest(BaseModel):
@@ -151,7 +202,7 @@ class HeartbeatRequest(BaseModel):
         return text
 
 
-class ReasonClaimRequest(BaseModel):
+class DecideClaimRequest(BaseModel):
     worker: str
     trigger: str
 
@@ -164,13 +215,90 @@ class ReasonClaimRequest(BaseModel):
         return text
 
 
-class ConcludeRequest(BaseModel):
-    worker: str
+class SubmittedFinding(BaseModel):
+    kind: str = "finding"
     description: str
 
-    @field_validator("worker", "description")
+    @field_validator("kind", "description")
     @classmethod
     def validate_non_empty_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class SubmittedFact(BaseModel):
+    description: str
+
+    @field_validator("description")
+    @classmethod
+    def validate_non_empty_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class ConcludeStepRequest(BaseModel):
+    """Execute's submit_fact / submit_finding, plus closing the claimed step."""
+
+    worker: str
+    status: Literal["done", "abandoned"] = "done"
+    fact: SubmittedFact | None = None
+    facts: list[SubmittedFact] | None = None
+    findings: list[SubmittedFinding] | None = None
+    note: str | None = None
+
+    @field_validator("worker")
+    @classmethod
+    def validate_non_empty_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+    def submitted_facts(self) -> list[SubmittedFact]:
+        items: list[SubmittedFact] = []
+        if self.fact is not None:
+            items.append(self.fact)
+        if self.facts:
+            items.extend(self.facts)
+        return items
+
+
+class ConcludeStepResponse(BaseModel):
+    facts: list[Fact]
+    findings: list[Finding]
+    step: Step
+
+
+class CreateGoalRequest(BaseModel):
+    description: str
+    parent: str | None = None
+    creator: str
+
+    @field_validator("description", "creator", "parent")
+    @classmethod
+    def validate_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class CloseGoalRequest(BaseModel):
+    status: Literal["achieved", "abandoned"]
+    note: str | None = None
+    worker: str
+
+    @field_validator("worker", "note")
+    @classmethod
+    def validate_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         text = value.strip()
         if not text:
             raise ValueError("must not be empty")
@@ -195,18 +323,20 @@ class CompleteRequest(BaseModel):
     @field_validator("from_")
     @classmethod
     def validate_fact_ids(cls, value: list[str]) -> list[str]:
-        cleaned = []
+        cleaned: list[str] = []
         for item in value:
             text = item.strip()
             if not text:
                 raise ValueError("fact ids must not be empty")
-            cleaned.append(text)
+            if text not in cleaned:
+                cleaned.append(text)
         return cleaned
 
 
-class ConcludeResponse(BaseModel):
-    fact: Fact
-    intent: Intent
+class CompleteResponse(BaseModel):
+    project: ProjectMeta
+    goal: Goal
+    step: Step
 
 
 class UpdateProjectStatusRequest(BaseModel):
@@ -241,4 +371,4 @@ class ReopenRequest(BaseModel):
 class ReopenResponse(BaseModel):
     project: ProjectMeta
     fact: Fact
-    intent: Intent
+    goal: Goal
