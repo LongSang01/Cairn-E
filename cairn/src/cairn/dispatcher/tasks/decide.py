@@ -14,10 +14,10 @@ from cairn.dispatcher.prompting import (
     render_prompt,
 )
 from cairn.dispatcher.protocol.client import CairnClient
-from cairn.dispatcher.session import SessionStream, start_session
 from cairn.dispatcher.runtime.backend import ExecutionBackend
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
+from cairn.dispatcher.session import SessionStream, start_session
 from cairn.dispatcher.tasks.common import (
     best_effort_release_decide,
     cancel_reason,
@@ -125,12 +125,18 @@ def run_decide_task(
 
         session = driver.prepare_session()
         command = driver.build_execute(worker, prompt, session)
+        summary = (
+            f"决策下一步（{len(open_steps)} 个待办步骤）"
+            if open_steps
+            else "决策下一步（当前没有待办步骤）"
+        )
         stream = start_session(
             client,
             project_id,
             worker=worker.name,
             worker_type=worker.type,
             phase="decide",
+            summary=summary,
             prompt=prompt,
             native_session=session,
         )
@@ -213,7 +219,7 @@ def run_decide_task(
                 goal_ids=goal_ids,
                 step_ids=step_ids,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - every parse failure must close the task cleanly
             LOG.warning(
                 "decide parse failed project=%s worker=%s error=%s execute_ms=%s total_ms=%s stdout_preview=%s stderr_preview=%s",
                 project_id,
@@ -564,7 +570,7 @@ def _consume_recall_plan(client: CairnClient, project_id: str) -> tuple[str, str
     """
     try:
         plan = client.get_recall_plan(project_id)
-    except Exception:  # noqa: BLE001 - recall is an optional aid
+    except Exception:
         LOG.warning("recall plan unavailable project=%s", project_id, exc_info=True)
         return "(none)", "(none)"
     if not plan.queries and not plan.doc_ids:
@@ -574,7 +580,7 @@ def _consume_recall_plan(client: CairnClient, project_id: str) -> tuple[str, str
     document_text = _render_documents(client, project_id, plan)
     try:
         client.save_recall_plan(project_id, queries=[], doc_ids=[])
-    except Exception:  # noqa: BLE001 - a stale plan only costs a little context
+    except Exception:
         LOG.warning("recall plan reset failed project=%s", project_id, exc_info=True)
     return recall_text, document_text
 
@@ -585,7 +591,7 @@ def _render_recall(client: CairnClient, project_id: str, plan: RecallPlan) -> st
     for query in plan.queries:
         try:
             result = client.recall(project_id, query, limit=5)
-        except Exception:  # noqa: BLE001 - degrade to no results
+        except Exception:
             LOG.warning("recall failed project=%s query=%s", project_id, query, exc_info=True)
             continue
         lines.append(f"### {query}")
@@ -658,7 +664,7 @@ def _render_documents(client: CairnClient, project_id: str, plan: RecallPlan) ->
     for request in plan.doc_ids:
         try:
             document = client.get_document(project_id, request.id)
-        except Exception:  # noqa: BLE001 - a missing document is not fatal
+        except Exception:
             LOG.warning(
                 "document fetch failed project=%s document=%s",
                 project_id,
@@ -688,5 +694,5 @@ def _store_lookups(client: CairnClient, project_id: str, lookups: dict) -> None:
         client.save_recall_plan(
             project_id, queries=lookups["recall"], doc_ids=lookups["doc_ids"]
         )
-    except Exception:  # noqa: BLE001 - the next run will just not see the results
+    except Exception:
         LOG.warning("recall plan write failed project=%s", project_id, exc_info=True)

@@ -17,13 +17,16 @@ from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.local_backend import LocalBackend
-from cairn.dispatcher.runtime.startup_healthcheck import format_failure_summary, run_startup_healthchecks
+from cairn.dispatcher.runtime.startup_healthcheck import (
+    format_failure_summary,
+    run_startup_healthchecks,
+)
 from cairn.dispatcher.scheduler.worker_select import choose_worker
-from cairn.dispatcher.workers.registry import get_driver
 from cairn.dispatcher.tasks.decide import run_decide_task
 from cairn.dispatcher.tasks.execute import run_execute_task
 from cairn.dispatcher.tasks.question import run_question_task
 from cairn.dispatcher.tasks.summary import SummaryRequest, run_summary_task
+from cairn.dispatcher.workers.registry import get_driver
 from cairn.server.models import ProjectDetail, ProjectSummary, Step
 
 LOG = logging.getLogger(__name__)
@@ -395,7 +398,7 @@ class DispatcherLoop:
                 cancellation := TaskCancellation(),
                 summary_sink=self.request_summary,
             )
-        except Exception:
+        except Exception:  # keep the loop alive when a submit fails
             LOG.exception("failed to submit decide task project=%s worker=%s", project.project.id, worker.name)
             self._best_effort_release_decide(project.project.id, worker.name)
             return False
@@ -464,7 +467,7 @@ class DispatcherLoop:
                 worker,
                 cancellation := TaskCancellation(),
             )
-        except Exception:
+        except Exception:  # keep the loop alive when a submit fails
             LOG.exception("failed to submit execute task project=%s step=%s worker=%s", project.project.id, step.id, worker.name)
             self._best_effort_release(project.project.id, step.id, worker.name)
             return False
@@ -566,7 +569,7 @@ class DispatcherLoop:
                     worker,
                     request,
                 )
-            except Exception:  # noqa: BLE001 - a summary is best effort
+            except Exception:  # a summary is best effort
                 LOG.exception("failed to queue summary project=%s", request.project_id)
                 return False
             self.summary_futures[future] = request.project_id
@@ -585,7 +588,7 @@ class DispatcherLoop:
         for future, project_id in finished:
             try:
                 outcome = future.result()
-            except Exception:  # noqa: BLE001 - never let a summary kill the loop
+            except Exception:  # never let a summary kill the loop
                 LOG.exception("summary task crashed project=%s", project_id)
                 continue
             self._log_changed(
@@ -616,7 +619,7 @@ class DispatcherLoop:
                 project = self.client.get_project(question.project_id)
             except requests.RequestException:
                 raise
-            except Exception:
+            except Exception:  # noqa: BLE001 - one unreadable project must not stop the loop
                 LOG.warning(
                     "question project unavailable project=%s question=%s",
                     question.project_id,
@@ -644,7 +647,7 @@ class DispatcherLoop:
                 continue
             try:
                 export_yaml = self.client.export_project(question.project_id)
-            except Exception:
+            except Exception:  # degrade to no snapshot, still answer
                 LOG.warning(
                     "question snapshot unavailable project=%s question=%s",
                     question.project_id,
@@ -670,7 +673,7 @@ class DispatcherLoop:
                     export_yaml,
                     worker,
                 )
-            except Exception:
+            except Exception:  # a failed submit must not stop the question pass
                 LOG.exception(
                     "failed to submit question project=%s question=%s", question.project_id, question.id
                 )
@@ -688,7 +691,7 @@ class DispatcherLoop:
             key = self.question_futures.pop(future)
             try:
                 outcome = future.result()
-            except Exception:
+            except Exception:  # never let a question crash the loop
                 LOG.exception("question task crashed key=%s", key)
                 continue
             if outcome != "success":
@@ -813,7 +816,7 @@ class DispatcherLoop:
                     # Re-read the graph after Decide mutated it, otherwise a Decide that only
                     # abandoned steps would leave a checkpoint that never triggers again.
                     self._refresh_decide_checkpoint(task.project_id)
-            except Exception:
+            except Exception:  # a crashed task must not stop the loop
                 LOG.exception("task crashed project=%s task=%s worker=%s", task.project_id, task.task_type, task.worker_name)
 
     def _cleanup_completed_containers(self, summaries: list[ProjectSummary]) -> None:
@@ -863,7 +866,7 @@ class DispatcherLoop:
                     self._inactive_cleanup_done[project_id] = target_status
                 elif project_id is not None:
                     self._inactive_cleanup_done.pop(project_id, None)
-            except Exception:
+            except Exception:  # bookkeeping must not break the task
                 if project_id is not None:
                     self._inactive_cleanup_done.pop(project_id, None)
                 LOG.exception("container cleanup failed container=%s", name)
@@ -918,7 +921,7 @@ class DispatcherLoop:
     def _refresh_decide_checkpoint(self, project_id: str) -> None:
         try:
             project = self.client.get_project(project_id)
-        except Exception:
+        except Exception:  # a stale checkpoint only costs a little context
             LOG.exception("decide checkpoint refresh failed project=%s", project_id)
             return
         checkpoint = DecideCheckpoint(

@@ -5,20 +5,18 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import FakeClient, make_config, make_project, make_step
 from pydantic import ValidationError
 
 from cairn.dispatcher.config import DispatchConfig, LocalConfig, WorkerConfig
+from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.local_backend import LocalBackend
 from cairn.dispatcher.runtime.local_process import LocalProcess
 from cairn.dispatcher.scheduler import loop as loop_module
 from cairn.dispatcher.tasks import common, execute
-from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.workers.adapters.codex import CodexDriver
 from cairn.dispatcher.workers.adapters.pi import PiDriver
 from cairn.dispatcher.workers.registry import get_driver
-
-from conftest import FakeClient, make_config, make_project, make_step
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

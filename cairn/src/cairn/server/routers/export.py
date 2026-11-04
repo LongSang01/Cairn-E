@@ -8,7 +8,7 @@ from cairn.server.db import get_conn
 from cairn.server.models import FINDING_SEVERITIES
 from cairn.server.services import (
     build_documents,
-    build_findings_summary,
+    build_findings,
     doc_ids_by_owner,
     expire_decide_leases,
     expire_steps,
@@ -128,7 +128,8 @@ def _export_yaml(conn, project_id: str) -> str:
 def _node_entry(row, doc_ids: list[str], **extra) -> dict:
     """Titles and document ids only: bulk evidence is fetched on demand."""
     entry = {"id": row["id"]}
-    if "title" in row.keys() and row["title"]:
+    # sqlite3.Row has no `__contains__`; `.keys()` is the only membership check.
+    if "title" in row.keys() and row["title"]:  # noqa: SIM118
         entry["title"] = row["title"]
     entry["description"] = row["description"]
     entry.update(extra)
@@ -248,19 +249,23 @@ _SEVERITY_LABELS = {
 def _export_findings(conn, project_id: str) -> str:
     """Findings as a graded report, grouped by severity."""
     proj = get_project_or_404(conn, project_id)
-    summary = build_findings_summary(conn, project_id)
-    lines = [f"# Findings — {proj['title']}", "", f"Total: {summary.total}"]
-    if summary.total:
-        counts = ", ".join(
-            f"{_SEVERITY_LABELS[severity]} {count}"
-            for severity, count in summary.by_severity.items()
+    findings = build_findings(conn, project_id)
+    counts: dict[str, int] = {}
+    for item in findings:
+        counts[item.severity] = counts.get(item.severity, 0) + 1
+    lines = [f"# Findings — {proj['title']}", "", f"Total: {len(findings)}"]
+    if counts:
+        by_severity = ", ".join(
+            f"{_SEVERITY_LABELS[severity]} {counts[severity]}"
+            for severity in FINDING_SEVERITIES
+            if severity in counts
         )
-        lines.append(f"By severity: {counts}")
-    if not summary.findings:
+        lines.append(f"By severity: {by_severity}")
+    if not findings:
         lines.extend(["", "No findings recorded."])
         return "\n".join(lines) + "\n"
     for severity in FINDING_SEVERITIES:
-        items = [item for item in summary.findings if item.severity == severity]
+        items = [item for item in findings if item.severity == severity]
         if not items:
             continue
         lines.extend(["", f"## {_SEVERITY_LABELS[severity]} ({len(items)})"])

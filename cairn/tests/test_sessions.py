@@ -4,13 +4,13 @@ import asyncio
 import json
 import time
 
-from fastapi.testclient import TestClient
 import pytest
+from fastapi.testclient import TestClient
 
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.runtime.process import ProcessResult
 from cairn.dispatcher.session import SessionStream, build_messages, redact
-from cairn.dispatcher.workers.base import Usage
+from cairn.dispatcher.workers.usage import Usage
 from cairn.server import db
 from cairn.server.app import app
 from cairn.server.routers import sessions as sessions_router
@@ -34,11 +34,15 @@ def _create_project(client: TestClient) -> str:
     return response.json()["project"]["id"]
 
 
+DECIDE_SUMMARY = "决策下一步（1 个待办步骤）"
+
+
 def _session_payload(**overrides) -> dict:
     payload = {
         "worker": "pi-main",
         "worker_type": "pi",
         "phase": "decide",
+        "summary": DECIDE_SUMMARY,
         "status": "success",
         "returncode": 0,
         "duration_ms": 1234,
@@ -60,6 +64,7 @@ def test_create_and_read_session(client: TestClient) -> None:
     created = response.json()
     assert created["id"] == "x001"
     assert created["phase"] == "decide"
+    assert created["summary"] == DECIDE_SUMMARY
     assert created["timed_out"] is False
     assert [m["seq"] for m in created["messages"]] == [0, 1]
     assert created["messages"][1]["role"] == "assistant"
@@ -70,6 +75,7 @@ def test_create_and_read_session(client: TestClient) -> None:
     listed = client.get(f"/projects/{project_id}/sessions")
     assert listed.status_code == 200
     assert [s["id"] for s in listed.json()] == ["x001", "x002"]
+    assert listed.json()[0]["summary"] == DECIDE_SUMMARY
 
     detail = client.get(f"/projects/{project_id}/sessions/x001")
     assert detail.status_code == 200
@@ -77,6 +83,7 @@ def test_create_and_read_session(client: TestClient) -> None:
 
     project = client.get(f"/projects/{project_id}").json()
     assert [s["id"] for s in project["sessions"]] == ["x001", "x002"]
+    assert project["sessions"][0]["summary"] == DECIDE_SUMMARY
 
 
 def test_session_unknown_ids_return_404(client: TestClient) -> None:
@@ -190,13 +197,11 @@ def test_redact_masks_credentials() -> None:
 
 
 def test_build_messages_prefers_json_events() -> None:
-    stdout = "\n".join(
-        [
-            '{"type": "turn_end", "role": "assistant", '
-            '"content": [{"type": "text", "text": "step created"}]}',
-            "not json",
-        ]
+    event = (
+        '{"type": "turn_end", "role": "assistant", '
+        '"content": [{"type": "text", "text": "step created"}]}'
     )
+    stdout = f"{event}\nnot json"
     result = ProcessResult(returncode=0, stdout=stdout, stderr="")
     messages = build_messages("do the thing", result)
     assert [m["role"] for m in messages] == ["user", "assistant"]

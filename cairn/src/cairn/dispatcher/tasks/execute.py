@@ -7,10 +7,10 @@ from cairn.dispatcher.config import DispatchConfig, WorkerConfig
 from cairn.dispatcher.contracts import parse_json_output, validate_execute_payload
 from cairn.dispatcher.prompting import load_prompt, render_prompt
 from cairn.dispatcher.protocol.client import CairnClient
-from cairn.dispatcher.session import SessionStream, start_session
 from cairn.dispatcher.runtime.backend import ExecutionBackend
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
+from cairn.dispatcher.session import SessionStream, start_session
 from cairn.dispatcher.tasks.common import (
     best_effort_release,
     budgeted_graph_yaml,
@@ -21,6 +21,7 @@ from cairn.dispatcher.tasks.common import (
     project_allows_conclude_fallback,
     prompt_overhead_tokens,
     run_worker_process,
+    step_session_summary,
     task_healthcheck_enabled,
     write_graph_snapshot_reference,
     write_step_result,
@@ -127,6 +128,7 @@ def run_execute_task(
             worker_type=worker.type,
             phase="execute",
             step_id=step.id,
+            summary=step_session_summary(step),
             prompt=prompt,
             native_session=session,
         )
@@ -187,7 +189,7 @@ def run_execute_task(
                 model_output = driver.extract_response_text(first.stdout, first.stderr)
                 payload = parse_json_output(model_output)
                 kind, data = validate_execute_payload(payload)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - a bad model reply must close the step
                 LOG.warning(
                     "execute parse failed project=%s step=%s worker=%s error=%s execute_ms=%s total_ms=%s stdout_preview=%s stderr_preview=%s",
                     project_id,
@@ -368,6 +370,7 @@ def _try_conclude_fallback(
         worker_type=worker.type,
         phase="execute_conclude",
         step_id=step.id,
+        summary=step_session_summary(step),
         prompt=prompt,
         native_session=session,
     )
@@ -435,7 +438,7 @@ def _try_conclude_fallback(
         model_output = driver.extract_response_text(result.stdout, result.stderr)
         payload = parse_json_output(model_output)
         kind, data = validate_execute_payload(payload)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - a bad model reply must close the step
         LOG.warning(
             "conclude parse failed project=%s step=%s worker=%s error=%s conclude_ms=%s stdout_preview=%s stderr_preview=%s",
             project_id,

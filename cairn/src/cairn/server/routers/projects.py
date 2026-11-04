@@ -15,8 +15,8 @@ from cairn.server.models import (
     ProjectSummary,
     ReopenRequest,
     ReopenResponse,
-    UpdateProjectTitleRequest,
     UpdateProjectStatusRequest,
+    UpdateProjectTitleRequest,
 )
 from cairn.server.services import (
     build_findings,

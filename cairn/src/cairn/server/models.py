@@ -126,6 +126,9 @@ class Session(TokenUsage):
     worker_type: str
     phase: str
     step: str | None = None
+    # One line describing what this run was asked to do, so a session list is readable
+    # without opening the transcript.
+    summary: str = ""
     native_session: str | None = None
     status: str
     returncode: int | None = None
@@ -151,6 +154,7 @@ class CreateSessionRequest(TokenUsage):
     worker_type: str
     phase: str
     step: str | None = None
+    summary: str = Field(default="", max_length=300)
     native_session: str | None = None
     # Required on purpose: a live run creates the session with `running`, the
     # end-of-run fallback with the real outcome. Defaulting here would silently
@@ -169,6 +173,11 @@ class CreateSessionRequest(TokenUsage):
         if not text:
             raise ValueError("must not be empty")
         return text
+
+    @field_validator("summary")
+    @classmethod
+    def normalize_summary(cls, value: str) -> str:
+        return " ".join(value.split())
 
 
 class AppendSessionMessagesRequest(BaseModel):
@@ -682,13 +691,12 @@ class ReopenResponse(BaseModel):
 
 
 class FindingsSummary(BaseModel):
-    """Confirmed findings aggregated for a report: counts plus the findings themselves."""
+    """Counts by grade and kind; the findings themselves live on their own endpoint."""
 
     project_id: str
     total: int = 0
     by_severity: dict[str, int] = Field(default_factory=dict)
     by_kind: dict[str, int] = Field(default_factory=dict)
-    findings: list[Finding] = Field(default_factory=list)
 
 
 class UsageBucket(TokenUsage):

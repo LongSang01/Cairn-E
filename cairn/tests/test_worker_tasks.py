@@ -3,13 +3,6 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 
-from cairn.dispatcher.protocol.client import ApiResult
-from cairn.dispatcher.runtime.cancellation import TaskCancellation
-from cairn.dispatcher.runtime.process import ProcessResult
-from cairn.dispatcher.workers.health import HealthResult
-from cairn.server.models import Document, Goal, RecallHit, RecallPlan
-from cairn.dispatcher.tasks import decide, execute
-
 from conftest import (
     FakeClient,
     FakeContainerManager,
@@ -19,6 +12,13 @@ from conftest import (
     make_project,
     make_step,
 )
+
+from cairn.dispatcher.protocol.client import ApiResult
+from cairn.dispatcher.runtime.cancellation import TaskCancellation
+from cairn.dispatcher.runtime.process import ProcessResult
+from cairn.dispatcher.tasks import decide, execute
+from cairn.dispatcher.workers.health import HealthResult
+from cairn.server.models import Document, Goal, RecallHit, RecallPlan
 
 
 def _lease_factory(lease: FakeLease):
@@ -515,6 +515,7 @@ def test_decide_records_model_session(monkeypatch) -> None:
     # The session is visible while the worker runs, then finalized with the outcome.
     assert payload["status"] == "running"
     assert payload["worker"] == "test-worker"
+    assert payload["summary"].startswith("决策下一步")
     assert payload["messages"][0] == {"role": "user", "content": driver.execute_prompts[0]}
 
     assert len(client.finished_sessions) == 1
@@ -548,6 +549,8 @@ def test_execute_records_session_for_execute_and_conclude(monkeypatch) -> None:
     assert phases == ["execute", "execute_conclude"]
     assert all(payload["status"] == "running" for _pid, payload in client.created_sessions)
     assert all(payload["step"] == "s001" for _pid, payload in client.created_sessions)
+    # Every execute session carries the step text, so the list shows what ran.
+    assert {payload["summary"] for _pid, payload in client.created_sessions} == {"investigate"}
 
     assert [payload["status"] for _pid, _sid, payload in client.finished_sessions] == ["failed", "success"]
 

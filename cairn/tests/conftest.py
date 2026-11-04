@@ -5,8 +5,9 @@ from typing import Any
 
 from cairn.dispatcher.config import DispatchConfig
 from cairn.dispatcher.protocol.client import ApiResult
-from cairn.dispatcher.workers.base import DriverResult, Usage
+from cairn.dispatcher.workers.base import DriverResult
 from cairn.dispatcher.workers.health import HealthResult
+from cairn.dispatcher.workers.usage import Usage
 from cairn.server.models import (
     ContextSummary,
     Document,

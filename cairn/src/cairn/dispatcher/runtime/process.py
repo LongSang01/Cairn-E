@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from contextlib import suppress
-from dataclasses import dataclass
 import logging
 import threading
 import time
 from collections.abc import Callable
+from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from docker.errors import APIError, DockerException
@@ -209,7 +209,7 @@ class ManagedProcess:
             return
         try:
             callback(stdout)
-        except Exception:  # noqa: BLE001 - a broken observer must not kill the reader
+        except Exception:  # a broken observer must not kill the reader
             LOG.warning("stdout callback failed", exc_info=True)
 
     @staticmethod

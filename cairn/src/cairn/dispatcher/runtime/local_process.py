@@ -133,7 +133,7 @@ class LocalProcess:
                 if callback is not None:
                     try:
                         callback(chunk)
-                    except Exception:  # noqa: BLE001 - a broken observer must not kill the reader
+                    except Exception:  # a broken observer must not kill the reader
                         LOG.warning("stdout callback failed", exc_info=True)
         except (ValueError, OSError):
             pass

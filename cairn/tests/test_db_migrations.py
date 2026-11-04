@@ -172,9 +172,10 @@ def test_configure_adds_finding_severity_and_session_usage_columns(tmp_path, mon
     with db.get_conn() as conn:
         finding = conn.execute("SELECT severity FROM findings WHERE id = 'd001'").fetchone()
         session = conn.execute(
-            "SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens"
-            " FROM sessions WHERE id = 'x001'"
+            "SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
+            " total_tokens, summary FROM sessions WHERE id = 'x001'"
         ).fetchone()
 
     assert finding["severity"] == "info"
-    assert tuple(session) == (0, 0, 0, 0, 0)
+    assert tuple(session)[:5] == (0, 0, 0, 0, 0)
+    assert session["summary"] is None

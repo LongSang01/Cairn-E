@@ -12,8 +12,9 @@ from cairn.dispatcher.runtime.backend import ExecutionBackend
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.runtime.process import OutputCallback, ProcessResult
-from cairn.dispatcher.workers.base import Usage, WorkerDriver
-from cairn.server.models import ContextSummary
+from cairn.dispatcher.workers.base import WorkerDriver
+from cairn.dispatcher.workers.usage import Usage
+from cairn.server.models import ContextSummary, Step
 
 PROCESS_COMMUNICATE_GRACE_SECONDS = 15
 LOG_PREVIEW_LIMIT = 1200
@@ -41,19 +42,22 @@ def did_timeout(result: ProcessResult) -> bool:
 def driver_usage(driver: WorkerDriver, stdout: str, stderr: str) -> Usage | None:
     """Token usage reported by this run, or None when its CLI exposes none.
 
-    Usage bookkeeping must never break a run: a driver without the hook (or one whose
-    parser fails) simply records no tokens.
+    Usage bookkeeping is observability, not a task result: a failing parser records no
+    tokens instead of failing the run.
     """
-    extractor = getattr(driver, "extract_usage", None)
-    if extractor is None:
-        # Duck-typed drivers used by tests and plugins may not implement the hook.
-        return None
     try:
-        return extractor(stdout, stderr)
+        return driver.extract_usage(stdout, stderr)
     except Exception:
-        # Usage is observability, not a task result: never fail a run over it.
         LOG.warning("could not read worker token usage", exc_info=True)
         return None
+
+
+def step_session_summary(step: Step, limit: int = 200) -> str:
+    """The one-line description a session list shows for an execute run."""
+    text = " ".join((step.title or step.description or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
 
 
 def cancel_reason(result: ProcessResult, cancellation: TaskCancellation | None = None) -> str | None:

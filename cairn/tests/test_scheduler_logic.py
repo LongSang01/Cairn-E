@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from concurrent.futures import Future
 
+from conftest import make_config, make_project, make_step
+
 from cairn.dispatcher.models import DecideCheckpoint, RunningTask
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.scheduler.loop import DispatcherLoop
 from cairn.dispatcher.scheduler.worker_select import choose_worker
 from cairn.server.models import Fact, Finding, ProjectSummary
-
-from conftest import make_config, make_project, make_step
 
 
 def _loop() -> DispatcherLoop:

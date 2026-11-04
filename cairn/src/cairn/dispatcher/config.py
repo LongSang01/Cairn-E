@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
 import json
+from decimal import Decimal, InvalidOperation
 from importlib import resources
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
 
 TaskType = Literal["decide", "execute"]
 WorkerType = Literal["claudecode", "codex", "pi", "mock"]
@@ -157,7 +156,7 @@ class ContextBudgetConfig(BaseModel):
     min_snapshot_tokens: int = Field(gt=0, default=2_000)
 
     @model_validator(mode="after")
-    def validate_safety_margin(self) -> "ContextBudgetConfig":
+    def validate_safety_margin(self) -> ContextBudgetConfig:
         if self.safety_min_tokens > self.safety_max_tokens:
             raise ValueError("safety_min_tokens cannot exceed safety_max_tokens")
         return self
@@ -211,7 +210,7 @@ class WorkerConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def validate_env(self) -> "WorkerConfig":
+    def validate_env(self) -> WorkerConfig:
         # Required LLM env keys (base_url / key / model) are enforced per execution mode by
         # DispatchConfig: container mode needs them, local mode reuses the host CLI config.
         # The checks below are mode-independent and always apply.
@@ -229,7 +228,7 @@ class WebAuthUser(BaseModel):
     password: str = Field(min_length=1)
 
     @model_validator(mode="after")
-    def validate_credentials(self) -> "WebAuthUser":
+    def validate_credentials(self) -> WebAuthUser:
         # Mirrors the nginx entrypoint's constraints (see deploy/nginx/40-cairn-auth.sh).
         if self.name.startswith("-") or ":" in self.name or "\t" in self.name:
             raise ValueError('user name must not start with "-" or contain ":" or tabs')
@@ -299,7 +298,7 @@ class DispatchConfig(BaseModel):
         return merged
 
     @model_validator(mode="after")
-    def validate_workers(self) -> "DispatchConfig":
+    def validate_workers(self) -> DispatchConfig:
         names = [worker.name for worker in self.workers]
         if len(set(names)) != len(names):
             raise ValueError("worker names must be unique")
@@ -310,7 +309,7 @@ class DispatchConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_execution_mode(self) -> "DispatchConfig":
+    def validate_execution_mode(self) -> DispatchConfig:
         if self.runtime.execution == "container":
             if self.container is None:
                 raise ValueError("container config is required when runtime.execution is container")
@@ -325,7 +324,7 @@ class DispatchConfig(BaseModel):
         return self
 
     @classmethod
-    def load(cls, path: Path) -> "DispatchConfig":
+    def load(cls, path: Path) -> DispatchConfig:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         config = cls.model_validate(data)
         validate_prompt_resources(config.runtime.prompt_group)
@@ -379,7 +378,7 @@ def resolve_mock_behavior(worker_name: str, env: dict[str, str]) -> dict[str, di
         if unknown_outcomes:
             raise ValueError(f"worker {worker_name} {prefix}.outcomes has unsupported keys: {', '.join(unknown_outcomes)}")
         outcomes: dict[str, float] = {}
-        total = Decimal("0")
+        total = Decimal(0)
         for outcome in sorted(allowed_outcomes):
             weight = _parse_mock_probability(
                 worker_name,
@@ -389,7 +388,7 @@ def resolve_mock_behavior(worker_name: str, env: dict[str, str]) -> dict[str, di
             )
             outcomes[outcome] = float(weight)
             total += weight
-        if total != Decimal("1"):
+        if total != Decimal(1):
             raise ValueError(f"worker {worker_name} {prefix}.outcomes probabilities must sum to 1.0, got {total}")
         behavior[phase] = {
             "delay": {"min": min_delay, "max": max_delay},

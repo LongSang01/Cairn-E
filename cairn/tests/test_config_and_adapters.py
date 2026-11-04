@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 
 import pytest
+from conftest import make_config
 from pydantic import ValidationError
 
-from cairn.dispatcher.config import DispatchConfig, WorkerConfig, validate_prompt_resources
+from cairn.dispatcher.config import (
+    DispatchConfig,
+    WorkerConfig,
+    validate_prompt_resources,
+)
 from cairn.dispatcher.workers.adapters.codex import CodexDriver
 from cairn.dispatcher.workers.adapters.pi import PiDriver
-
-from conftest import make_config
 
 
 def test_dispatch_config_merges_common_env_with_worker_override() -> None:

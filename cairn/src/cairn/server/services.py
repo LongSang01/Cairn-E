@@ -320,7 +320,7 @@ def build_findings(conn: sqlite3.Connection, project_id: str) -> list[Finding]:
             id=row["id"],
             kind=row["kind"],
             description=row["description"],
-            severity=_finding_severity(row),
+            severity=normalize_finding_severity(row["severity"]),
             step=row["step_id"],
             creator=row["creator"],
             created_at=row["created_at"],
@@ -333,15 +333,6 @@ def normalize_finding_severity(value: object) -> str:
     """Coerce a stored grade to a known severity; unknown or missing means `info`."""
     severity = str(value or "info").strip().lower()
     return severity if severity in FINDING_SEVERITIES else "info"
-
-
-def _finding_severity(row: sqlite3.Row) -> str:
-    """A row written before severity existed reads as `info`, never as a broken model."""
-    try:
-        value = row["severity"]
-    except (IndexError, KeyError):
-        return "info"
-    return normalize_finding_severity(value)
 
 
 def build_findings_summary(conn: sqlite3.Connection, project_id: str) -> FindingsSummary:
@@ -360,25 +351,26 @@ def build_findings_summary(conn: sqlite3.Connection, project_id: str) -> Finding
         total=len(findings),
         by_severity=ordered_severity,
         by_kind=dict(sorted(by_kind.items())),
-        findings=findings,
     )
 
 
-def _usage_bucket(rows: list[sqlite3.Row]) -> UsageBucket:
-    bucket = UsageBucket(sessions=len(rows))
-    for row in rows:
-        bucket.input_tokens += int(row["input_tokens"] or 0)
-        bucket.output_tokens += int(row["output_tokens"] or 0)
-        bucket.cache_read_tokens += int(row["cache_read_tokens"] or 0)
-        bucket.cache_write_tokens += int(row["cache_write_tokens"] or 0)
-        bucket.total_tokens += int(row["total_tokens"] or 0)
+def _accumulate_usage(bucket: UsageBucket, row: sqlite3.Row) -> None:
+    bucket.sessions += 1
+    bucket.input_tokens += row["input_tokens"]
+    bucket.output_tokens += row["output_tokens"]
+    bucket.cache_read_tokens += row["cache_read_tokens"]
+    bucket.cache_write_tokens += row["cache_write_tokens"]
+    bucket.total_tokens += row["total_tokens"]
+
+
+def _settle_usage(bucket: UsageBucket) -> UsageBucket:
+    """A client-supplied total can never make a bucket smaller than its parts."""
     measured = (
         bucket.input_tokens
         + bucket.output_tokens
         + bucket.cache_read_tokens
         + bucket.cache_write_tokens
     )
-    # A client-supplied total can never make the project total smaller than its parts.
     bucket.total_tokens = max(bucket.total_tokens, measured)
     return bucket
 
@@ -390,22 +382,24 @@ def build_project_usage(conn: sqlite3.Connection, project_id: str) -> ProjectUsa
         " cache_write_tokens, total_tokens FROM sessions WHERE project_id = ?",
         (project_id,),
     ).fetchall()
-    total = _usage_bucket(rows)
-    by_phase: dict[str, list[sqlite3.Row]] = {}
-    by_worker: dict[str, list[sqlite3.Row]] = {}
+    total = UsageBucket()
+    by_phase: dict[str, UsageBucket] = {}
+    by_worker: dict[str, UsageBucket] = {}
     for row in rows:
-        by_phase.setdefault(row["phase"], []).append(row)
-        by_worker.setdefault(row["worker"], []).append(row)
+        buckets = (
+            total,
+            by_phase.setdefault(row["phase"], UsageBucket()),
+            by_worker.setdefault(row["worker"], UsageBucket()),
+        )
+        for bucket in buckets:
+            _accumulate_usage(bucket, row)
+    for bucket in (total, *by_phase.values(), *by_worker.values()):
+        _settle_usage(bucket)
     return ProjectUsage(
         project_id=project_id,
-        sessions=total.sessions,
-        input_tokens=total.input_tokens,
-        output_tokens=total.output_tokens,
-        cache_read_tokens=total.cache_read_tokens,
-        cache_write_tokens=total.cache_write_tokens,
-        total_tokens=total.total_tokens,
-        by_phase={phase: _usage_bucket(items) for phase, items in sorted(by_phase.items())},
-        by_worker={worker: _usage_bucket(items) for worker, items in sorted(by_worker.items())},
+        by_phase=dict(sorted(by_phase.items())),
+        by_worker=dict(sorted(by_worker.items())),
+        **total.model_dump(),
     )
 
 
@@ -500,6 +494,7 @@ def session_to_model(row: sqlite3.Row) -> Session:
         worker_type=row["worker_type"],
         phase=row["phase"],
         step=row["step_id"],
+        summary=row["summary"] or "",
         native_session=row["native_session"],
         status=row["status"],
         returncode=row["returncode"],

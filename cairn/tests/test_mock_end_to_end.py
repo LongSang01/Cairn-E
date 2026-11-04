@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
-import pytest
 
 from cairn.dispatcher.config import DispatchConfig
 from cairn.dispatcher.protocol.client import ApiResult

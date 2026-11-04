@@ -8,8 +8,8 @@ from fastapi.staticfiles import StaticFiles
 from cairn import __version__
 from cairn.server import db
 from cairn.server.routers import (
-    documents,
     context,
+    documents,
     export,
     findings,
     goals,

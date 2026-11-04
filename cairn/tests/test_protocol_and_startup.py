@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 import requests
 
 from cairn.dispatcher.protocol.client import CairnClient
@@ -31,7 +33,7 @@ def test_client_request_failure_returns_status_zero() -> None:
 def test_session_heartbeat_posts_without_a_body() -> None:
     class Response:
         status_code = 200
-        headers = {"content-type": "application/json"}
+        headers: ClassVar[dict[str, str]] = {"content-type": "application/json"}
         text = "{}"
 
         def json(self):

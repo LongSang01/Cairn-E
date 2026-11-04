@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 
-from fastapi.testclient import TestClient
 import pytest
 import yaml
+from fastapi.testclient import TestClient
 
 from cairn.server import db
 from cairn.server.app import app
@@ -111,7 +111,7 @@ def test_project_workflow_creates_goal_step_finding_completes_and_reopens(client
     assert summary.json()["total"] == 1
     assert summary.json()["by_severity"] == {"high": 1}
     assert summary.json()["by_kind"] == {"flaw": 1}
-    assert summary.json()["findings"][0]["severity"] == "high"
+    assert "findings" not in summary.json()
 
     report = client.get(f"/projects/{project_id}/export", params={"format": "findings"})
     assert report.status_code == 200

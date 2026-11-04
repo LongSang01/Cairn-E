@@ -4,15 +4,10 @@ import json
 import random
 
 from cairn.dispatcher.config import WorkerConfig, resolve_mock_behavior
-from cairn.dispatcher.workers.base import (
-    DriverResult,
-    SeedSessionDriver,
-    Usage,
-    add_usage,
-    normalize_usage,
-)
+from cairn.dispatcher.workers.base import DriverResult, SeedSessionDriver
 from cairn.dispatcher.workers.health import HealthResult
 from cairn.dispatcher.workers.stream import iter_json_events
+from cairn.dispatcher.workers.usage import Usage, add_usage, normalize_usage
 
 _SCRIPT = """
 import json,random,sys,time

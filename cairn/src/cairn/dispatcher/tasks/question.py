@@ -56,7 +56,7 @@ def run_question_task(
     # The question may have been cancelled while it sat in the queue.
     try:
         current = client.get_question(project_id, question.id)
-    except Exception:  # noqa: BLE001 - a vanished question is a cancelled question
+    except Exception:  # noqa: BLE001 - a vanished question is a normal cancellation
         LOG.info("question disappeared before start project=%s question=%s", project_id, question.id)
         return "cancelled"
     if current.status != "running":
@@ -161,7 +161,7 @@ def run_question_task(
             len(text),
         )
         return "success"
-    except Exception as exc:  # noqa: BLE001 - never break the dispatcher loop
+    except Exception as exc:  # never break the dispatcher loop
         LOG.exception("question task crashed project=%s question=%s", project_id, question.id)
         _answer(
             client,
@@ -194,7 +194,7 @@ def _answer(
             worker=worker_name,
             duration_ms=duration_ms,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # the next run will just not see the results
         LOG.warning("question answer upload crashed question=%s", question_id, exc_info=True)
         return
     if response.status_code == 409:

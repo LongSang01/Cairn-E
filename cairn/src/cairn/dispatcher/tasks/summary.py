@@ -98,7 +98,7 @@ def run_summary_task(
             phase="summary",
             timeout_seconds=timeout,
         )
-    except Exception:  # noqa: BLE001 - a failed summary must never break the loop
+    except Exception:  # a failed summary must never break the loop
         LOG.warning("graph summarization failed project=%s", request.project_id, exc_info=True)
         return "failed"
     if result.cancelled or result.timed_out or result.returncode != 0:
@@ -125,7 +125,7 @@ def run_summary_task(
             finding_summary=sections["findings"],
             findings_covered=request.findings_covered if sections["findings"] else 0,
         )
-    except Exception:  # noqa: BLE001 - the next run will simply ask again
+    except Exception:  # the next run will simply ask again
         LOG.warning("context summary write failed project=%s", request.project_id, exc_info=True)
         return "failed"
     LOG.info(

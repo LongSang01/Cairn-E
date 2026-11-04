@@ -394,6 +394,7 @@ Session 记录一次 worker 运行中模型看到的输入和它的输出，用�
 - `step` 仅 Execute 阶段有值。
 - `status` ∈ `running` | `success` | `failed` | `cancelled` | `rejected`；`running` 表示 worker 还在跑，消息仍在追加。
 - `message_count` 是该会话已有的消息数，列表接口也会带上，便于显示"增长中"的进度。
+- `summary` 是一行"这次运行要做什么"：Execute 取 Step 的标题（没有标题时取描述），Decide 取待办步骤数，例如 `决策下一步（3 个待办步骤）`。会话列表不用展开 transcript 就能分辨每次运行。创建时写入，最多 300 字符；旧会话没有这个字段，读作空串。
 - 用量字段：`input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_write_tokens` / `total_tokens`。由 dispatcher 从 worker CLI 的输出里解析，创建与收尾时都接受；CLI 不报用量时全部为 0，绝不估算。`total_tokens` 取各分量之和与 CLI 自报总量的较大值。
 - 四个分量互不重叠：`cache_read_tokens` 是独立的缓存命中量。像 codex 这类把缓存算进 `input_tokens` 的 CLI，dispatcher 会先减掉再上报，避免项目总量重复计数。
 
@@ -409,6 +410,7 @@ Session 记录一次 worker 运行中模型看到的输入和它的输出，用�
   "worker_type": "pi",
   "phase": "decide",
   "step": null,
+  "summary": "决策下一步（3 个待办步骤）",
   "native_session": "可选，worker CLI 自己的 session id",
   "status": "running",
   "messages": [
@@ -618,12 +620,11 @@ SSE（`text/event-stream`）提问流：
   "project_id": "proj_001",
   "total": 3,
   "by_severity": {"critical": 1, "high": 2},
-  "by_kind": {"sqli": 1, "weak-credential": 2},
-  "findings": []
+  "by_kind": {"sqli": 1, "weak-credential": 2}
 }
 ```
 
-`by_severity` 按严重度从高到低排列，只包含出现过的等级；`findings` 是完整列表。
+`by_severity` 按严重度从高到低排列，只包含出现过的等级；需要逐条内容时用 `GET /projects/{project_id}/findings`。
 
 ### Usage（用量）
 

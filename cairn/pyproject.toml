@@ -33,6 +33,18 @@ testpaths = ["tests"]
 # Run from a checkout without installing: `python -m pytest` finds the package.
 pythonpath = ["src"]
 
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# Keep the rule set explicit so a ruff upgrade cannot silently change what "clean" means.
+select = ["E4", "E7", "E9", "F", "I", "B", "BLE", "SIM", "UP", "RUF"]
+# Model output and config values share one rejection type (ValueError); TRY004's
+# TypeError split would only force every caller to catch both. Chinese punctuation in
+# user-facing summaries is intentional, so RUF001's ASCII homoglyph warning is off.
+ignore = ["TRY004", "RUF001"]
+
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple"
 default = true

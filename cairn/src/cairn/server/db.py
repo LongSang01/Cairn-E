@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from collections.abc import Generator
 
 DEFAULT_DB = Path.home() / ".local" / "share" / "cairn" / "cairn.db"
 
@@ -119,6 +119,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     worker_type TEXT NOT NULL,
     phase TEXT NOT NULL,
     step_id TEXT,
+    summary TEXT,
     native_session TEXT,
     status TEXT NOT NULL DEFAULT 'failed',
     returncode INTEGER,
@@ -175,6 +176,9 @@ CREATE TABLE IF NOT EXISTS scoped_counters (
     value INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project_id, kind)
 );
+
+CREATE INDEX IF NOT EXISTS sessions_by_project ON sessions (project_id, created_at);
+CREATE INDEX IF NOT EXISTS findings_by_project ON findings (project_id, created_at);
 """
 
 # Columns are additive so an existing Cairn 0.x database keeps working: create the new
@@ -220,6 +224,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     session_columns = _table_columns(conn, "sessions")
     for column, ddl in (
         ("native_session", "TEXT"),
+        ("summary", "TEXT"),
         ("error", "TEXT"),
         ("duration_ms", "INTEGER"),
         ("updated_at", "TEXT"),

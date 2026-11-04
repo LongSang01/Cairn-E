@@ -139,11 +139,11 @@ def create_session(project_id: str, body: CreateSessionRequest):
         conn.execute(
             """
             INSERT INTO sessions (
-                id, project_id, worker, worker_type, phase, step_id, native_session,
+                id, project_id, worker, worker_type, phase, step_id, summary, native_session,
                 status, returncode, timed_out, duration_ms,
                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens,
                 error, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 sid,
@@ -152,6 +152,7 @@ def create_session(project_id: str, body: CreateSessionRequest):
                 body.worker_type,
                 body.phase,
                 body.step,
+                body.summary,
                 body.native_session,
                 body.status,
                 body.returncode,

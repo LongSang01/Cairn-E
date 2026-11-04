@@ -6,12 +6,12 @@ import re
 import threading
 import time
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Self
 
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.process import ProcessResult
-from cairn.dispatcher.workers.base import Usage, usage_payload
 from cairn.dispatcher.workers.stream import text_from_content
+from cairn.dispatcher.workers.usage import Usage, usage_payload
 
 LOG = logging.getLogger(__name__)
 
@@ -413,6 +413,7 @@ class SessionStream:
         worker_type: str,
         phase: str,
         step_id: str | None = None,
+        summary: str = "",
         prompt: str | None = None,
         native_session: str | None = None,
         flush_interval: float = FLUSH_INTERVAL_SECONDS,
@@ -425,6 +426,7 @@ class SessionStream:
         self._worker_type = worker_type
         self._phase = phase
         self._step_id = step_id
+        self._summary = summary
         self._native_session = native_session
         self._flush_interval = flush_interval
         self._heartbeat_interval = heartbeat_interval
@@ -435,7 +437,7 @@ class SessionStream:
         self._flusher: threading.Thread | None = None
         self._finished = False
 
-    def __enter__(self) -> SessionStream:
+    def __enter__(self) -> Self:
         self.start()
         return self
 
@@ -446,21 +448,27 @@ class SessionStream:
 
     # --- lifecycle ---------------------------------------------------------------
 
-    def start(self) -> None:
-        with self._lock:
-            messages = list(self._builder.pending)
-        payload = {
+    def _create_payload(self, status: str, messages: list[dict], **fields: object) -> dict[str, object]:
+        """Fields shared by the live create and the end-of-run one-shot upload."""
+        return {
             "worker": self._worker,
             "worker_type": self._worker_type,
             "phase": self._phase,
             "step": self._step_id,
+            "summary": self._summary,
             "native_session": self._native_session,
-            "status": "running",
+            "status": status,
             "messages": messages,
+            **fields,
         }
+
+    def start(self) -> None:
+        with self._lock:
+            messages = list(self._builder.pending)
+        payload = self._create_payload("running", messages)
         try:
             response = self._client.create_session(self._project_id, payload)
-        except Exception:  # noqa: BLE001 - bookkeeping must not break a task
+        except Exception:
             LOG.warning(
                 "session create crashed project=%s phase=%s worker=%s", self._project_id, self._phase, self._worker, exc_info=True
             )
@@ -522,7 +530,7 @@ class SessionStream:
         }
         try:
             response = self._client.finish_session(self._project_id, self.session_id, payload)
-        except Exception:  # noqa: BLE001
+        except Exception:
             LOG.warning(
                 "session finish crashed project=%s phase=%s worker=%s", self._project_id, self._phase, self._worker, exc_info=True
             )
@@ -557,7 +565,7 @@ class SessionStream:
         self._last_contact = time.monotonic()
         try:
             response = self._client.session_heartbeat(self._project_id, session_id)
-        except Exception:  # noqa: BLE001
+        except Exception:
             LOG.warning(
                 "session heartbeat crashed project=%s phase=%s worker=%s",
                 self._project_id,
@@ -585,7 +593,7 @@ class SessionStream:
             return 0
         try:
             response = self._client.append_session_messages(self._project_id, session_id, batch)
-        except Exception:  # noqa: BLE001
+        except Exception:
             LOG.warning(
                 "session append crashed project=%s phase=%s worker=%s", self._project_id, self._phase, self._worker, exc_info=True
             )
@@ -626,23 +634,19 @@ class SessionStream:
             messages = self._builder.take_pending()
         if not messages:
             return
-        payload = {
-            "worker": self._worker,
-            "worker_type": self._worker_type,
-            "phase": self._phase,
-            "step": self._step_id,
-            "native_session": native_session,
-            "status": status,
-            "returncode": result.returncode if result is not None else None,
-            "timed_out": bool(result and result.timed_out),
-            "duration_ms": duration_ms,
-            "error": redact(error) if error else None,
-            "messages": messages,
+        payload = self._create_payload(
+            status,
+            messages,
+            native_session=native_session,
+            returncode=result.returncode if result is not None else None,
+            timed_out=bool(result and result.timed_out),
+            duration_ms=duration_ms,
+            error=redact(error) if error else None,
             **usage_payload(usage),
-        }
+        )
         try:
             response = self._client.create_session(self._project_id, payload)
-        except Exception:  # noqa: BLE001
+        except Exception:
             LOG.warning(
                 "session upload crashed project=%s phase=%s worker=%s", self._project_id, self._phase, self._worker, exc_info=True
             )
@@ -665,6 +669,7 @@ def start_session(
     worker_type: str,
     phase: str,
     step_id: str | None = None,
+    summary: str = "",
     prompt: str | None = None,
     native_session: str | None = None,
 ) -> SessionStream:
@@ -676,6 +681,7 @@ def start_session(
         worker_type=worker_type,
         phase=phase,
         step_id=step_id,
+        summary=summary,
         prompt=prompt,
         native_session=native_session,
     )

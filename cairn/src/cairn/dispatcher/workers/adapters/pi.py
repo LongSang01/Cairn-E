@@ -5,15 +5,10 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from cairn.dispatcher.config import WorkerConfig
-from cairn.dispatcher.workers.base import (
-    DriverResult,
-    Usage,
-    WorkerDriver,
-    add_usage,
-    normalize_usage,
-)
+from cairn.dispatcher.workers.base import DriverResult, WorkerDriver
 from cairn.dispatcher.workers.health import HealthResult, http_ping, proxies_from_env
 from cairn.dispatcher.workers.stream import iter_json_events
+from cairn.dispatcher.workers.usage import Usage, add_usage, normalize_usage
 
 
 class PiDriver(WorkerDriver):

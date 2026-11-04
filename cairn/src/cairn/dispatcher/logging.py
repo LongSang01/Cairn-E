@@ -7,9 +7,7 @@ class DispatcherLogFormatter(logging.Formatter):
     _PREFIX = "cairn.dispatcher."
 
     def format(self, record: logging.LogRecord) -> str:
-        name = record.name
-        shortname = name[len(self._PREFIX):] if name.startswith(self._PREFIX) else name
-        record.shortname = shortname
+        record.shortname = record.name.removeprefix(self._PREFIX)
         return super().format(record)
 
 

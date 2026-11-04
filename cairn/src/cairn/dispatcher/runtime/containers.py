@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import io
 import logging
-from pathlib import PurePosixPath
 import tarfile
 import threading
+from pathlib import PurePosixPath
 
 import docker
 from docker.errors import APIError, DockerException, NotFound

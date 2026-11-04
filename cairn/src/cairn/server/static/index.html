@@ -974,7 +974,8 @@
             <button type="button" @click="toggleSession(session.id)" class="w-full text-left px-4 py-3 space-y-2 hover:bg-slate-50/70 transition">
               <div class="flex items-center justify-between gap-2">
                 <div class="flex items-center gap-1.5 min-w-0">
-                  <span class="px-1.5 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide" :class="sessionPhaseClass(session.phase)" x-text="session.phase"></span>
+                  <span class="px-1.5 py-0.5 rounded-md text-[10px] font-semibold tracking-wide" :class="sessionPhaseClass(session.phase)"
+                    :title="session.phase" x-text="sessionPhaseLabel(session.phase)"></span>
                   <span class="text-xs font-medium text-slate-700 truncate" x-text="session.worker"></span>
                 </div>
                 <div class="flex items-center gap-1.5 shrink-0">
@@ -982,6 +983,8 @@
                   <span class="w-2 h-2 rounded-full shrink-0" :class="sessionStatusDotClass(session.status)"></span>
                 </div>
               </div>
+              <p x-show="sessionSummary(session)" class="text-xs leading-relaxed text-slate-600 break-words line-clamp-2"
+                :title="sessionSummary(session)" x-text="sessionSummary(session)"></p>
               <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400">
                 <span x-text="session.step ? `${session.id} · ${session.step}` : session.id"></span>
                 <span x-show="session.message_count" x-text="`${session.message_count} 条`"></span>
@@ -1379,6 +1382,33 @@
 </div>
 
 <script>
+// Shared vocabulary: the graph, the legend and the findings list all read from these.
+const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
+const SEVERITY_RANK = Object.fromEntries(SEVERITY_ORDER.map((key, index) => [key, index]));
+const SEVERITY_LABELS = { critical: '严重', high: '高危', medium: '中危', low: '低危', info: '信息' };
+const SEVERITY_BADGE_CLASSES = {
+  critical: 'bg-rose-100 text-rose-700',
+  high: 'bg-orange-100 text-orange-700',
+  medium: 'bg-amber-100 text-amber-700',
+  low: 'bg-sky-100 text-sky-700',
+  info: 'bg-slate-100 text-slate-600',
+};
+const SEVERITY_TEXT_CLASSES = {
+  critical: 'text-rose-600',
+  high: 'text-orange-600',
+  medium: 'text-amber-600',
+  low: 'text-sky-600',
+  info: 'text-slate-500',
+};
+const SEVERITY_COLORS = {
+  critical: '#dc2626',
+  high: '#f97316',
+  medium: '#eab308',
+  low: '#0ea5e9',
+  info: '#94a3b8',
+};
+const PHASE_LABELS = { decide: '决策', execute: '执行', execute_conclude: '收尾', summary: '摘要', ask: '问答' };
+
 function cairnApp() {
   return {
     view: 'list',
@@ -1657,45 +1687,23 @@ function cairnApp() {
     // --- Findings: severity grading and the aggregated report -------------------
 
     severityOrder() {
-      return ['critical', 'high', 'medium', 'low', 'info'];
+      return SEVERITY_ORDER;
     },
 
     severityLabel(severity) {
-      const labels = { critical: '严重', high: '高危', medium: '中危', low: '低危', info: '信息' };
-      return labels[severity] || labels.info;
+      return SEVERITY_LABELS[severity] || SEVERITY_LABELS.info;
     },
 
     severityBadgeClass(severity) {
-      const classes = {
-        critical: 'bg-rose-100 text-rose-700',
-        high: 'bg-orange-100 text-orange-700',
-        medium: 'bg-amber-100 text-amber-700',
-        low: 'bg-sky-100 text-sky-700',
-        info: 'bg-slate-100 text-slate-600',
-      };
-      return classes[severity] || classes.info;
+      return SEVERITY_BADGE_CLASSES[severity] || SEVERITY_BADGE_CLASSES.info;
     },
 
     severityTextClass(severity) {
-      const classes = {
-        critical: 'text-rose-600',
-        high: 'text-orange-600',
-        medium: 'text-amber-600',
-        low: 'text-sky-600',
-        info: 'text-slate-500',
-      };
-      return classes[severity] || classes.info;
+      return SEVERITY_TEXT_CLASSES[severity] || SEVERITY_TEXT_CLASSES.info;
     },
 
     severityColor(severity) {
-      const colors = {
-        critical: '#dc2626',
-        high: '#f97316',
-        medium: '#eab308',
-        low: '#0ea5e9',
-        info: '#94a3b8',
-      };
-      return colors[severity] || colors.info;
+      return SEVERITY_COLORS[severity] || SEVERITY_COLORS.info;
     },
 
     findingSeverityCounts() {
@@ -1716,9 +1724,9 @@ function cairnApp() {
     },
 
     sortedFindings() {
-      const rank = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+      const unknown = SEVERITY_ORDER.length;
       return [...(this.project?.findings || [])].sort((a, b) =>
-        (rank[a.severity] ?? 4) - (rank[b.severity] ?? 4)
+        (SEVERITY_RANK[a.severity] ?? unknown) - (SEVERITY_RANK[b.severity] ?? unknown)
       );
     },
 
@@ -1728,7 +1736,7 @@ function cairnApp() {
         + (this.project.goals || []).length
         + (this.project.steps || []).length
         + (this.project.findings || []).length
-        + this.digestEntries().length;
+        + (this.showDigests ? this.digestEntries().length : 0);
     },
 
     nodeColor(data) {
@@ -1829,6 +1837,17 @@ function cairnApp() {
         parts.push(`${phase}: ${this.formatTokens(bucket.total_tokens)}`);
       }
       return parts.join(' · ');
+    },
+
+    sessionSummary(session) {
+      if (!session) return '';
+      if (session.summary) return session.summary;
+      // Older rows predate the stored summary: derive one from the step they ran.
+      const step = (this.project?.steps || []).find(item => item.id === session.step);
+      if (step) return step.title || step.description || '';
+      if (session.phase === 'decide') return '决策下一步';
+      if (session.phase === 'execute_conclude') return '收尾并提交结论';
+      return '';
     },
 
     sessionUsageTitle(session) {
@@ -2418,6 +2437,10 @@ function cairnApp() {
       if (phase === 'decide') return 'bg-violet-50 text-violet-600 ring-1 ring-violet-200';
       if (phase === 'execute') return 'bg-teal-50 text-teal-600 ring-1 ring-teal-200';
       return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+    },
+
+    sessionPhaseLabel(phase) {
+      return PHASE_LABELS[phase] || phase;
     },
 
     sessionStatusDotClass(status) {
