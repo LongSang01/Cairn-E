@@ -9,16 +9,9 @@ from pydantic import TypeAdapter
 import requests
 from requests.adapters import HTTPAdapter
 
-from cairn.server.models import ProjectDetail, ProjectSummary, Settings
+from cairn.server.models import ContextSummary, ProjectDetail, ProjectSummary, Question, Settings
 
 LOG = logging.getLogger(__name__)
-
-
-class ProtocolError(RuntimeError):
-    def __init__(self, message: str, status_code: int, response_text: str = ""):
-        super().__init__(message)
-        self.status_code = status_code
-        self.response_text = response_text
 
 
 @dataclass(slots=True)
@@ -37,6 +30,7 @@ class CairnClient:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._summary_adapter = TypeAdapter(list[ProjectSummary])
+        self._questions_adapter = TypeAdapter(list[Question])
         self._local = threading.local()
         self._sessions: dict[int, requests.Session] = {}
         self._sessions_lock = threading.Lock()
@@ -217,6 +211,70 @@ class CairnClient:
         """Tell the server this session is still running even if stdout is quiet."""
         return self._request_json(
             "POST", f"/projects/{project_id}/sessions/{session_id}/heartbeat"
+        )
+
+    # --- Side questions: read-only snapshots, never written back into the graph ----
+
+    def list_pending_questions(self, limit: int = 5) -> list[Question]:
+        response = self._session().get(
+            self._url("/questions/pending"), params={"limit": limit}, timeout=self._timeout
+        )
+        response.raise_for_status()
+        return self._questions_adapter.validate_python(response.json())
+
+    def get_question(self, project_id: str, question_id: str) -> Question:
+        response = self._session().get(
+            self._url(f"/projects/{project_id}/questions/{question_id}"), timeout=self._timeout
+        )
+        response.raise_for_status()
+        return Question.model_validate(response.json())
+
+    def claim_question(self, project_id: str, question_id: str, worker: str) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/questions/{question_id}/claim",
+            json={"worker": worker},
+        )
+
+    def answer_question(
+        self,
+        project_id: str,
+        question_id: str,
+        *,
+        status: str,
+        answer: str | None = None,
+        error: str | None = None,
+        worker: str | None = None,
+        duration_ms: int | None = None,
+    ) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/questions/{question_id}/answer",
+            json={
+                "status": status,
+                "answer": answer,
+                "error": error,
+                "worker": worker,
+                "duration_ms": duration_ms,
+            },
+        )
+
+    # --- Rolling context summary for the graph budget ------------------------------
+
+    def get_context_summary(self, project_id: str) -> ContextSummary:
+        response = self._session().get(
+            self._url(f"/projects/{project_id}/context"), timeout=self._timeout
+        )
+        response.raise_for_status()
+        return ContextSummary.model_validate(response.json())
+
+    def save_context_summary(
+        self, project_id: str, *, summary: str, facts_covered: int
+    ) -> ApiResult:
+        return self._request_json(
+            "PUT",
+            f"/projects/{project_id}/context",
+            json={"summary": summary, "facts_covered": facts_covered},
         )
 
     def _request_json(self, method: str, path: str, json: dict[str, Any]) -> ApiResult:

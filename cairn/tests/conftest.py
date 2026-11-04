@@ -161,7 +161,10 @@ class FakeClient:
         return ApiResult(
             200,
             {
-                "facts": [{"id": fid, "description": description} for fid, description in zip(self.conclude_fact_ids, facts)],
+                "facts": [
+                    {"id": fid, "description": description}
+                    for fid, description in zip(self.conclude_fact_ids, facts, strict=False)
+                ],
                 "findings": findings,
                 "step": {"id": step_id, "status": status},
             },

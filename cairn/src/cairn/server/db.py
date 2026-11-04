@@ -125,6 +125,22 @@ CREATE TABLE IF NOT EXISTS session_messages (
     FOREIGN KEY (session_id, project_id) REFERENCES sessions(id, project_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS questions (
+    id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    answer TEXT,
+    error TEXT,
+    worker TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    updated_at TEXT,
+    answered_at TEXT,
+    duration_ms INTEGER,
+    PRIMARY KEY (id, project_id)
+);
+
 CREATE TABLE IF NOT EXISTS counters (
     name TEXT PRIMARY KEY,
     value INTEGER NOT NULL DEFAULT 0
@@ -191,6 +207,14 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} {ddl}")
     # Sessions created before `updated_at` existed have no heartbeat history.
     conn.execute("UPDATE sessions SET updated_at = created_at WHERE updated_at IS NULL")
+
+    project_columns = _table_columns(conn, "projects")
+    for column, ddl in (
+        ("context_summary", "TEXT"),
+        ("context_summary_facts", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if column not in project_columns:
+            conn.execute(f"ALTER TABLE projects ADD COLUMN {column} {ddl}")
 
     fact_columns = _table_columns(conn, "facts")
     if "step_id" not in fact_columns:

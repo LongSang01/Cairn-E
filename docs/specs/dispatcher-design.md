@@ -55,6 +55,18 @@ runtime:
   healthcheck_timeout: 20
   worker_healthcheck: startup_only   # startup_and_task | startup_only | disabled
   prompt_group: default
+  max_questions: 1              # side questions answered in parallel with Decide/Execute
+  context_budget:
+    enabled: true
+    context_window: 200000      # a worker's CONTEXT_WINDOW env overrides it
+    max_output_tokens: 16000
+    safety_ratio: 0.05
+    safety_min_tokens: 2000
+    safety_max_tokens: 18000
+    recent_items: 20
+    summary_max_calls: 1        # 0 disables the rolling summary
+    summary_timeout: 90
+    min_snapshot_tokens: 2000
 tasks:
   decide:
     timeout: 300
@@ -62,6 +74,8 @@ tasks:
   execute:
     timeout: 600
     conclude_timeout: 90
+  question:
+    timeout: 120
 container:
   image: ghcr.io/oritera/cairn-worker-container:latest
   network_mode: host
@@ -197,6 +211,28 @@ checkpoint 在 Decide 成功后**重新读取图**再写入，这样"Decide 只�
 | 写 conclude 时项目已非 active | 视为正常结束，只释放 Step |
 | 连续失败 | worker 进入 rejected 冷却（项目 + 任务类型维度） |
 
+### Question（旁路提问）
+
+人类在任务进行中提的问题走独立通道：它不抢 Step、不写图，也不占用 Decide / Execute 的并发额度。
+
+- dispatcher 每轮先 `GET /questions/pending` 取最早的待答问题，`runtime.max_questions` 限制同时作答数（默认 1）。
+- 用 `decide` 能力的 worker 作答；抢占成功（`claim`）后才提交到独立的提问线程池。
+- 提示词模板 `question.md` 可以不含 `{graph_yaml}`（mock 组就没有），此时不写快照、不启动容器。
+- 答案只回写到 `questions` 表；问题被取消后提交的答案由服务端丢弃（`409`）。
+- 提问失败（超时、退出码非零、空输出）同样写 `failed` 与 `error`，不会中断调度循环。
+
+### 上下文预算
+
+`{graph_yaml}` 不再无条件塞进提示词。`runtime.context_budget` 按 worker 的窗口算预算：
+
+```
+input_budget    = context_window - max_output_tokens - safety_margin
+safety_margin   = clamp(window * safety_ratio, safety_min_tokens, safety_max_tokens)
+snapshot_tokens = max(min_snapshot_tokens, input_budget - overhead_tokens)
+```
+
+`overhead_tokens` 是模板本身加上其他 JSON 块（事实 id、开放 Step 等）的开销，先从预算里扣掉。快照装不下时按层退化：先压缩老事实（保留最近 `recent_items` 条原文，其余进滚动摘要），再砍 findings 与旧 Step 细节，最后才硬截断并在 YAML 尾部留标记。滚动摘要由 Decide 调用一次模型生成（`summary_max_calls`，0 关闭），存到项目上，后续 Decide / Execute / 提问复用。
+
 ## 调度策略
 
 ### 全局
@@ -222,6 +258,7 @@ checkpoint 在 Decide 成功后**重新读取图**再写入，这样"Decide 只�
 | 单 worker 并发 | `workers[].max_running` |
 | 项目内 Decide 串行 | Server 的 decide 租约 |
 | 单 Step 独占 | Server 的 step 租约 |
+| 旁路提问并发 | `runtime.max_questions`（不计入上面的额度） |
 
 ## Worker
 
@@ -274,9 +311,11 @@ cairn/src/cairn/dispatcher/prompts/
   default/decide.md
   default/execute.md
   default/execute_conclude.md
+  default/question.md
   mock/decide.md
   mock/execute.md
   mock/execute_conclude.md
+  mock/question.md
 ```
 
 - `prompt_group` 选择目录。
@@ -293,6 +332,7 @@ cairn/src/cairn/dispatcher/prompts/
 | `MOCK_DECIDE` | Decide | `complete` / `steps` / `noop` / `rejected` / `invalid_json` / `invalid_payload` / `command_fail` |
 | `MOCK_EXECUTE` | Execute | `facts` / `rejected` / `invalid_json` / `invalid_payload` / `command_fail` |
 | `MOCK_EXECUTE_CONCLUDE` | 兜底 | 同上 |
+| `MOCK_QUESTION` | 旁路提问 | `answer` / `invalid_json` / `command_fail` |
 
 支持按提示词内容设置规则，例如：
 

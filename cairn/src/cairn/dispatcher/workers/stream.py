@@ -15,8 +15,8 @@ from typing import Any
 
 def iter_json_events(text: str) -> Iterator[dict[str, Any]]:
     """Yield every JSON object found on its own line, skipping anything else."""
-    for line in (text or "").splitlines():
-        line = line.strip()
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
         if not line.startswith("{"):
             continue
         try:

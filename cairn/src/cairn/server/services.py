@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException
 
 from cairn.server.models import (
+    ContextSummary,
     Finding,
     Goal,
     ProjectDecide,
     ProjectMeta,
+    Question,
     Session,
     SessionMessage,
     Step,
@@ -31,11 +33,11 @@ SESSION_STALE_SECONDS = 60
 
 
 def utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def utcnow_before(seconds: int) -> str:
-    moment = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    moment = datetime.now(UTC) - timedelta(seconds=seconds)
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -444,3 +446,120 @@ def get_session_or_404(conn: sqlite3.Connection, project_id: str, session_id: st
     if row is None:
         raise HTTPException(404, "Session not found")
     return row
+
+
+# ------------------------------------------------------------------------- questions
+
+# A pending question nobody claimed, or a running one whose dispatcher died.
+QUESTION_PENDING_TTL_SECONDS = 300
+QUESTION_RUNNING_TTL_SECONDS = 900
+
+
+def next_question_id(conn: sqlite3.Connection, project_id: str) -> str:
+    return _next_scoped_id(conn, "question", "q", project_id)
+
+
+def question_to_model(row: sqlite3.Row) -> Question:
+    return Question(
+        id=row["id"],
+        project_id=row["project_id"],
+        content=row["content"],
+        status=row["status"],
+        answer=row["answer"],
+        error=row["error"],
+        worker=row["worker"],
+        created_at=row["created_at"],
+        started_at=row["started_at"],
+        answered_at=row["answered_at"],
+        duration_ms=row["duration_ms"],
+    )
+
+
+def expire_questions(conn: sqlite3.Connection, project_id: str | None = None) -> int:
+    """Fail questions nobody is going to answer, so the UI stops waiting forever."""
+    now = utcnow()
+    scope = " AND project_id = ?" if project_id is not None else ""
+    scoped = (project_id,) if project_id is not None else ()
+    pending = conn.execute(
+        f"""
+        UPDATE questions
+        SET status = 'failed',
+            error = 'no dispatcher picked the question up',
+            updated_at = ?
+        WHERE status = 'pending' AND created_at < ?{scope}
+        """,
+        (now, utcnow_before(QUESTION_PENDING_TTL_SECONDS), *scoped),
+    )
+    running = conn.execute(
+        f"""
+        UPDATE questions
+        SET status = 'failed',
+            error = 'dispatcher stopped before answering',
+            updated_at = ?
+        WHERE status = 'running'
+          AND COALESCE(updated_at, started_at, created_at) < ?{scope}
+        """,
+        (now, utcnow_before(QUESTION_RUNNING_TTL_SECONDS), *scoped),
+    )
+    return pending.rowcount + running.rowcount
+
+
+def get_question_or_404(conn: sqlite3.Connection, project_id: str, question_id: str) -> sqlite3.Row:
+    row = conn.execute(
+        "SELECT * FROM questions WHERE id = ? AND project_id = ?", (question_id, project_id)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Question not found")
+    return row
+
+
+def build_questions(conn: sqlite3.Connection, project_id: str) -> list[Question]:
+    expire_questions(conn, project_id)
+    rows = conn.execute(
+        "SELECT * FROM questions WHERE project_id = ? ORDER BY created_at, rowid",
+        (project_id,),
+    ).fetchall()
+    return [question_to_model(row) for row in rows]
+
+
+def list_pending_questions(conn: sqlite3.Connection, limit: int = 5) -> list[Question]:
+    """Oldest pending questions across all projects: what the dispatcher should answer."""
+    expire_questions(conn)
+    rows = conn.execute(
+        """
+        SELECT * FROM questions q
+        WHERE q.status = 'pending'
+          AND EXISTS (SELECT 1 FROM projects p WHERE p.id = q.project_id)
+        ORDER BY q.created_at, q.rowid
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [question_to_model(row) for row in rows]
+
+
+# -------------------------------------------------------------------- context summary
+
+
+def get_context_summary(conn: sqlite3.Connection, project_id: str) -> ContextSummary:
+    row = conn.execute(
+        "SELECT context_summary, context_summary_facts FROM projects WHERE id = ?", (project_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Project not found")
+    return ContextSummary(
+        summary=row["context_summary"] or "",
+        facts_covered=int(row["context_summary_facts"] or 0),
+    )
+
+
+def save_context_summary(
+    conn: sqlite3.Connection, project_id: str, summary: str, facts_covered: int
+) -> ContextSummary:
+    cursor = conn.execute(
+        "UPDATE projects SET context_summary = ?, context_summary_facts = ? WHERE id = ?",
+        (summary, facts_covered, project_id),
+    )
+    if cursor.rowcount == 0:
+        raise HTTPException(404, "Project not found")
+    return ContextSummary(summary=summary, facts_covered=facts_covered)

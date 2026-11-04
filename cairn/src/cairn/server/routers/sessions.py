@@ -1,8 +1,6 @@
-import json
 import time
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
 
 from cairn.server.db import get_conn
 from cairn.server.models import (
@@ -23,6 +21,7 @@ from cairn.server.services import (
     session_to_model,
     utcnow,
 )
+from cairn.server.sse import sse_event, sse_response
 
 router = APIRouter(tags=["sessions"])
 
@@ -62,9 +61,6 @@ def stream_session(project_id: str, session_id: str):
         expire_stale_sessions(conn, project_id)
         get_session_or_404(conn, project_id, session_id)
 
-    def event(name: str, payload: dict) -> str:
-        return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
     def generate():
         sent = 0
         snapshot_sent = False
@@ -75,7 +71,7 @@ def stream_session(project_id: str, session_id: str):
                 try:
                     row = get_session_or_404(conn, project_id, session_id)
                 except HTTPException:
-                    yield event("gone", {"id": session_id})
+                    yield sse_event("gone", {"id": session_id})
                     return
                 messages = build_session_messages(conn, project_id, session_id)
 
@@ -84,7 +80,7 @@ def stream_session(project_id: str, session_id: str):
                 # One snapshot per connection, even while the transcript is still
                 # empty; later polls only carry deltas.
                 last_change = time.monotonic()
-                yield event(
+                yield sse_event(
                     "snapshot",
                     {"session": session, "messages": [m.model_dump() for m in messages]},
                 )
@@ -93,30 +89,22 @@ def stream_session(project_id: str, session_id: str):
                 fresh = [m.model_dump() for m in messages[sent:]]
                 if fresh:
                     last_change = time.monotonic()
-                    yield event("messages", {"session": session, "messages": fresh})
+                    yield sse_event("messages", {"session": session, "messages": fresh})
             sent = len(messages)
 
             if session["status"] != "running":
-                yield event("end", {"session": session})
+                yield sse_event("end", {"session": session})
                 return
             if time.monotonic() - last_change > STREAM_IDLE_LIMIT_SECONDS:
                 # The dispatcher heartbeats every few seconds; a long silence means the
                 # stream lost its writer, so stop holding the connection open.
-                yield event("end", {"session": session})
+                yield sse_event("end", {"session": session})
                 return
 
             yield ": keep-alive\n\n"
             time.sleep(STREAM_POLL_SECONDS)
 
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
+    return sse_response(generate())
 
 
 @router.post(

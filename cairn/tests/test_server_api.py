@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi.testclient import TestClient
 import pytest
 
@@ -266,3 +268,197 @@ def test_project_summary_exposes_fgs_counts(client: TestClient) -> None:
     assert summary["pending_step_count"] == 0
     assert summary["finding_count"] == 1
     assert summary["hint_count"] == 1
+
+
+# --------------------------------------------------------------------- side questions
+
+
+def _ask(client: TestClient, project_id: str, content: str = "what is this CVE?") -> dict:
+    response = client.post(f"/projects/{project_id}/questions", json={"content": content})
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def _sse_events(client: TestClient, url: str) -> list[tuple[str, dict | None]]:
+    with client.stream("GET", url) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        events: list[tuple[str, dict | None]] = []
+        name = None
+        for line in response.iter_lines():
+            if line.startswith("event: "):
+                name = line[len("event: ") :]
+            elif line.startswith("data: "):
+                events.append((name, json.loads(line[len("data: ") :])))
+    return events
+
+
+def test_question_can_be_claimed_then_answered_once(client: TestClient) -> None:
+    project_id = _create_project(client)
+    question = _ask(client, project_id, "  what is this CVE?  ")
+
+    assert question["id"] == "q001"
+    assert question["content"] == "what is this CVE?"
+    assert question["status"] == "pending"
+    assert question["answer"] is None
+    assert question["started_at"] is None
+    assert [q["id"] for q in client.get(f"/projects/{project_id}/questions").json()] == ["q001"]
+    assert client.get(f"/projects/{project_id}/questions/q001").json()["content"] == question["content"]
+    assert client.get(f"/projects/{project_id}/questions/q999").status_code == 404
+
+    # An unanswered question has no worker that could report a result yet.
+    response = client.post(
+        f"/projects/{project_id}/questions/q001/answer",
+        json={"status": "answered", "answer": "CVE-2024-1 is a demo"},
+    )
+    assert response.status_code == 409
+
+    response = client.post(
+        f"/projects/{project_id}/questions/q001/claim", json={"worker": "pi-main"}
+    )
+    assert response.status_code == 200
+    claimed = response.json()
+    assert claimed["status"] == "running"
+    assert claimed["worker"] == "pi-main"
+    assert claimed["started_at"] is not None
+
+    response = client.post(
+        f"/projects/{project_id}/questions/q001/claim", json={"worker": "worker-b"}
+    )
+    assert response.status_code == 409
+
+    response = client.post(
+        f"/projects/{project_id}/questions/q001/answer",
+        json={
+            "status": "answered",
+            "answer": "CVE-2024-1 is a demo",
+            "worker": "pi-main",
+            "duration_ms": 1234,
+        },
+    )
+    assert response.status_code == 200
+    answered = response.json()
+    assert answered["status"] == "answered"
+    assert answered["answer"] == "CVE-2024-1 is a demo"
+    assert answered["duration_ms"] == 1234
+    assert answered["answered_at"] is not None
+
+    assert client.post(
+        f"/projects/{project_id}/questions/q001/answer",
+        json={"status": "answered", "answer": "again"},
+    ).status_code == 409
+    assert client.post(f"/projects/{project_id}/questions/q001/cancel").status_code == 409
+
+
+def test_failed_answer_requires_an_error_and_closes_the_question(client: TestClient) -> None:
+    project_id = _create_project(client)
+    _ask(client, project_id)
+    client.post(f"/projects/{project_id}/questions/q001/claim", json={"worker": "pi-main"})
+
+    response = client.post(
+        f"/projects/{project_id}/questions/q001/answer",
+        json={"status": "failed", "worker": "pi-main"},
+    )
+    assert response.status_code == 422
+
+    response = client.post(
+        f"/projects/{project_id}/questions/q001/answer",
+        json={"status": "failed", "error": "worker timed out", "worker": "pi-main"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "failed"
+    assert payload["error"] == "worker timed out"
+    assert payload["answer"] is None
+
+
+def test_cancel_and_clear_only_touch_settled_questions(client: TestClient) -> None:
+    project_id = _create_project(client)
+    _ask(client, project_id, "first")
+    _ask(client, project_id, "second")
+
+    response = client.post(f"/projects/{project_id}/questions/q001/cancel")
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["answered_at"] is not None
+
+    # A pending question is still waiting for its worker, so clearing keeps it.
+    assert client.delete(f"/projects/{project_id}/questions").json() == {"deleted": 1}
+    remaining = client.get(f"/projects/{project_id}/questions").json()
+    assert [(q["id"], q["status"]) for q in remaining] == [("q002", "pending")]
+
+    client.post(f"/projects/{project_id}/questions/q002/cancel")
+    assert client.delete(f"/projects/{project_id}/questions").json() == {"deleted": 1}
+    assert client.get(f"/projects/{project_id}/questions").json() == []
+
+
+def test_question_content_must_not_be_blank(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    assert client.post(f"/projects/{project_id}/questions", json={"content": "   "}).status_code == 422
+    assert client.get("/projects/proj_999/questions").status_code == 404
+
+
+def test_pending_questions_span_projects_and_honour_the_limit(client: TestClient) -> None:
+    first = _create_project(client)
+    second = _create_project(client)
+    _ask(client, first, "oldest")
+    _ask(client, second, "newest")
+
+    pending = client.get("/questions/pending", params={"limit": 1}).json()
+    assert [q["content"] for q in pending] == ["oldest"]
+    assert [q["project_id"] for q in client.get("/questions/pending").json()] == [first, second]
+
+    assert client.get("/questions/pending", params={"limit": 0}).status_code == 422
+    assert client.get("/questions/pending", params={"limit": 51}).status_code == 422
+
+
+def test_completed_project_rejects_new_questions(client: TestClient) -> None:
+    project_id = _create_project(client)
+    response = client.post(
+        f"/projects/{project_id}/complete",
+        json={"from": ["origin"], "description": "solved", "worker": "decider"},
+    )
+    assert response.status_code == 200
+
+    response = client.post(f"/projects/{project_id}/questions", json={"content": "late"})
+    assert response.status_code == 403
+
+
+def test_question_stream_snapshots_history_and_ends_when_idle(client: TestClient) -> None:
+    project_id = _create_project(client)
+    _ask(client, project_id, "already settled")
+    client.post(f"/projects/{project_id}/questions/q001/cancel")
+
+    events = _sse_events(client, f"/projects/{project_id}/questions/stream")
+
+    assert [name for name, _ in events] == ["snapshot", "end"]
+    assert [q["status"] for q in events[0][1]["questions"]] == ["cancelled"]
+
+
+# -------------------------------------------------------------- rolling graph summary
+
+
+def test_context_summary_round_trip(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    response = client.get(f"/projects/{project_id}/context")
+    assert response.status_code == 200
+    assert response.json() == {"summary": "", "facts_covered": 0}
+
+    response = client.put(
+        f"/projects/{project_id}/context",
+        json={"summary": "- db reachable (origin)", "facts_covered": 1},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"summary": "- db reachable (origin)", "facts_covered": 1}
+
+    assert client.get(f"/projects/{project_id}/context").json() == {
+        "summary": "- db reachable (origin)",
+        "facts_covered": 1,
+    }
+
+    assert client.get("/projects/proj_999/context").status_code == 404
+    assert client.put(
+        "/projects/proj_999/context", json={"summary": "- x", "facts_covered": 1}
+    ).status_code == 404

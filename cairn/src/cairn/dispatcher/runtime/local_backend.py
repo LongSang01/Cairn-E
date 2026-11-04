@@ -78,8 +78,5 @@ class LocalBackend:
     def cleanup_stopped(self, project_id: str) -> bool:
         return True
 
-    def managed_container_names(self) -> list[str]:
-        return []
-
     def _project_dir(self, project_id: str) -> Path:
         return self._root / project_id.replace("/", "-")

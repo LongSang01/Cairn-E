@@ -56,6 +56,7 @@ MOCK_ALLOWED_OUTCOMES: dict[str, frozenset[str]] = {
     "decide": frozenset({"complete", "steps", "noop", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "execute": frozenset({"facts", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "execute_conclude": frozenset({"facts", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "question": frozenset({"answer", "invalid_json", "command_fail"}),
 }
 
 MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
@@ -95,6 +96,10 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
             "command_fail": "0.0",
         },
     },
+    "question": {
+        "delay": [0.05, 0.2],
+        "outcomes": {"answer": "1.0", "invalid_json": "0.0", "command_fail": "0.0"},
+    },
 }
 
 MOCK_ALLOWED_ENV_KEYS = frozenset(
@@ -116,9 +121,41 @@ class ExecuteTaskConfig(BaseModel):
     conclude_timeout: int = Field(gt=0)
 
 
+class QuestionTaskConfig(BaseModel):
+    """Side question: one read-only answer, never written back into the graph."""
+
+    timeout: int = Field(gt=0, default=120)
+
+
 class TasksConfig(BaseModel):
     decide: DecideTaskConfig
     execute: ExecuteTaskConfig
+    question: QuestionTaskConfig = Field(default_factory=QuestionTaskConfig)
+
+
+class ContextBudgetConfig(BaseModel):
+    """Prompt budget for the graph snapshot (see cairn.dispatcher.context).
+
+    `context_window` is the fallback window; a worker can override it through the
+    `CONTEXT_WINDOW` (or pi's `PI_MODEL_CONTEXT_WINDOW`) env var.
+    """
+
+    enabled: bool = True
+    context_window: int = Field(gt=0, default=200_000)
+    max_output_tokens: int = Field(gt=0, default=16_000)
+    safety_ratio: float = Field(gt=0, le=0.5, default=0.05)
+    safety_min_tokens: int = Field(ge=0, default=2_000)
+    safety_max_tokens: int = Field(gt=0, default=18_000)
+    recent_items: int = Field(gt=0, default=20)
+    summary_max_calls: int = Field(ge=0, default=1)
+    summary_timeout: int = Field(gt=0, default=90)
+    min_snapshot_tokens: int = Field(gt=0, default=2_000)
+
+    @model_validator(mode="after")
+    def validate_safety_margin(self) -> "ContextBudgetConfig":
+        if self.safety_min_tokens > self.safety_max_tokens:
+            raise ValueError("safety_min_tokens cannot exceed safety_max_tokens")
+        return self
 
 
 class ContainerConfig(BaseModel):
@@ -142,6 +179,9 @@ class RuntimeConfig(BaseModel):
     worker_healthcheck: WorkerHealthcheckMode = "startup_only"
     execution: ExecutionMode = "container"
     prompt_group: str = Field(min_length=1)
+    # Side questions run outside the decide/execute slots but still need a cap.
+    max_questions: int = Field(gt=0, default=1)
+    context_budget: ContextBudgetConfig = Field(default_factory=ContextBudgetConfig)
 
 
 class WorkerConfig(BaseModel):

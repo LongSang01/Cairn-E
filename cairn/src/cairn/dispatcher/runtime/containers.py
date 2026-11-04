@@ -106,7 +106,7 @@ class ContainerManager:
                 LOG.warning("failed to remove container=%s error=%s", name, exc)
                 return False
             return self.inspect_state(name) is None
-        elif state == "running":
+        if state == "running":
             LOG.info("stopping completed project container project=%s container=%s", project_id, name)
             try:
                 container.stop(timeout=1)
@@ -134,29 +134,6 @@ class ContainerManager:
             return False
         return self.inspect_state(name) != "running"
 
-    def cleanup_orphan(self, name: str) -> bool:
-        state = self.inspect_state(name)
-        if state is None:
-            return True
-        LOG.info("removing orphan project container container=%s state=%s", name, state)
-        container = self._require_container(name)
-        try:
-            container.remove(force=True)
-        except NotFound:
-            return True
-        except DockerException as exc:
-            LOG.warning("failed to remove orphan container=%s error=%s", name, exc)
-            return False
-        return self.inspect_state(name) is None
-
-    def managed_container_names(self) -> list[str]:
-        try:
-            containers = self._client.containers.list(all=True)
-        except DockerException as exc:
-            LOG.warning("failed to list managed containers error=%s", exc)
-            return []
-        return sorted(container.name for container in containers if container.name.startswith(self._PREFIX))
-
     def needs_completed_cleanup(self, project_id: str) -> bool:
         name = self.container_name(project_id)
         state = self.inspect_state(name)
@@ -165,9 +142,6 @@ class ContainerManager:
         if self._config.completed_action == "remove":
             return True
         return state == "running"
-
-    def needs_orphan_cleanup(self, name: str) -> bool:
-        return self.inspect_state(name) is not None
 
     def needs_stopped_cleanup(self, project_id: str) -> bool:
         return self.inspect_state(self.container_name(project_id)) == "running"

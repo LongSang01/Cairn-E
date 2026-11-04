@@ -71,6 +71,9 @@ if outcome=="command_fail":
 if outcome=="invalid_json":
     print("{invalid json")
     raise SystemExit(0)
+if phase=="question":
+    print("mock answer: derived from the current graph snapshot")
+    raise SystemExit(0)
 if phase=="decide":
     fact_ids=prompt.get("fact_ids") or []
     open_steps=prompt.get("open_steps") or []

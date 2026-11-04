@@ -7,6 +7,7 @@ from typing import Any
 from cairn.dispatcher.config import WorkerConfig
 from cairn.dispatcher.workers.base import DriverResult, WorkerDriver
 from cairn.dispatcher.workers.health import HealthResult, http_ping, proxies_from_env
+from cairn.dispatcher.workers.stream import iter_json_events
 
 
 class PiDriver(WorkerDriver):
@@ -198,18 +199,7 @@ class PiDriver(WorkerDriver):
 
     @staticmethod
     def _iter_events(stdout: str) -> list[dict[str, Any]]:
-        events: list[dict[str, Any]] = []
-        for line in stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                events.append(payload)
-        return events
+        return list(iter_json_events(stdout))
 
     @staticmethod
     def _models_json(worker: WorkerConfig) -> str:

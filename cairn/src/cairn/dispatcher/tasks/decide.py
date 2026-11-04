@@ -4,6 +4,7 @@ import logging
 import time
 
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
+from cairn.dispatcher.context import GraphView, prepare_snapshot, summarize_prompt
 from cairn.dispatcher.contracts import parse_json_output, validate_decide_payload
 from cairn.dispatcher.prompting import (
     format_fact_ids,
@@ -13,14 +14,16 @@ from cairn.dispatcher.prompting import (
 )
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.session import SessionStream, start_session
+from cairn.dispatcher.runtime.backend import ExecutionBackend
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
-from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.tasks.common import (
     best_effort_release_decide,
     cancel_reason,
     did_timeout,
+    load_stored_summary,
     preview,
+    prompt_overhead_tokens,
     run_worker_process,
     task_healthcheck_enabled,
     write_graph_snapshot_reference,
@@ -29,12 +32,13 @@ from cairn.dispatcher.workers.registry import get_driver
 from cairn.server.models import ProjectDetail
 
 LOG = logging.getLogger(__name__)
+MAX_SUMMARY_CHARS = 4000
 
 
 def run_decide_task(
     config: DispatchConfig,
     client: CairnClient,
-    container_manager: ContainerManager,
+    container_manager: ExecutionBackend,
     project: ProjectDetail,
     export_yaml: str,
     worker: WorkerConfig,
@@ -74,18 +78,38 @@ def run_decide_task(
         goal_ids = [goal.id for goal in project.goals if goal.status == "active"]
         step_ids = [step["id"] for step in open_steps]
 
+        template = load_prompt(config.runtime.prompt_group, "decide.md")
+        blocks = {
+            "fact_ids": format_fact_ids(fact_ids),
+            "open_steps": format_open_steps(open_steps),
+            "max_steps": str(config.tasks.decide.max_steps),
+        }
+        # The snapshot gets whatever budget the template and its JSON blocks leave.
+        overhead_tokens = prompt_overhead_tokens(template, blocks)
+        view = _prepare_graph_view(
+            client,
+            config,
+            project_id,
+            export_yaml.strip(),
+            worker,
+            overhead_tokens=overhead_tokens,
+            phase="decide",
+            driver=driver,
+            container_manager=container_manager,
+            container_name=container_name,
+            lease=lease,
+            cancellation=cancellation,
+        )
         prompt = render_prompt(
-            load_prompt(config.runtime.prompt_group, "decide.md"),
+            template,
             {
+                **blocks,
                 "graph_yaml": write_graph_snapshot_reference(
                     container_manager,
                     container_name,
-                    export_yaml.strip(),
+                    view.yaml,
                     phase="decide",
                 ),
-                "fact_ids": format_fact_ids(fact_ids),
-                "open_steps": format_open_steps(open_steps),
-                "max_steps": str(config.tasks.decide.max_steps),
             },
         )
 
@@ -368,6 +392,138 @@ def _log_write_failure(action: str, project_id: str, worker_name: str, response)
         response.status_code,
         response.text,
     )
+
+
+def _prepare_graph_view(
+    client: CairnClient,
+    config: DispatchConfig,
+    project_id: str,
+    graph_yaml: str,
+    worker: WorkerConfig,
+    *,
+    overhead_tokens: int,
+    phase: str,
+    driver,
+    container_manager: ExecutionBackend,
+    container_name: str,
+    lease: HeartbeatLease,
+    cancellation: TaskCancellation,
+) -> GraphView:
+    """Fit the graph into the worker's context budget, summarizing old facts once."""
+    budget_config = config.runtime.context_budget
+    summary, covered = load_stored_summary(client, project_id, enabled=budget_config.enabled)
+    view = prepare_snapshot(
+        graph_yaml,
+        config=budget_config,
+        worker=worker,
+        overhead_tokens=overhead_tokens,
+        phase=phase,
+        summary=summary,
+        summary_facts=covered,
+    )
+    LOG.info(
+        "graph snapshot project=%s phase=%s worker=%s budget_tokens=%s snapshot_tokens=%s compacted=%s "
+        "truncated=%s older_facts=%s summarized=%s",
+        project_id,
+        phase,
+        worker.name,
+        view.budget_tokens,
+        view.tokens,
+        view.compacted,
+        view.truncated,
+        len(view.old_facts),
+        covered,
+    )
+    if not view.needs_summary or budget_config.summary_max_calls <= 0:
+        return view
+
+    pending = view.old_facts[covered:]
+    summary_text = _summarize_history(
+        driver=driver,
+        config=config,
+        container_manager=container_manager,
+        container_name=container_name,
+        worker=worker,
+        project_id=project_id,
+        previous_summary=summary,
+        facts=pending,
+        lease=lease,
+        cancellation=cancellation,
+    )
+    if not summary_text:
+        return view
+    try:
+        client.save_context_summary(
+            project_id, summary=summary_text, facts_covered=len(view.old_facts)
+        )
+    except Exception:  # noqa: BLE001
+        LOG.warning("context summary write failed project=%s", project_id, exc_info=True)
+    return prepare_snapshot(
+        graph_yaml,
+        config=budget_config,
+        worker=worker,
+        overhead_tokens=overhead_tokens,
+        phase=phase,
+        summary=summary_text,
+        summary_facts=len(view.old_facts),
+    )
+
+
+def _summarize_history(
+    *,
+    driver,
+    config: DispatchConfig,
+    container_manager: ExecutionBackend,
+    container_name: str,
+    worker: WorkerConfig,
+    project_id: str,
+    previous_summary: str,
+    facts: list[dict],
+    lease: HeartbeatLease,
+    cancellation: TaskCancellation,
+) -> str | None:
+    """One bounded summarization call: a single attempt, its own timeout, no retries."""
+    if not facts:
+        return None
+    budget_config = config.runtime.context_budget
+    prompt = summarize_prompt(previous_summary, facts)
+    LOG.info(
+        "summarizing graph history project=%s worker=%s facts=%s timeout=%ss",
+        project_id,
+        worker.name,
+        len(facts),
+        budget_config.summary_timeout,
+    )
+    try:
+        session = driver.prepare_session()
+        command = driver.build_execute(worker, prompt, session)
+        result = run_worker_process(
+            container_manager,
+            container_name,
+            worker,
+            command.argv,
+            phase="decide_summary",
+            timeout_seconds=budget_config.summary_timeout,
+            lease=lease,
+            cancellation=cancellation,
+        )
+    except Exception:  # noqa: BLE001
+        LOG.warning("graph summarization failed project=%s", project_id, exc_info=True)
+        return None
+    if result.cancelled or result.timed_out or result.returncode != 0:
+        LOG.warning(
+            "graph summarization gave up project=%s worker=%s cancelled=%s timed_out=%s code=%s",
+            project_id,
+            worker.name,
+            result.cancelled,
+            result.timed_out,
+            result.returncode,
+        )
+        return None
+    text = driver.extract_response_text(result.stdout, result.stderr).strip()
+    if not text:
+        return None
+    return text[:MAX_SUMMARY_CHARS]
 
 
 def _healthcheck(driver, worker: WorkerConfig, timeout: int, project_id: str, cancellation, lease) -> str | None:

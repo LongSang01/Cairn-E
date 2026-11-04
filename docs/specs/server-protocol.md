@@ -481,6 +481,106 @@ SSE（`text/event-stream`）对话流，会话页用它实时看到消息增长�
 
 响应带 `Cache-Control: no-cache, no-transform` 与 `X-Accel-Buffering: no`，nginx 代理侧也必须关闭缓冲（本仓库的 [nginx 配置](../../deploy/nginx/default.conf.template) 已设置 `proxy_buffering off`），否则消息会被攒住不刷新。
 
+### Questions（旁路提问）
+
+旁路提问是一条只读通道：人类在任务进行中问一句图外的问题，dispatcher 用一个空闲 worker 基于当前图快照作答。答案只写进 `questions` 表，不产生 fact / step / hint，也不占用 Decide / Execute 的并发槽位。
+
+```json
+{
+  "id": "q001",
+  "project_id": "proj_001",
+  "content": "这个 CVE 具体是什么？",
+  "status": "pending",
+  "answer": null,
+  "error": null,
+  "worker": null,
+  "created_at": "2026-01-01T00:05:00Z",
+  "started_at": null,
+  "answered_at": null,
+  "duration_ms": null
+}
+```
+
+- `id` 在项目内自增（`q001`、`q002`…）。
+- `status` ∈ `pending` | `running` | `answered` | `failed` | `cancelled`；`pending` 是还没被 dispatcher 抢到，`running` 是已有 worker 接手。
+- `content` 去空白后长度 1–4000，全空白返回 `422`。
+- `pending` 超过 300 秒、`running` 超过 900 秒没有进展的，会被读接口判定为 `failed`，避免界面永远转圈。
+
+#### GET /projects/{project_id}/questions
+
+按时间顺序返回该项目的全部提问。
+
+#### POST /projects/{project_id}/questions
+
+```json
+{"content": "这个 CVE 具体是什么？"}
+```
+
+返回 201 与该 Question。`completed` 项目不能再提问（worker 容器已经不在），返回 `403`。
+
+#### POST /projects/{project_id}/questions/{question_id}/cancel
+
+把 `pending` / `running` 的问题置为 `cancelled` 并写入 `answered_at`；已到终态返回 `409`。正在跑的 worker 不受影响，它稍后提交的答案会被丢弃。
+
+#### DELETE /projects/{project_id}/questions
+
+清空历史，只删除终态（`answered` / `failed` / `cancelled`）记录，返回 `{"deleted": N}`；仍在等待的问题保留。
+
+#### POST /projects/{project_id}/questions/{question_id}/claim
+
+内部接口，dispatcher 调用 worker 之前抢占：
+
+```json
+{"worker": "pi-main"}
+```
+
+`pending` → `running`，记录 `worker` 与 `started_at`。已被抢占或已不是 `pending` 时返回 `409`。
+
+#### POST /projects/{project_id}/questions/{question_id}/answer
+
+内部接口，worker 跑完后提交结果：
+
+```json
+{"status": "answered", "answer": "CVE-2024-1 是演示用的占位编号", "worker": "pi-main", "duration_ms": 4210}
+{"status": "failed", "error": "worker timed out", "worker": "pi-main"}
+```
+
+`status` ∈ `answered` | `failed`；`answered` 必须带 `answer`，`failed` 必须带 `error`，缺了返回 `422`。只有 `running` 的问题能作答（必须先 claim），重复提交返回 `409`。
+
+#### GET /questions/pending
+
+内部接口，跨项目返回最早的待答问题供 dispatcher 领取：默认 5 条，`limit` 取值 1–50，越界返回 `422`。
+
+#### GET /projects/{project_id}/questions/stream
+
+SSE（`text/event-stream`）提问流：
+
+- `snapshot`：连接后的第一个事件，带完整 `questions` 列表。
+- `questions`：列表变化时发出，仍带完整列表（列表很短，不做增量）。
+- `end`：没有任何 `pending` / `running` 的问题，或连接超过 900 秒时发出，随后关闭连接。
+- `gone`：项目被删除时发出。
+- 其余时间每秒发一行 `: keep-alive` 注释。
+
+### Context（滚动图摘要）
+
+图快照超出 worker 的上下文预算时，dispatcher 把最近窗口之外的事实压成一段摘要，连同"覆盖了多少条事实"一起存到项目上，后续 Decide / Execute / 提问直接复用，不再重复调用模型。
+
+```json
+{"summary": "- 10.0.0.5 上的数据库可访问 (f012)", "facts_covered": 75}
+```
+
+#### GET /projects/{project_id}/context
+
+返回当前摘要；从未生成过时是 `{"summary": "", "facts_covered": 0}`。
+
+#### PUT /projects/{project_id}/context
+
+```json
+{"summary": "- 10.0.0.5 上的数据库可访问 (f012)", "facts_covered": 75}
+```
+
+整体覆盖写入并返回写入后的值。摘要属于旁路信息，不进入导出 YAML / timeline。
+
 ### 导出
 
 #### GET /projects/{project_id}/export?format=yaml
@@ -501,3 +601,4 @@ SSE（`text/event-stream`）对话流，会话页用它实时看到消息增长�
 4. 一个 Step 同时只能被一个 worker 持有。
 5. 一个项目同时只能有一个 Decide 租约。
 6. 项目 `completed` 后所有写接口返回 `403`，只有 reopen 例外。
+7. 旁路提问只写 `questions` 表：不新增事实、不占用 Step，答案不进入图。

@@ -8,10 +8,7 @@ class DispatcherLogFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         name = record.name
-        if name.startswith(self._PREFIX):
-            shortname = name[len(self._PREFIX):]
-        else:
-            shortname = name
+        shortname = name[len(self._PREFIX):] if name.startswith(self._PREFIX) else name
         record.shortname = shortname
         return super().format(record)
 

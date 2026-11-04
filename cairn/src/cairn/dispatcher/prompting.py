@@ -24,9 +24,5 @@ def format_open_steps(steps: list[dict[str, Any]]) -> str:
     return format_json_block(steps)
 
 
-def format_hints(hints: list[dict[str, Any]]) -> str:
-    return format_json_block(hints)
-
-
 def format_json_block(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)

@@ -17,7 +17,7 @@ from cairn.dispatcher.runtime.process import ProcessResult
 from cairn.dispatcher.scheduler.loop import DispatcherLoop
 from cairn.server import db
 from cairn.server.app import app
-from cairn.server.models import ProjectDetail, ProjectSummary, Settings
+from cairn.server.models import ContextSummary, ProjectDetail, ProjectSummary, Question, Settings
 
 
 class InProcessClient:
@@ -167,6 +167,56 @@ class InProcessClient:
     def session_heartbeat(self, project_id: str, session_id: str) -> ApiResult:
         return self._post(f"/projects/{project_id}/sessions/{session_id}/heartbeat", {})
 
+    def list_pending_questions(self, limit: int = 5) -> list[Question]:
+        response = self.http.get("/questions/pending", params={"limit": limit})
+        response.raise_for_status()
+        return TypeAdapter(list[Question]).validate_python(response.json())
+
+    def get_question(self, project_id: str, question_id: str) -> Question:
+        response = self.http.get(f"/projects/{project_id}/questions/{question_id}")
+        response.raise_for_status()
+        return Question.model_validate(response.json())
+
+    def claim_question(self, project_id: str, question_id: str, worker: str) -> ApiResult:
+        return self._post(f"/projects/{project_id}/questions/{question_id}/claim", {"worker": worker})
+
+    def answer_question(
+        self,
+        project_id: str,
+        question_id: str,
+        *,
+        status: str,
+        answer: str | None = None,
+        error: str | None = None,
+        worker: str | None = None,
+        duration_ms: int | None = None,
+    ) -> ApiResult:
+        return self._post(
+            f"/projects/{project_id}/questions/{question_id}/answer",
+            {
+                "status": status,
+                "answer": answer,
+                "error": error,
+                "worker": worker,
+                "duration_ms": duration_ms,
+            },
+        )
+
+    def get_context_summary(self, project_id: str) -> ContextSummary:
+        response = self.http.get(f"/projects/{project_id}/context")
+        response.raise_for_status()
+        return ContextSummary.model_validate(response.json())
+
+    def save_context_summary(
+        self, project_id: str, *, summary: str, facts_covered: int
+    ) -> ApiResult:
+        response = self.http.put(
+            f"/projects/{project_id}/context",
+            json={"summary": summary, "facts_covered": facts_covered},
+        )
+        data = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
+        return ApiResult(response.status_code, data, response.text)
+
     def _post(self, path: str, payload: dict[str, Any]) -> ApiResult:
         response = self.http.post(path, json=payload)
         data = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
@@ -255,9 +305,6 @@ class LocalContainerManager:
     def needs_stopped_cleanup(self, _project_id: str) -> bool:
         return False
 
-    def managed_container_names(self) -> list[str]:
-        return []
-
 
 @pytest.fixture
 def http_client(tmp_path, monkeypatch) -> TestClient:
@@ -273,7 +320,7 @@ def _phase(
     rules: list[dict[str, Any]] | None = None,
     zero_outcomes: list[str] | None = None,
 ) -> str:
-    outcomes = {name: 0 for name in zero_outcomes or []}
+    outcomes = dict.fromkeys(zero_outcomes or [], 0)
     outcomes[outcome] = 1
     payload: dict[str, Any] = {"delay": [0, 0], "outcomes": outcomes}
     if rules is not None:
@@ -288,6 +335,7 @@ def _config(
     task_types: list[str] | None = None,
     worker_healthcheck: str = "startup_only",
     healthcheck: str | None = None,
+    question: str | None = None,
 ) -> DispatchConfig:
     return DispatchConfig.model_validate(
         {
@@ -322,6 +370,7 @@ def _config(
                         "MOCK_DECIDE": decide,
                         "MOCK_EXECUTE": execute,
                         "MOCK_EXECUTE_CONCLUDE": execute,
+                        "MOCK_QUESTION": question or _phase("answer"),
                     },
                 }
             ],
@@ -336,8 +385,10 @@ def _loop(config: DispatchConfig, client: InProcessClient, containers: LocalCont
     loop.container_manager = containers
     loop.executor = ThreadPoolExecutor(max_workers=config.runtime.max_workers)
     loop.cleanup_executor = ThreadPoolExecutor(max_workers=1)
+    loop.question_executor = ThreadPoolExecutor(max_workers=config.runtime.max_questions)
     loop.futures = {}
     loop.cleanup_futures = {}
+    loop.question_futures = {}
     loop.decide_checkpoints = {}
     loop.runtime_project_ids = set()
     loop.worker_unhealthy_until = {}
@@ -356,6 +407,7 @@ def _dispatch_and_wait(loop: DispatcherLoop) -> None:
     loop._refresh_runtime_projects(summaries)
     loop._cancel_inactive_tasks(summaries)
     loop._queue_container_cleanups(summaries)
+    loop._dispatch_questions()
     loop._dispatch_available(summaries)
     assert loop.futures
     for future in list(loop.futures):
@@ -588,3 +640,37 @@ def test_decide_checkpoint_tracks_graph_after_decide_run(http_client: TestClient
 
     assert checkpoint.open_step_count == summary.pending_step_count == 1
     assert checkpoint.fact_count == summary.fact_count
+
+
+def test_mock_question_is_answered_without_touching_the_graph(http_client: TestClient) -> None:
+    client = InProcessClient(http_client)
+    loop = _loop(
+        _config(decide=_phase("noop", zero_outcomes=["steps"]), execute=_phase("facts")),
+        client,
+        LocalContainerManager(),
+    )
+    project_id = _create_project(http_client)
+    question = http_client.post(
+        f"/projects/{project_id}/questions", json={"content": "what is this CVE?"}
+    ).json()
+
+    try:
+        loop._dispatch_questions()
+        assert loop.question_futures
+        for future in list(loop.question_futures):
+            future.result(timeout=5)
+        loop._reap_question_futures()
+    finally:
+        loop.close()
+
+    answered = http_client.get(f"/projects/{project_id}/questions/{question['id']}").json()
+    assert answered["status"] == "answered"
+    assert answered["answer"] == "mock answer: derived from the current graph snapshot"
+    assert answered["worker"] == "mock-worker"
+    assert answered["duration_ms"] is not None
+
+    # A side answer is read-only: no facts, no steps, no hints were created.
+    project = client.get_project(project_id)
+    assert [fact.id for fact in project.facts] == ["origin"]
+    assert project.steps == []
+    assert http_client.get("/questions/pending").json() == []

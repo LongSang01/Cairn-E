@@ -5,9 +5,11 @@ import uuid
 from dataclasses import dataclass
 
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
+from cairn.dispatcher.context import estimate_tokens, prepare_snapshot
+from cairn.dispatcher.prompting import render_prompt
 from cairn.dispatcher.protocol.client import CairnClient
+from cairn.dispatcher.runtime.backend import ExecutionBackend
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
-from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.runtime.process import OutputCallback, ProcessResult
 
@@ -52,8 +54,64 @@ def task_healthcheck_enabled(config: DispatchConfig) -> bool:
     return config.runtime.worker_healthcheck == "startup_and_task"
 
 
+def prompt_overhead_tokens(template: str, blocks: dict[str, str]) -> int:
+    """Tokens the prompt spends on everything except the snapshot itself."""
+    return estimate_tokens(render_prompt(template, {**blocks, "graph_yaml": ""}))
+
+
+def load_stored_summary(client: CairnClient, project_id: str, *, enabled: bool) -> tuple[str, int]:
+    """The rolling summary the last Decide run persisted, plus how many facts it covers.
+
+    Budget bookkeeping must never break a run, so an unavailable summary degrades to
+    "no summary" and the snapshot falls back to its deterministic form.
+    """
+    if not enabled:
+        return "", 0
+    try:
+        stored = client.get_context_summary(project_id)
+    except Exception:  # noqa: BLE001 - budgeting must never break a run
+        LOG.warning("context summary unavailable project=%s", project_id, exc_info=True)
+        return "", 0
+    return stored.summary, stored.facts_covered
+
+
+def budgeted_graph_yaml(
+    graph_yaml: str,
+    *,
+    client: CairnClient,
+    project_id: str,
+    config: DispatchConfig,
+    worker: WorkerConfig,
+    phase: str,
+    overhead_tokens: int,
+) -> str:
+    """Compact the snapshot down to the worker's remaining context budget."""
+    summary, covered = load_stored_summary(
+        client, project_id, enabled=config.runtime.context_budget.enabled
+    )
+    view = prepare_snapshot(
+        graph_yaml,
+        config=config.runtime.context_budget,
+        worker=worker,
+        overhead_tokens=overhead_tokens,
+        phase=phase,
+        summary=summary,
+        summary_facts=covered,
+    )
+    if view.compacted:
+        LOG.info(
+            "graph snapshot compacted phase=%s worker=%s budget_tokens=%s snapshot_tokens=%s truncated=%s",
+            phase,
+            worker.name,
+            view.budget_tokens,
+            view.tokens,
+            view.truncated,
+        )
+    return view.yaml
+
+
 def write_graph_snapshot_reference(
-    container_manager: ContainerManager,
+    container_manager: ExecutionBackend,
     container_name: str,
     graph_yaml: str,
     *,
@@ -70,7 +128,7 @@ def write_graph_snapshot_reference(
 
 
 def run_worker_process(
-    container_manager: ContainerManager,
+    container_manager: ExecutionBackend,
     container_name: str,
     worker: WorkerConfig,
     argv: list[str],

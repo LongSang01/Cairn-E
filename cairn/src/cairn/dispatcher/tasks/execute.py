@@ -8,15 +8,17 @@ from cairn.dispatcher.contracts import parse_json_output, validate_execute_paylo
 from cairn.dispatcher.prompting import load_prompt, render_prompt
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.session import SessionStream, start_session
+from cairn.dispatcher.runtime.backend import ExecutionBackend
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
-from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.tasks.common import (
     best_effort_release,
+    budgeted_graph_yaml,
     cancel_reason,
     did_timeout,
     preview,
     project_allows_conclude_fallback,
+    prompt_overhead_tokens,
     run_worker_process,
     task_healthcheck_enabled,
     write_graph_snapshot_reference,
@@ -31,7 +33,7 @@ LOG = logging.getLogger(__name__)
 def run_execute_task(
     config: DispatchConfig,
     client: CairnClient,
-    container_manager: ContainerManager,
+    container_manager: ExecutionBackend,
     project: ProjectDetail,
     export_yaml: str,
     step: Step,
@@ -90,17 +92,27 @@ def run_execute_task(
                 best_effort_release(client, project_id, step.id, worker.name)
                 return "unhealthy"
 
+        template = load_prompt(config.runtime.prompt_group, "execute.md")
+        blocks = {"step_id": step.id, "step_description": step.description}
+        graph_yaml = budgeted_graph_yaml(
+            export_yaml.strip(),
+            client=client,
+            project_id=project_id,
+            config=config,
+            worker=worker,
+            phase="execute",
+            overhead_tokens=prompt_overhead_tokens(template, blocks),
+        )
         prompt = render_prompt(
-            load_prompt(config.runtime.prompt_group, "execute.md"),
+            template,
             {
+                **blocks,
                 "graph_yaml": write_graph_snapshot_reference(
                     container_manager,
                     container_name,
-                    export_yaml.strip(),
+                    graph_yaml,
                     phase="execute",
                 ),
-                "step_id": step.id,
-                "step_description": step.description,
             },
         )
 
@@ -278,7 +290,7 @@ def run_execute_task(
 def _try_conclude_fallback(
     config: DispatchConfig,
     client: CairnClient,
-    container_manager: ContainerManager,
+    container_manager: ExecutionBackend,
     container_name: str,
     worker: WorkerConfig,
     driver,
@@ -321,17 +333,27 @@ def _try_conclude_fallback(
 
     container_name = container_manager.ensure_running(project_id)
 
+    template = load_prompt(config.runtime.prompt_group, "execute_conclude.md")
+    blocks = {"step_id": step.id, "step_description": step.description}
+    graph_yaml = budgeted_graph_yaml(
+        export_yaml.strip(),
+        client=client,
+        project_id=project_id,
+        config=config,
+        worker=worker,
+        phase="execute_conclude",
+        overhead_tokens=prompt_overhead_tokens(template, blocks),
+    )
     prompt = render_prompt(
-        load_prompt(config.runtime.prompt_group, "execute_conclude.md"),
+        template,
         {
+            **blocks,
             "graph_yaml": write_graph_snapshot_reference(
                 container_manager,
                 container_name,
-                export_yaml.strip(),
+                graph_yaml,
                 phase="execute_conclude",
             ),
-            "step_id": step.id,
-            "step_description": step.description,
         },
     )
     conclude_argv = driver.build_conclude(worker, prompt, session)
@@ -448,7 +470,7 @@ def _try_conclude_fallback(
 
 
 def _run_process(
-    container_manager: ContainerManager,
+    container_manager: ExecutionBackend,
     container_name: str,
     worker: WorkerConfig,
     argv: list[str],

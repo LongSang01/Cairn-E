@@ -21,6 +21,7 @@ from cairn.dispatcher.scheduler.worker_select import choose_worker
 from cairn.dispatcher.workers.registry import get_driver
 from cairn.dispatcher.tasks.decide import run_decide_task
 from cairn.dispatcher.tasks.execute import run_execute_task
+from cairn.dispatcher.tasks.question import run_question_task
 from cairn.server.models import ProjectDetail, ProjectSummary, Step
 
 LOG = logging.getLogger(__name__)
@@ -49,8 +50,11 @@ class DispatcherLoop:
             self.container_manager = ContainerManager(self.config.container)
         self.executor = ThreadPoolExecutor(max_workers=self.config.runtime.max_workers)
         self.cleanup_executor = ThreadPoolExecutor(max_workers=max(1, min(8, self.config.runtime.max_workers)))
+        # Side questions get their own pool: they never take a decide/execute slot.
+        self.question_executor = ThreadPoolExecutor(max_workers=self.config.runtime.max_questions)
         self.futures: dict[Future[str], RunningTask] = {}
         self.cleanup_futures: dict[Future[bool], tuple[str, str | None, str | None]] = {}
+        self.question_futures: dict[Future[str], str] = {}
         self.decide_checkpoints: dict[str, DecideCheckpoint] = {}
         self.runtime_project_ids: set[str] = set()
         self.worker_unhealthy_until: dict[str, float] = {}
@@ -71,6 +75,7 @@ class DispatcherLoop:
             )
         self.executor.shutdown(wait=True)
         self.cleanup_executor.shutdown(wait=True)
+        self.question_executor.shutdown(wait=True)
         self.container_manager.close()
         self.client.close()
 
@@ -89,6 +94,7 @@ class DispatcherLoop:
                     self._refresh_runtime_projects(summaries)
                     self._cancel_inactive_tasks(summaries)
                     self._queue_container_cleanups(summaries)
+                    self._dispatch_questions()
                     self._dispatch_available(summaries)
                 except requests.RequestException as exc:
                     if once:
@@ -518,6 +524,116 @@ class DispatcherLoop:
             blocked_rejected=blocked_rejected,
             blocked_task_type=blocked_task_type,
         )
+
+    # --- side questions -----------------------------------------------------------
+
+    def _dispatch_questions(self) -> None:
+        """Answer pending side questions outside the decide/execute slots."""
+        self._reap_question_futures()
+        limit = self.config.runtime.max_questions
+        free = limit - len(self.question_futures)
+        if free <= 0:
+            return
+        pending = self.client.list_pending_questions(limit=free)
+        if not pending:
+            self._log_changed("questions/idle", logging.DEBUG, "no pending side questions")
+            return
+        for question in pending:
+            if len(self.question_futures) >= limit:
+                return
+            try:
+                project = self.client.get_project(question.project_id)
+            except requests.RequestException:
+                raise
+            except Exception:
+                LOG.warning(
+                    "question project unavailable project=%s question=%s",
+                    question.project_id,
+                    question.id,
+                )
+                continue
+            if project.project.status == "completed":
+                continue
+            worker = self._select_question_worker(question.project_id)
+            if worker is None:
+                self._log_changed(
+                    "questions/worker",
+                    logging.INFO,
+                    "no decide-capable worker available for side questions",
+                )
+                continue
+            claim = self.client.claim_question(question.project_id, question.id, worker.name)
+            if not claim.ok:
+                LOG.info(
+                    "question claim skipped project=%s question=%s status=%s",
+                    question.project_id,
+                    question.id,
+                    claim.status_code,
+                )
+                continue
+            try:
+                export_yaml = self.client.export_project(question.project_id)
+            except Exception:
+                LOG.warning(
+                    "question snapshot unavailable project=%s question=%s",
+                    question.project_id,
+                    question.id,
+                    exc_info=True,
+                )
+                self.client.answer_question(
+                    question.project_id,
+                    question.id,
+                    status="failed",
+                    error="could not read the graph snapshot",
+                    worker=worker.name,
+                )
+                continue
+            try:
+                future = self.question_executor.submit(
+                    run_question_task,
+                    self.config,
+                    self.client,
+                    self.container_manager,
+                    project,
+                    question,
+                    export_yaml,
+                    worker,
+                )
+            except Exception:
+                LOG.exception(
+                    "failed to submit question project=%s question=%s", question.project_id, question.id
+                )
+                continue
+            self.question_futures[future] = f"{question.project_id}/{question.id}"
+            LOG.info(
+                "dispatched question project=%s question=%s worker=%s",
+                question.project_id,
+                question.id,
+                worker.name,
+            )
+
+    def _reap_question_futures(self) -> None:
+        for future in [future for future in self.question_futures if future.done()]:
+            key = self.question_futures.pop(future)
+            try:
+                outcome = future.result()
+            except Exception:
+                LOG.exception("question task crashed key=%s", key)
+                continue
+            if outcome != "success":
+                LOG.info("question finished key=%s outcome=%s", key, outcome)
+
+    def _select_question_worker(self, project_id: str) -> WorkerConfig | None:
+        now = time.time()
+        candidates = [
+            worker
+            for worker in self.config.workers
+            if "decide" in worker.task_types
+            and self.worker_unhealthy_until.get(worker.name, 0) <= now
+        ]
+        if not candidates:
+            return None
+        return choose_worker(candidates, self._worker_counts())[0]
 
     def _worker_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}

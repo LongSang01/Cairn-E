@@ -28,7 +28,8 @@ def main():
 def serve(host: str, port: int, db_path: str, log_level: str, access_log: bool):
     """Start the Cairn API server."""
     db.configure(Path(db_path))
-    from cairn.server.app import app
+    # Imported here so `cairn dispatch` never loads the web stack.
+    from cairn.server.app import app  # noqa: PLC0415
 
     uvicorn.run(
         app,

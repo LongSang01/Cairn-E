@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 GoalStatus = Literal["active", "achieved", "abandoned"]
 StepStatus = Literal["pending", "running", "done", "abandoned"]
@@ -11,6 +11,8 @@ StepStatus = Literal["pending", "running", "done", "abandoned"]
 SessionRole = Literal["system", "user", "assistant", "thinking", "tool", "tool_call", "tool_result"]
 # `running` marks a session that is still being appended to while the worker runs.
 SessionStatus = Literal["running", "success", "failed", "cancelled", "rejected"]
+# Side question lifecycle: asked by a human, claimed by the dispatcher, then answered.
+QuestionStatus = Literal["pending", "running", "answered", "failed", "cancelled"]
 
 
 class Settings(BaseModel):
@@ -152,6 +154,69 @@ class FinishSessionRequest(BaseModel):
     duration_ms: int | None = None
     error: str | None = None
     native_session: str | None = None
+
+
+class Question(BaseModel):
+    """A read-only side question: answered from a graph snapshot, never written back."""
+
+    id: str
+    project_id: str
+    content: str
+    status: QuestionStatus
+    answer: str | None = None
+    error: str | None = None
+    worker: str | None = None
+    created_at: str
+    started_at: str | None = None
+    answered_at: str | None = None
+    duration_ms: int | None = None
+
+
+class CreateQuestionRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class ClaimQuestionRequest(BaseModel):
+    worker: str
+
+    @field_validator("worker")
+    @classmethod
+    def validate_worker(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class AnswerQuestionRequest(BaseModel):
+    status: Literal["answered", "failed"]
+    answer: str | None = None
+    error: str | None = None
+    worker: str | None = None
+    duration_ms: int | None = None
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> AnswerQuestionRequest:
+        if self.status == "answered" and not (self.answer or "").strip():
+            raise ValueError("answer is required when status is answered")
+        if self.status == "failed" and not (self.error or "").strip():
+            raise ValueError("error is required when status is failed")
+        return self
+
+
+class ContextSummary(BaseModel):
+    """Rolling summary of the facts that left the recent window."""
+
+    summary: str = ""
+    facts_covered: int = Field(ge=0, default=0)
 
 
 class ProjectDecide(BaseModel):

@@ -12,6 +12,7 @@ from cairn.dispatcher.session import SessionStream, build_messages, redact
 from cairn.server import db
 from cairn.server.app import app
 from cairn.server.routers import sessions as sessions_router
+from cairn.server.services import utcnow_before
 
 
 @pytest.fixture
@@ -133,8 +134,6 @@ def test_live_session_appends_messages_and_finishes(client: TestClient) -> None:
 
 def test_stale_running_session_is_expired(client: TestClient) -> None:
     """A dispatcher that dies mid-run must not leave an eternal `running` session."""
-    from cairn.server.services import utcnow_before
-
     project_id = _create_project(client)
     session_id = client.post(
         f"/projects/{project_id}/sessions", json=_session_payload(status="running")
