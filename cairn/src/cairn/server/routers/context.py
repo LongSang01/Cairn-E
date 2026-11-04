@@ -28,4 +28,13 @@ def read_context_summary(project_id: str):
 def write_context_summary(project_id: str, body: ContextSummary):
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
-        return save_context_summary(conn, project_id, body.summary, body.facts_covered)
+        return save_context_summary(
+            conn,
+            project_id,
+            body.summary,
+            body.facts_covered,
+            step_summary=body.step_summary,
+            steps_covered=body.steps_covered,
+            finding_summary=body.finding_summary,
+            findings_covered=body.findings_covered,
+        )

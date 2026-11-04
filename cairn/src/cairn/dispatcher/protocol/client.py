@@ -269,12 +269,27 @@ class CairnClient:
         return ContextSummary.model_validate(response.json())
 
     def save_context_summary(
-        self, project_id: str, *, summary: str, facts_covered: int
+        self,
+        project_id: str,
+        *,
+        summary: str = "",
+        facts_covered: int = 0,
+        step_summary: str = "",
+        steps_covered: int = 0,
+        finding_summary: str = "",
+        findings_covered: int = 0,
     ) -> ApiResult:
         return self._request_json(
             "PUT",
             f"/projects/{project_id}/context",
-            json={"summary": summary, "facts_covered": facts_covered},
+            json={
+                "summary": summary,
+                "facts_covered": facts_covered,
+                "step_summary": step_summary,
+                "steps_covered": steps_covered,
+                "finding_summary": finding_summary,
+                "findings_covered": findings_covered,
+            },
         )
 
     def _request_json(self, method: str, path: str, json: dict[str, Any]) -> ApiResult:

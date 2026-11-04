@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from cairn.dispatcher.workers.registry import get_driver
 from cairn.dispatcher.tasks.decide import run_decide_task
 from cairn.dispatcher.tasks.execute import run_execute_task
 from cairn.dispatcher.tasks.question import run_question_task
+from cairn.dispatcher.tasks.summary import SummaryRequest, run_summary_task
 from cairn.server.models import ProjectDetail, ProjectSummary, Step
 
 LOG = logging.getLogger(__name__)
@@ -52,9 +54,15 @@ class DispatcherLoop:
         self.cleanup_executor = ThreadPoolExecutor(max_workers=max(1, min(8, self.config.runtime.max_workers)))
         # Side questions get their own pool: they never take a decide/execute slot.
         self.question_executor = ThreadPoolExecutor(max_workers=self.config.runtime.max_questions)
+        # Summaries run after the Decide that asked for them, on their own small pool.
+        self.summary_executor = ThreadPoolExecutor(max_workers=self.config.runtime.max_summaries)
         self.futures: dict[Future[str], RunningTask] = {}
         self.cleanup_futures: dict[Future[bool], tuple[str, str | None, str | None]] = {}
         self.question_futures: dict[Future[str], str] = {}
+        self.summary_futures: dict[Future[str], str] = {}
+        self.summary_inflight: set[str] = set()
+        # Decide threads queue summaries, the loop thread reaps them.
+        self._summary_lock = threading.Lock()
         self.decide_checkpoints: dict[str, DecideCheckpoint] = {}
         self.runtime_project_ids: set[str] = set()
         self.worker_unhealthy_until: dict[str, float] = {}
@@ -76,6 +84,7 @@ class DispatcherLoop:
         self.executor.shutdown(wait=True)
         self.cleanup_executor.shutdown(wait=True)
         self.question_executor.shutdown(wait=True)
+        self.summary_executor.shutdown(wait=True)
         self.container_manager.close()
         self.client.close()
 
@@ -94,6 +103,7 @@ class DispatcherLoop:
                     self._refresh_runtime_projects(summaries)
                     self._cancel_inactive_tasks(summaries)
                     self._queue_container_cleanups(summaries)
+                    self._reap_summary_futures()
                     self._dispatch_questions()
                     self._dispatch_available(summaries)
                 except requests.RequestException as exc:
@@ -383,6 +393,7 @@ class DispatcherLoop:
                 export_yaml,
                 worker,
                 cancellation := TaskCancellation(),
+                summary_sink=self.request_summary,
             )
         except Exception:
             LOG.exception("failed to submit decide task project=%s worker=%s", project.project.id, worker.name)
@@ -524,6 +535,66 @@ class DispatcherLoop:
             blocked_rejected=blocked_rejected,
             blocked_task_type=blocked_task_type,
         )
+
+    # --- background summarization --------------------------------------------------
+
+    def request_summary(self, request: SummaryRequest) -> bool:
+        """Queue a background summary for history a Decide could not carry.
+
+        Called from a worker thread (inside the Decide task), so it only touches the
+        executor and a set guarded by the GIL. Returns False when a summary for this
+        project is already in flight, which keeps concurrent Decide runs from fighting
+        over the same channels.
+        """
+        if not request:
+            return False
+        worker = next((item for item in self.config.workers if item.name == request.worker), None)
+        if worker is None:
+            LOG.warning(
+                "summary worker is gone worker=%s project=%s", request.worker, request.project_id
+            )
+            return False
+        with self._summary_lock:
+            if request.project_id in self.summary_inflight:
+                return False
+            try:
+                future = self.summary_executor.submit(
+                    run_summary_task,
+                    self.config,
+                    self.client,
+                    self.container_manager,
+                    worker,
+                    request,
+                )
+            except Exception:  # noqa: BLE001 - a summary is best effort
+                LOG.exception("failed to queue summary project=%s", request.project_id)
+                return False
+            self.summary_futures[future] = request.project_id
+            self.summary_inflight.add(request.project_id)
+        return True
+
+    def _reap_summary_futures(self) -> None:
+        with self._summary_lock:
+            finished = [
+                (future, self.summary_futures.pop(future))
+                for future in list(self.summary_futures)
+                if future.done()
+            ]
+            for _, project_id in finished:
+                self.summary_inflight.discard(project_id)
+        for future, project_id in finished:
+            try:
+                outcome = future.result()
+            except Exception:  # noqa: BLE001 - never let a summary kill the loop
+                LOG.exception("summary task crashed project=%s", project_id)
+                continue
+            self._log_changed(
+                f"summary:{project_id}",
+                logging.INFO,
+                "graph summary %s project=%s",
+                outcome,
+                project_id,
+            )
 
     # --- side questions -----------------------------------------------------------
 

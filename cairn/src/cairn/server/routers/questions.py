@@ -5,9 +5,11 @@ the dispatcher outside the decide/execute slots, and clearing the history only d
 rows from the `questions` table.
 """
 
+import asyncio
 import time
 
 from fastapi import APIRouter, HTTPException, Query
+from starlette.concurrency import run_in_threadpool
 
 from cairn.server.db import get_conn
 from cairn.server.models import (
@@ -46,19 +48,24 @@ def stream_questions(project_id: str):
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
 
-    def generate():
+    def poll() -> list[dict] | None:
+        """Read the side channel off the event loop (sqlite3 is blocking)."""
+        with get_conn() as conn:
+            try:
+                get_project_or_404(conn, project_id)
+            except HTTPException:
+                return None
+            return [question.model_dump() for question in build_questions(conn, project_id)]
+
+    async def generate():
         deadline = time.monotonic() + QUESTION_STREAM_MAX_SECONDS
         snapshot_sent = False
         last: list[dict] | None = None
         while True:
-            try:
-                with get_conn() as conn:
-                    get_project_or_404(conn, project_id)
-                    questions = build_questions(conn, project_id)
-            except HTTPException:
+            payload = await run_in_threadpool(poll)
+            if payload is None:
                 yield sse_event("gone", {"project": project_id})
                 return
-            payload = [question.model_dump() for question in questions]
             if not snapshot_sent:
                 yield sse_event("snapshot", {"questions": payload})
                 snapshot_sent = True
@@ -73,7 +80,7 @@ def stream_questions(project_id: str):
                 yield sse_event("end", {"questions": payload})
                 return
             yield ": keep-alive\n\n"
-            time.sleep(QUESTION_STREAM_INTERVAL_SECONDS)
+            await asyncio.sleep(QUESTION_STREAM_INTERVAL_SECONDS)
 
     return sse_response(generate())
 
@@ -179,6 +186,10 @@ def answer_question(project_id: str, question_id: str, body: AnswerQuestionReque
         # Only a claimed question has a worker that is allowed to answer it.
         if row["status"] != "running":
             raise HTTPException(409, f"Question is {row['status']}")
+        # ...and only the worker that claimed it may write the answer. Without this,
+        # any dispatcher could overwrite an answer while the claimer is still running.
+        if row["worker"] != body.worker:
+            raise HTTPException(409, f"Question is claimed by {row['worker']}")
         now = utcnow()
         conn.execute(
             """

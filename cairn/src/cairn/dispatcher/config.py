@@ -57,6 +57,7 @@ MOCK_ALLOWED_OUTCOMES: dict[str, frozenset[str]] = {
     "execute": frozenset({"facts", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "execute_conclude": frozenset({"facts", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "question": frozenset({"answer", "invalid_json", "command_fail"}),
+    "summary": frozenset({"answer", "invalid_json", "command_fail"}),
 }
 
 MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
@@ -97,6 +98,10 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
         },
     },
     "question": {
+        "delay": [0.05, 0.2],
+        "outcomes": {"answer": "1.0", "invalid_json": "0.0", "command_fail": "0.0"},
+    },
+    "summary": {
         "delay": [0.05, 0.2],
         "outcomes": {"answer": "1.0", "invalid_json": "0.0", "command_fail": "0.0"},
     },
@@ -181,6 +186,8 @@ class RuntimeConfig(BaseModel):
     prompt_group: str = Field(min_length=1)
     # Side questions run outside the decide/execute slots but still need a cap.
     max_questions: int = Field(gt=0, default=1)
+    # Summaries run in the background, after the Decide that asked for them has finished.
+    max_summaries: int = Field(gt=0, default=1)
     context_budget: ContextBudgetConfig = Field(default_factory=ContextBudgetConfig)
 
 

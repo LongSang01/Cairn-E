@@ -213,10 +213,18 @@ class AnswerQuestionRequest(BaseModel):
 
 
 class ContextSummary(BaseModel):
-    """Rolling summary of the facts that left the recent window."""
+    """Rolling summaries of the history that left the recent window.
+
+    Each channel carries both the text and how many items it covers, so a later run can
+    tell whether new history still needs folding in.
+    """
 
     summary: str = ""
     facts_covered: int = Field(ge=0, default=0)
+    step_summary: str = ""
+    steps_covered: int = Field(ge=0, default=0)
+    finding_summary: str = ""
+    findings_covered: int = Field(ge=0, default=0)
 
 
 class ProjectDecide(BaseModel):

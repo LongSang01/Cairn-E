@@ -10,6 +10,7 @@ from cairn.dispatcher.context import (
     prepare_snapshot,
     resolve_context_window,
     resolve_snapshot_budget,
+    split_summary_sections,
     summarize_prompt,
 )
 
@@ -165,10 +166,13 @@ def test_persisted_summary_is_reused() -> None:
         recent_items=5,
         summary="- db reachable on 10.0.0.5 (f012)",
         summary_facts=75,
+        step_summary="- sqlmap against /login found nothing (s003)",
+        summary_steps=4,
     )
 
     data = yaml.safe_load(view.yaml)
     assert data["confirmed_facts_summary"] == "- db reachable on 10.0.0.5 (f012)"
+    assert data["closed_steps_summary"] == "- sqlmap against /login found nothing (s003)"
     # Everything older is already summarized, so no extra model call is needed.
     assert view.needs_summary is False
 
@@ -216,3 +220,88 @@ def test_summarize_prompt_carries_previous_summary_and_ids() -> None:
     assert "- f002: db reachable" in prompt
     assert "- f003: creds found" in prompt
     assert "never invent" in prompt.lower() or "Never invent" in prompt
+
+
+def test_old_steps_and_findings_carry_summaries_instead_of_being_dropped() -> None:
+    graph = _graph(facts=5, steps=12)
+    budget = SnapshotBudget(
+        context_window=1_000,
+        max_output_tokens=100,
+        safety_tokens=100,
+        overhead_tokens=0,
+        snapshot_tokens=2_000,
+    )
+
+    view = build_graph_view(graph, budget=budget, recent_items=2)
+
+    data = yaml.safe_load(view.yaml)
+    # 11 closed steps, the last 2 stay verbatim, the rest become ids + a summary.
+    assert len(view.old_steps) == 9
+    assert data["older_step_ids"] == [f"s{index:03d}" for index in range(1, 10)]
+    assert data["closed_steps_summary"].startswith("- s001:")
+    # 5 findings, the last 2 stay verbatim, the rest become ids + a summary.
+    assert len(view.old_findings) == 3
+    assert data["older_finding_ids"] == ["d001", "d002", "d003"]
+    assert data["findings_summary"].startswith("- d001:")
+
+
+def test_step_and_finding_summaries_replace_the_deterministic_fallback() -> None:
+    graph = _graph(facts=5, steps=12)
+    budget = SnapshotBudget(
+        context_window=1_000,
+        max_output_tokens=100,
+        safety_tokens=100,
+        overhead_tokens=0,
+        snapshot_tokens=2_000,
+    )
+
+    view = build_graph_view(
+        graph,
+        budget=budget,
+        recent_items=2,
+        summary="- db reachable (f002)",
+        summary_facts=3,
+        step_summary="- sqlmap against /login found nothing (s001)",
+        summary_steps=9,
+        finding_summary="- openssh 8.2 on 22/tcp (d001)",
+        summary_findings=3,
+    )
+
+    data = yaml.safe_load(view.yaml)
+    assert data["closed_steps_summary"] == "- sqlmap against /login found nothing (s001)"
+    assert data["findings_summary"] == "- openssh 8.2 on 22/tcp (d001)"
+    assert view.needs_summary is False
+
+
+def test_split_summary_sections_accepts_headers_or_plain_text() -> None:
+    sections = split_summary_sections(
+        "FACTS:\n- db reachable (f001)\n\nSTEPS:\n- tried ssh (s001)\n\nFINDINGS:\n- openssh 8.2 (d001)"
+    )
+
+    assert sections == {
+        "facts": "- db reachable (f001)",
+        "steps": "- tried ssh (s001)",
+        "findings": "- openssh 8.2 (d001)",
+    }
+    # A summary written before sections existed still counts as facts.
+    assert split_summary_sections("- plain (f001)") == {
+        "facts": "- plain (f001)",
+        "steps": "",
+        "findings": "",
+    }
+    assert split_summary_sections("FACTS:\n- only facts (f001)")["findings"] == ""
+
+
+def test_summarize_prompt_covers_steps_and_findings() -> None:
+    prompt = summarize_prompt(
+        "- old: ssh open (f001)",
+        [{"id": "f002", "description": "db reachable"}],
+        steps=[
+            {"id": "s003", "description": "sqlmap /login", "result": "no injectable params", "status": "done"}
+        ],
+        findings=[{"id": "d004", "description": "openssh 8.2"}],
+    )
+
+    assert "- s003: sqlmap /login -> no injectable params [done]" in prompt
+    assert "- d004: openssh 8.2" in prompt
+    assert "STEPS:" in prompt and "FINDINGS:" in prompt

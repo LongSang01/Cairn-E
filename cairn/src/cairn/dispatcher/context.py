@@ -6,10 +6,10 @@ pasted verbatim:
 
 * goals are always complete (they are small and they hold the "why"),
 * the most recent ``recent_items`` facts and the open steps keep their original text,
-* older facts are folded into a rolling summary that is persisted across runs, and all
-  of their ids stay referenceable through ``older_fact_ids``,
-* closed steps and findings degrade last, and a hard cap trims the tail if even the
-  compact form does not fit.
+* older facts, closed steps and findings are folded into rolling summaries that are
+  persisted across runs, while all of their ids stay referenceable through
+  ``older_fact_ids`` / ``older_step_ids`` / ``older_finding_ids``,
+* a hard cap trims the tail if even the compact form does not fit.
 
 The budget itself is explicit::
 
@@ -40,23 +40,39 @@ HINT_LIMIT = 20
 OLDER_FACT_ID_LIMIT = 400
 DEFAULT_SUMMARIZE_PROMPT = """You compress the history of a penetration-testing graph.
 
-Facts are confirmed, append-only observations. You will receive the facts that are about to
-leave the recent window together with the previous summary. Merge them into one updated
+Facts, closed steps and findings are about to leave the recent window. You will receive
+those items together with the previous summaries. Merge each kind into one updated
 summary that keeps every still-useful conclusion: hosts, credentials, services, versions,
-decided dead ends, and anything a later step would want to know.
+decided dead ends, what was already tried and why it failed, and anything else a later
+step would want to know.
 
 Rules:
-- Output plain text, at most {max_bullets} bullet lines, each starting with "- ".
-- Keep fact ids in parentheses when a conclusion came from one, e.g. "- db reachable (f012)".
-- Drop chatter, commands and raw tool output; keep conclusions and constraints.
+- Answer with exactly three sections, in this order, each starting with a header line:
+  "FACTS:", "STEPS:", "FINDINGS:".
+- Under each header write at most {max_bullets} bullet lines starting with "- ".
+- Keep ids in parentheses when a conclusion came from one, e.g. "- db reachable (f012)"
+  or "- sqlmap against /login found nothing (s003)".
+- STEPS keeps what was attempted and how it ended; FINDINGS keeps durable observations
+  such as versions, credentials and topology.
+- Leave the body of a section empty when nothing new belongs to it.
+- Drop chatter, raw tool output and commands; keep conclusions and constraints.
 - Never invent facts that are not in the input.
 
-Previous summary:
+Previous summaries:
 {previous_summary}
 
-New facts to fold in:
+New history to fold in:
+Facts:
 {facts}
+
+Steps:
+{steps}
+
+Findings:
+{findings}
 """
+
+_SUMMARY_SECTION = re.compile(r"^\s*(FACTS|STEPS|FINDINGS)\s*:?\s*$", re.IGNORECASE | re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -84,6 +100,10 @@ class GraphView:
     needs_summary: bool = False
     old_facts: list[dict[str, Any]] = field(default_factory=list)
     summary_facts: int = 0
+    old_steps: list[dict[str, Any]] = field(default_factory=list)
+    summary_steps: int = 0
+    old_findings: list[dict[str, Any]] = field(default_factory=list)
+    summary_findings: int = 0
     truncated: bool = False
     compacted: bool = False
 
@@ -140,6 +160,10 @@ def build_graph_view(
     recent_items: int,
     summary: str = "",
     summary_facts: int = 0,
+    step_summary: str = "",
+    summary_steps: int = 0,
+    finding_summary: str = "",
+    summary_findings: int = 0,
     phase: str = "decide",
 ) -> GraphView:
     """Return a snapshot that fits ``budget.snapshot_tokens`` if at all possible."""
@@ -158,7 +182,22 @@ def build_graph_view(
 
     facts = _dicts(data.get("facts"))
     old_facts = facts[:-recent_items] if recent_items < len(facts) else []
-    needs_summary = bool(old_facts) and summary_facts < len(old_facts)
+    old_steps = _old_steps(data, recent_items)
+    old_findings = _old_findings(data, recent_items)
+    needs_summary = (
+        (bool(old_facts) and summary_facts < len(old_facts))
+        or (bool(old_steps) and summary_steps < len(old_steps))
+        or (bool(old_findings) and summary_findings < len(old_findings))
+    )
+    group = {
+        "needs_summary": needs_summary,
+        "old_facts": old_facts,
+        "summary_facts": summary_facts,
+        "old_steps": old_steps,
+        "summary_steps": summary_steps,
+        "old_findings": old_findings,
+        "summary_findings": summary_findings,
+    }
 
     for level in (1, 2, 3):
         view = _compose(
@@ -167,6 +206,10 @@ def build_graph_view(
             recent_items=recent_items,
             summary=summary,
             summary_facts=summary_facts,
+            step_summary=step_summary,
+            summary_steps=summary_steps,
+            finding_summary=finding_summary,
+            summary_findings=summary_findings,
             level=level,
             phase=phase,
         )
@@ -177,10 +220,8 @@ def build_graph_view(
                 yaml=text,
                 tokens=tokens,
                 budget_tokens=budget_tokens,
-                needs_summary=needs_summary,
-                old_facts=old_facts,
-                summary_facts=summary_facts,
                 compacted=True,
+                **group,
             )
 
     view = _compose(
@@ -189,6 +230,10 @@ def build_graph_view(
         recent_items=recent_items,
         summary=summary,
         summary_facts=summary_facts,
+        step_summary=step_summary,
+        summary_steps=summary_steps,
+        finding_summary=finding_summary,
+        summary_findings=summary_findings,
         level=3,
         phase=phase,
     )
@@ -197,11 +242,9 @@ def build_graph_view(
         yaml=text,
         tokens=estimate_tokens(text),
         budget_tokens=budget_tokens,
-        needs_summary=needs_summary,
-        old_facts=old_facts,
-        summary_facts=summary_facts,
         compacted=True,
         truncated=True,
+        **group,
     )
 
 
@@ -214,6 +257,10 @@ def prepare_snapshot(
     phase: str,
     summary: str = "",
     summary_facts: int = 0,
+    step_summary: str = "",
+    summary_steps: int = 0,
+    finding_summary: str = "",
+    summary_findings: int = 0,
 ) -> GraphView:
     """Resolve the budget for this worker and return the snapshot view to write."""
     if not config.enabled:
@@ -229,24 +276,46 @@ def prepare_snapshot(
         recent_items=config.recent_items,
         summary=summary,
         summary_facts=summary_facts,
+        step_summary=step_summary,
+        summary_steps=summary_steps,
+        finding_summary=finding_summary,
+        summary_findings=summary_findings,
         phase=phase,
     )
 
 
-def summarize_prompt(previous_summary: str, facts: list[dict[str, Any]], *, max_bullets: int = 40) -> str:
-    lines = []
-    for fact in facts:
-        if not isinstance(fact, dict):
-            continue
-        description = str(fact.get("description") or "").strip()
-        if not description:
-            continue
-        lines.append(f"- {fact.get('id')}: {description}")
+def summarize_prompt(
+    previous_summary: str,
+    facts: list[dict[str, Any]],
+    *,
+    steps: list[dict[str, Any]] | None = None,
+    findings: list[dict[str, Any]] | None = None,
+    max_bullets: int = 40,
+) -> str:
+    """Build the three-section summarization prompt for facts, steps and findings."""
     return DEFAULT_SUMMARIZE_PROMPT.format(
         max_bullets=max_bullets,
         previous_summary=previous_summary.strip() or "(none)",
-        facts="\n".join(lines) or "(none)",
+        facts="\n".join(_fact_lines(facts)) or "(none)",
+        steps="\n".join(_step_lines(steps or [])) or "(none)",
+        findings="\n".join(_finding_lines(findings or [])) or "(none)",
     )
+
+
+def split_summary_sections(text: str) -> dict[str, str]:
+    """Split a three-section summary reply into facts/steps/findings bodies.
+
+    A reply without section headers is treated as a facts-only summary, which keeps
+    older single-section summaries working.
+    """
+    sections = {"facts": "", "steps": "", "findings": ""}
+    matches = list(_SUMMARY_SECTION.finditer(text or ""))
+    if not matches:
+        return {"facts": (text or "").strip(), "steps": "", "findings": ""}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        sections[match.group(1).lower()] = text[match.end() : end].strip()
+    return sections
 
 
 # --------------------------------------------------------------------------- internals
@@ -277,6 +346,80 @@ def _cut(text: Any, limit: int) -> str:
     return value[:limit].rstrip() + "…"
 
 
+def _fact_lines(facts: list[dict[str, Any]]) -> list[str]:
+    lines = []
+    for fact in facts:
+        if not isinstance(fact, dict):
+            continue
+        description = str(fact.get("description") or "").strip()
+        if description:
+            lines.append(f"- {fact.get('id')}: {description}")
+    return lines
+
+
+def _step_lines(steps: list[dict[str, Any]]) -> list[str]:
+    lines = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        description = str(step.get("description") or "").strip()
+        result = str(step.get("result") or "").strip()
+        if not description and not result:
+            continue
+        line = f"- {step.get('id')}: {description}"
+        if result:
+            line += f" -> {_cut(result, 120)}"
+        if step.get("status"):
+            line += f" [{step.get('status')}]"
+        lines.append(line)
+    return lines
+
+
+def _finding_lines(findings: list[dict[str, Any]]) -> list[str]:
+    lines = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        description = str(finding.get("description") or "").strip()
+        if description:
+            lines.append(f"- {finding.get('id')}: {description}")
+    return lines
+
+
+def _old_steps(data: dict[str, Any], recent_items: int) -> list[dict[str, Any]]:
+    """Closed steps that fall outside the verbatim window."""
+    closed = [
+        step
+        for step in _dicts(data.get("steps"))
+        if step.get("status") not in ("pending", "running")
+    ]
+    return closed[:-recent_items] if recent_items < len(closed) else []
+
+
+def _old_findings(data: dict[str, Any], recent_items: int) -> list[dict[str, Any]]:
+    findings = _dicts(data.get("findings"))
+    return findings[:-recent_items] if recent_items < len(findings) else []
+
+
+def _fallback_steps_summary(steps: list[dict[str, Any]]) -> str:
+    lines = []
+    for step in steps[-60:]:
+        note = _cut(step.get("description") or step.get("note"), 120)
+        result = _cut(step.get("result"), 80)
+        line = f"- {step.get('id')}: {note}"
+        if result:
+            line += f" -> {result}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _fallback_findings_summary(findings: list[dict[str, Any]]) -> str:
+    return "\n".join(
+        f"- {finding.get('id')}: {_cut(finding.get('description'), 160)}"
+        for finding in findings[-60:]
+    )
+
+
 def _compose(
     data: dict[str, Any],
     *,
@@ -284,6 +427,10 @@ def _compose(
     recent_items: int,
     summary: str,
     summary_facts: int,
+    step_summary: str,
+    summary_steps: int,
+    finding_summary: str,
+    summary_findings: int,
     level: int,
     phase: str,
 ) -> dict[str, Any]:
@@ -294,6 +441,8 @@ def _compose(
 
     old_facts = facts[:-recent_items] if recent_items < len(facts) else []
     recent_facts = facts[-recent_items:]
+    old_steps = _old_steps(data, recent_items)
+    old_findings = _old_findings(data, recent_items)
     open_steps = [step for step in steps if step.get("status") in ("pending", "running")]
     closed_steps = [step for step in steps if step.get("status") not in ("pending", "running")]
 
@@ -307,8 +456,13 @@ def _compose(
             f" {len(old_facts)} older facts are summarized in confirmed_facts_summary; "
             "their ids stay valid and are listed in older_fact_ids."
         )
+    if old_steps or old_findings:
+        note += (
+            " Older steps and findings are summarized in closed_steps_summary and"
+            " findings_summary; their ids stay valid."
+        )
     if level >= 3 or budget.snapshot_tokens <= 0:
-        note += " Findings and old step details were dropped; ask for a step to inspect more."
+        note += " Only the most recent detail survives; ask for a step to inspect more."
     view["context"] = {
         "phase": phase,
         "note": note,
@@ -317,6 +471,10 @@ def _compose(
         "recent_items": recent_items,
         "older_fact_count": len(old_facts),
         "summarized_fact_count": summary_facts,
+        "older_step_count": len(old_steps),
+        "summarized_step_count": summary_steps,
+        "older_finding_count": len(old_findings),
+        "summarized_finding_count": summary_findings,
     }
 
     if hints:
@@ -387,6 +545,13 @@ def _compose(
     if step_entries:
         view["steps"] = step_entries
 
+    if old_steps:
+        view["older_step_ids"] = [step.get("id") for step in old_steps[-OLDER_FACT_ID_LIMIT:]]
+        view["closed_steps_summary"] = _cut(
+            step_summary or _fallback_steps_summary(old_steps),
+            1600 if level < 3 else 400,
+        )
+
     if findings and level < 3:
         view["findings"] = [
             {
@@ -397,6 +562,15 @@ def _compose(
             }
             for finding in findings[-recent_items:]
         ]
+
+    if old_findings:
+        view["older_finding_ids"] = [
+            finding.get("id") for finding in old_findings[-OLDER_FACT_ID_LIMIT:]
+        ]
+        view["findings_summary"] = _cut(
+            finding_summary or _fallback_findings_summary(old_findings),
+            1200 if level < 3 else 300,
+        )
 
     return view
 

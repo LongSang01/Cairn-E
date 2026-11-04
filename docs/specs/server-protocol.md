@@ -547,6 +547,8 @@ SSE（`text/event-stream`）对话流，会话页用它实时看到消息增长�
 
 `status` ∈ `answered` | `failed`；`answered` 必须带 `answer`，`failed` 必须带 `error`，缺了返回 `422`。只有 `running` 的问题能作答（必须先 claim），重复提交返回 `409`。
 
+`worker` 必须与 claim 时记录的 worker 一致：答案只认领主的提交，其他 dispatcher（或漏传 `worker`）一律返回 `409`，避免多 dispatcher 场景下答案被覆盖。
+
 #### GET /questions/pending
 
 内部接口，跨项目返回最早的待答问题供 dispatcher 领取：默认 5 条，`limit` 取值 1–50，越界返回 `422`。
@@ -563,23 +565,36 @@ SSE（`text/event-stream`）提问流：
 
 ### Context（滚动图摘要）
 
-图快照超出 worker 的上下文预算时，dispatcher 把最近窗口之外的事实压成一段摘要，连同"覆盖了多少条事实"一起存到项目上，后续 Decide / Execute / 提问直接复用，不再重复调用模型。
+图快照超出 worker 的上下文预算时，dispatcher 把最近窗口之外的历史压成摘要，连同"覆盖了多少条"一起存到项目上，后续 Decide / Execute / 提问直接复用，不再重复调用模型。三条通道各自独立：
+
+| 通道 | 字段 | 内容 |
+| --- | --- | --- |
+| 事实 | `summary` / `facts_covered` | 已确认的结论、凭据、拓扑 |
+| 已关闭 Step | `step_summary` / `steps_covered` | 试过什么、为什么没成 |
+| Finding | `finding_summary` / `findings_covered` | 版本、服务、拓扑等持久观察 |
 
 ```json
-{"summary": "- 10.0.0.5 上的数据库可访问 (f012)", "facts_covered": 75}
+{
+  "summary": "- 10.0.0.5 上的数据库可访问 (f012)",
+  "facts_covered": 75,
+  "step_summary": "- sqlmap 打 /login 没有注入点 (s003)",
+  "steps_covered": 42,
+  "finding_summary": "- 22/tcp openssh 8.2 (d001)",
+  "findings_covered": 8
+}
 ```
 
 #### GET /projects/{project_id}/context
 
-返回当前摘要；从未生成过时是 `{"summary": "", "facts_covered": 0}`。
+返回三条通道的当前摘要；从未生成过的通道是空串 + 0。
 
 #### PUT /projects/{project_id}/context
 
 ```json
-{"summary": "- 10.0.0.5 上的数据库可访问 (f012)", "facts_covered": 75}
+{"summary": "- 10.0.0.5 上的数据库可访问 (f012)", "facts_covered": 75, "steps_covered": 42}
 ```
 
-整体覆盖写入并返回写入后的值。摘要属于旁路信息，不进入导出 YAML / timeline。
+按通道合并写入并返回合并后的完整摘要：**每个通道只向前推进**——覆盖数小于已存值、或文本为空时保留旧值。摘要由后台任务写入，这个规则保证晚到的旧摘要不会覆盖新摘要。摘要属于旁路信息，不进入导出 YAML / timeline。
 
 ### 导出
 

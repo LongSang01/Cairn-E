@@ -11,6 +11,7 @@ from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.backend import ExecutionBackend
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
+from cairn.server.models import ContextSummary
 from cairn.dispatcher.runtime.process import OutputCallback, ProcessResult
 
 PROCESS_COMMUNICATE_GRACE_SECONDS = 15
@@ -59,20 +60,19 @@ def prompt_overhead_tokens(template: str, blocks: dict[str, str]) -> int:
     return estimate_tokens(render_prompt(template, {**blocks, "graph_yaml": ""}))
 
 
-def load_stored_summary(client: CairnClient, project_id: str, *, enabled: bool) -> tuple[str, int]:
-    """The rolling summary the last Decide run persisted, plus how many facts it covers.
+def load_stored_summary(client: CairnClient, project_id: str, *, enabled: bool) -> ContextSummary:
+    """The rolling summaries the last run persisted, with how much history they cover.
 
     Budget bookkeeping must never break a run, so an unavailable summary degrades to
     "no summary" and the snapshot falls back to its deterministic form.
     """
     if not enabled:
-        return "", 0
+        return ContextSummary()
     try:
-        stored = client.get_context_summary(project_id)
+        return client.get_context_summary(project_id)
     except Exception:  # noqa: BLE001 - budgeting must never break a run
         LOG.warning("context summary unavailable project=%s", project_id, exc_info=True)
-        return "", 0
-    return stored.summary, stored.facts_covered
+        return ContextSummary()
 
 
 def budgeted_graph_yaml(
@@ -86,17 +86,19 @@ def budgeted_graph_yaml(
     overhead_tokens: int,
 ) -> str:
     """Compact the snapshot down to the worker's remaining context budget."""
-    summary, covered = load_stored_summary(
-        client, project_id, enabled=config.runtime.context_budget.enabled
-    )
+    stored = load_stored_summary(client, project_id, enabled=config.runtime.context_budget.enabled)
     view = prepare_snapshot(
         graph_yaml,
         config=config.runtime.context_budget,
         worker=worker,
         overhead_tokens=overhead_tokens,
         phase=phase,
-        summary=summary,
-        summary_facts=covered,
+        summary=stored.summary,
+        summary_facts=stored.facts_covered,
+        step_summary=stored.step_summary,
+        summary_steps=stored.steps_covered,
+        finding_summary=stored.finding_summary,
+        summary_findings=stored.findings_covered,
     )
     if view.compacted:
         LOG.info(

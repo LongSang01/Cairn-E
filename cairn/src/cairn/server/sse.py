@@ -8,7 +8,7 @@ repeating the framing in every router.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 
 from fastapi.responses import StreamingResponse
 
@@ -27,6 +27,6 @@ def sse_event(name: str, payload: dict) -> str:
     return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def sse_response(events: Iterator[str]) -> StreamingResponse:
+def sse_response(events: AsyncIterator[str] | Iterator[str]) -> StreamingResponse:
     """Wrap an event generator with the SSE media type and headers."""
     return StreamingResponse(events, media_type=SSE_MEDIA_TYPE, headers=SSE_HEADERS)

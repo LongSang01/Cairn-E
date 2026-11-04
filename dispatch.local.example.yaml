@@ -25,6 +25,7 @@ runtime:
   healthcheck_timeout: 15
   prompt_group: "default"
   max_questions: 1             # side questions answered in parallel with Decide/Execute
+  max_summaries: 1             # summaries folded in after the Decide that asked for them
   context_budget:              # graph snapshot budget; a worker's CONTEXT_WINDOW env overrides it
     context_window: 200000
     recent_items: 20

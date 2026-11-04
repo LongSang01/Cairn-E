@@ -212,6 +212,10 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     for column, ddl in (
         ("context_summary", "TEXT"),
         ("context_summary_facts", "INTEGER NOT NULL DEFAULT 0"),
+        ("context_step_summary", "TEXT"),
+        ("context_step_summary_facts", "INTEGER NOT NULL DEFAULT 0"),
+        ("context_finding_summary", "TEXT"),
+        ("context_finding_summary_facts", "INTEGER NOT NULL DEFAULT 0"),
     ):
         if column not in project_columns:
             conn.execute(f"ALTER TABLE projects ADD COLUMN {column} {ddl}")

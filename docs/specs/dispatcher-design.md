@@ -56,6 +56,7 @@ runtime:
   worker_healthcheck: startup_only   # startup_and_task | startup_only | disabled
   prompt_group: default
   max_questions: 1              # side questions answered in parallel with Decide/Execute
+  max_summaries: 1              # background summaries folded in after a Decide
   context_budget:
     enabled: true
     context_window: 200000      # a worker's CONTEXT_WINDOW env overrides it
@@ -231,7 +232,19 @@ safety_margin   = clamp(window * safety_ratio, safety_min_tokens, safety_max_tok
 snapshot_tokens = max(min_snapshot_tokens, input_budget - overhead_tokens)
 ```
 
-`overhead_tokens` 是模板本身加上其他 JSON 块（事实 id、开放 Step 等）的开销，先从预算里扣掉。快照装不下时按层退化：先压缩老事实（保留最近 `recent_items` 条原文，其余进滚动摘要），再砍 findings 与旧 Step 细节，最后才硬截断并在 YAML 尾部留标记。滚动摘要由 Decide 调用一次模型生成（`summary_max_calls`，0 关闭），存到项目上，后续 Decide / Execute / 提问复用。
+`overhead_tokens` 是模板本身加上其他 JSON 块（事实 id、开放 Step 等）的开销，先从预算里扣掉。
+
+快照装不下时按层退化，三条历史通道各自有摘要兜底：
+
+| 通道 | 保留原文 | 折叠后 | 摘要上限（level 1-2 / 3） |
+| --- | --- | --- | --- |
+| Facts | 最近 `recent_items` 条 | `older_fact_ids` + `confirmed_facts_summary` | 2400 / 1200 字符 |
+| 已关闭 Step | 最近 `recent_items` 条 | `older_step_ids` + `closed_steps_summary` | 1600 / 400 字符 |
+| Findings | 最近 `recent_items` 条 | `older_finding_ids` + `findings_summary` | 1200 / 300 字符 |
+
+没有摘要时三条通道都会生成确定性的逐条兜底文本，所以 `older_*_ids` 始终可引用。三层都装不下才硬截断并在 YAML 尾部留标记。
+
+**摘要不阻塞 Decide。** Decide 只把本轮装不下的历史（`SummaryRequest`）交给调度器的摘要线程池（`runtime.max_summaries`，默认 1），本轮继续用上一版摘要；摘要任务完成后写入服务端，下一轮 Decide / Execute / 提问自动用上。服务端按通道做单调合并（覆盖数不小于已存值才替换），因此晚到的旧摘要不会覆盖新摘要。同一项目在途的摘要请求会被去重。
 
 ## 调度策略
 
@@ -351,3 +364,8 @@ cairn/src/cairn/dispatcher/prompts/
 - 图快照写到宿主机临时目录；
 - 复用宿主机已登录的 `claude` / `codex` / `pi`；
 - 没有沙箱，只应在有授权的环境使用。
+
+## 已知限制
+
+- **硬截断仍可能截断结构**：预算极端时 `_hard_cut` 会在字符边界截断，YAML 可能不完整（尾部有截断标记，`context.note` 也会说明历史被压缩）。真实的错误信息在 `older_*_ids` 与摘要里，需要细节时应重新导出图。
+- **SSE 仍是轮询式**：`sessions/stream` 与 `questions/stream` 已改成 `async def` + `asyncio.sleep`，不再占用线程池，但每个连接仍按秒查询 SQLite；连接数极高时可以改成事件推送（写库时通知）。

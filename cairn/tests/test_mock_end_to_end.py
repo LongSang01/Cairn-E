@@ -15,6 +15,7 @@ from cairn.dispatcher.config import DispatchConfig
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.runtime.process import ProcessResult
 from cairn.dispatcher.scheduler.loop import DispatcherLoop
+from cairn.dispatcher.tasks.summary import SummaryRequest
 from cairn.server import db
 from cairn.server.app import app
 from cairn.server.models import ContextSummary, ProjectDetail, ProjectSummary, Question, Settings
@@ -208,11 +209,26 @@ class InProcessClient:
         return ContextSummary.model_validate(response.json())
 
     def save_context_summary(
-        self, project_id: str, *, summary: str, facts_covered: int
+        self,
+        project_id: str,
+        *,
+        summary: str = "",
+        facts_covered: int = 0,
+        step_summary: str = "",
+        steps_covered: int = 0,
+        finding_summary: str = "",
+        findings_covered: int = 0,
     ) -> ApiResult:
         response = self.http.put(
             f"/projects/{project_id}/context",
-            json={"summary": summary, "facts_covered": facts_covered},
+            json={
+                "summary": summary,
+                "facts_covered": facts_covered,
+                "step_summary": step_summary,
+                "steps_covered": steps_covered,
+                "finding_summary": finding_summary,
+                "findings_covered": findings_covered,
+            },
         )
         data = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
         return ApiResult(response.status_code, data, response.text)
@@ -386,9 +402,13 @@ def _loop(config: DispatchConfig, client: InProcessClient, containers: LocalCont
     loop.executor = ThreadPoolExecutor(max_workers=config.runtime.max_workers)
     loop.cleanup_executor = ThreadPoolExecutor(max_workers=1)
     loop.question_executor = ThreadPoolExecutor(max_workers=config.runtime.max_questions)
+    loop.summary_executor = ThreadPoolExecutor(max_workers=config.runtime.max_summaries)
     loop.futures = {}
     loop.cleanup_futures = {}
     loop.question_futures = {}
+    loop.summary_futures = {}
+    loop.summary_inflight = set()
+    loop._summary_lock = threading.Lock()
     loop.decide_checkpoints = {}
     loop.runtime_project_ids = set()
     loop.worker_unhealthy_until = {}
@@ -407,6 +427,7 @@ def _dispatch_and_wait(loop: DispatcherLoop) -> None:
     loop._refresh_runtime_projects(summaries)
     loop._cancel_inactive_tasks(summaries)
     loop._queue_container_cleanups(summaries)
+    loop._reap_summary_futures()
     loop._dispatch_questions()
     loop._dispatch_available(summaries)
     assert loop.futures
@@ -674,3 +695,42 @@ def test_mock_question_is_answered_without_touching_the_graph(http_client: TestC
     assert [fact.id for fact in project.facts] == ["origin"]
     assert project.steps == []
     assert http_client.get("/questions/pending").json() == []
+
+
+def test_background_summary_runs_off_the_decide_path(http_client: TestClient) -> None:
+    client = InProcessClient(http_client)
+    loop = _loop(
+        _config(decide=_phase("noop", zero_outcomes=["steps"]), execute=_phase("facts")),
+        client,
+        LocalContainerManager(),
+    )
+    project_id = _create_project(http_client)
+    request = SummaryRequest(
+        project_id=project_id,
+        worker="mock-worker",
+        facts=[{"id": "f001", "description": "db reachable"}],
+        facts_covered=1,
+        steps=[{"id": "s001", "description": "sqlmap /login", "status": "done", "result": "no injection"}],
+        steps_covered=1,
+        findings=[{"id": "d001", "description": "openssh 8.2"}],
+        findings_covered=1,
+    )
+
+    try:
+        assert loop.request_summary(request) is True
+        # A second Decide for the same project must not queue a duplicate.
+        assert loop.request_summary(request) is False
+        for future in list(loop.summary_futures):
+            future.result(timeout=10)
+        loop._reap_summary_futures()
+    finally:
+        loop.close()
+
+    assert loop.summary_inflight == set()
+    stored = client.get_context_summary(project_id)
+    assert stored.summary == "- mock fact summary (f001)"
+    assert stored.facts_covered == 1
+    assert stored.step_summary == "- mock step summary (s001)"
+    assert stored.steps_covered == 1
+    assert stored.finding_summary == "- mock finding summary (d001)"
+    assert stored.findings_covered == 1

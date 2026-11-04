@@ -6,21 +6,32 @@ from cairn.dispatcher.config import DispatchConfig
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.workers.base import DriverResult
 from cairn.dispatcher.workers.health import HealthResult
-from cairn.server.models import Fact, Finding, Goal, Hint, ProjectDetail, ProjectMeta, Step
+from cairn.server.models import (
+    ContextSummary,
+    Fact,
+    Finding,
+    Goal,
+    Hint,
+    ProjectDetail,
+    ProjectMeta,
+    Step,
+)
 
 
-def make_config() -> DispatchConfig:
+def make_config(runtime: dict | None = None) -> DispatchConfig:
+    runtime_config = {
+        "interval": 60,
+        "max_workers": 2,
+        "max_running_projects": 1,
+        "max_project_workers": 2,
+        "healthcheck_timeout": 5,
+        "prompt_group": "default",
+        **(runtime or {}),
+    }
     return DispatchConfig.model_validate(
         {
             "server": "http://127.0.0.1:8000",
-            "runtime": {
-                "interval": 60,
-                "max_workers": 2,
-                "max_running_projects": 1,
-                "max_project_workers": 2,
-                "healthcheck_timeout": 5,
-                "prompt_group": "default",
-            },
+            "runtime": runtime_config,
             "tasks": {
                 "decide": {"timeout": 10, "max_steps": 3},
                 "execute": {"timeout": 10, "conclude_timeout": 5},
@@ -140,6 +151,16 @@ class FakeClient:
     session_heartbeats: list[tuple[str, str]] = field(default_factory=list)
     conclude_status: int = 200
     conclude_fact_ids: list[str] = field(default_factory=lambda: ["f002"])
+    context_summary: ContextSummary = field(default_factory=ContextSummary)
+    saved_summaries: list[ContextSummary] = field(default_factory=list)
+
+    def get_context_summary(self, _project_id: str) -> ContextSummary:
+        return self.context_summary
+
+    def save_context_summary(self, _project_id: str, **fields) -> ApiResult:
+        self.context_summary = ContextSummary(**fields)
+        self.saved_summaries.append(self.context_summary)
+        return ApiResult(200, self.context_summary.model_dump())
 
     def get_project(self, _project_id: str) -> ProjectDetail:
         return self.project

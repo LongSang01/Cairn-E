@@ -438,3 +438,72 @@ def test_execute_streams_transcript_while_the_worker_runs(monkeypatch) -> None:
     assert "assistant" in roles
     assert "tool_call" in roles
     assert client.finished_sessions[0][2]["status"] == "success"
+
+
+def _wide_graph(facts: int) -> str:
+    lines = ["project:", "  title: engagement", "  status: active", "facts:"]
+    for index in range(1, facts + 1):
+        lines.append(f"  - id: f{index:03d}")
+        lines.append("    description: fact " + str(index) + " " + "x" * 300)
+        lines.append("    from_step: null")
+    lines.append("steps: []")
+    return "\n".join(lines) + "\n"
+
+
+def test_decide_hands_expired_history_to_the_scheduler(monkeypatch) -> None:
+    config = make_config(
+        runtime={
+            "context_budget": {
+                "context_window": 2_000,
+                "max_output_tokens": 200,
+                "safety_min_tokens": 50,
+                "safety_max_tokens": 50,
+                "recent_items": 2,
+                "min_snapshot_tokens": 300,
+            }
+        }
+    )
+    project = make_project()
+    client = FakeClient(project)
+    containers = FakeContainerManager()
+    driver = FakeDriver()
+    lease = FakeLease()
+    calls: list[str] = []
+    requests = []
+
+    def fake_run(*_args, **_kwargs):
+        calls.append("worker")
+        return ProcessResult(
+            0,
+            '{"accepted":true,"data":{"steps":[{"from":["f001"],"description":"next","priority":4}]}}',
+            "",
+        )
+
+    def sink(request) -> bool:
+        requests.append(request)
+        return True
+
+    monkeypatch.setattr(decide, "get_driver", lambda *_a, **_k: driver)
+    monkeypatch.setattr(decide.HeartbeatLease, "for_decide", _lease_factory(lease))
+    monkeypatch.setattr(decide, "run_worker_process", fake_run)
+
+    outcome = decide.run_decide_task(
+        config,
+        client,
+        containers,
+        project,
+        _wide_graph(20),
+        config.workers[0],
+        TaskCancellation(),
+        summary_sink=sink,
+    )
+
+    assert outcome == "success"
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.project_id == "proj_001"
+    assert request.facts_covered == 18  # 20 facts minus the 2 kept verbatim
+    assert len(request.facts) == 18
+    # The Decide itself stays one model call: the summary is not run here.
+    assert calls == ["worker"]
+    assert client.saved_summaries == []

@@ -1,6 +1,8 @@
+import asyncio
 import time
 
 from fastapi import APIRouter, HTTPException
+from starlette.concurrency import run_in_threadpool
 
 from cairn.server.db import get_conn
 from cairn.server.models import (
@@ -61,32 +63,36 @@ def stream_session(project_id: str, session_id: str):
         expire_stale_sessions(conn, project_id)
         get_session_or_404(conn, project_id, session_id)
 
-    def generate():
+    def poll() -> tuple[dict, list[dict]] | None:
+        """Read one transcript snapshot off the event loop (sqlite3 is blocking)."""
+        with get_conn() as conn:
+            expire_stale_sessions(conn, project_id)
+            try:
+                row = get_session_or_404(conn, project_id, session_id)
+            except HTTPException:
+                return None
+            messages = build_session_messages(conn, project_id, session_id)
+            return session_to_model(row).model_dump(), [m.model_dump() for m in messages]
+
+    async def generate():
         sent = 0
         snapshot_sent = False
         last_change = time.monotonic()
         while True:
-            with get_conn() as conn:
-                expire_stale_sessions(conn, project_id)
-                try:
-                    row = get_session_or_404(conn, project_id, session_id)
-                except HTTPException:
-                    yield sse_event("gone", {"id": session_id})
-                    return
-                messages = build_session_messages(conn, project_id, session_id)
+            result = await run_in_threadpool(poll)
+            if result is None:
+                yield sse_event("gone", {"id": session_id})
+                return
+            session, messages = result
 
-            session = session_to_model(row).model_dump()
             if not snapshot_sent:
                 # One snapshot per connection, even while the transcript is still
                 # empty; later polls only carry deltas.
                 last_change = time.monotonic()
-                yield sse_event(
-                    "snapshot",
-                    {"session": session, "messages": [m.model_dump() for m in messages]},
-                )
+                yield sse_event("snapshot", {"session": session, "messages": messages})
                 snapshot_sent = True
             else:
-                fresh = [m.model_dump() for m in messages[sent:]]
+                fresh = messages[sent:]
                 if fresh:
                     last_change = time.monotonic()
                     yield sse_event("messages", {"session": session, "messages": fresh})
@@ -102,7 +108,7 @@ def stream_session(project_id: str, session_id: str):
                 return
 
             yield ": keep-alive\n\n"
-            time.sleep(STREAM_POLL_SECONDS)
+            await asyncio.sleep(STREAM_POLL_SECONDS)
 
     return sse_response(generate())
 

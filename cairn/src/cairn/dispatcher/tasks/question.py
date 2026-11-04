@@ -198,8 +198,8 @@ def _answer(
         LOG.warning("question answer upload crashed question=%s", question_id, exc_info=True)
         return
     if response.status_code == 409:
-        # The human cancelled it while the worker was running: drop the answer.
-        LOG.info("question was cancelled before its answer landed question=%s", question_id)
+        # Cancelled by the human, or the claim moved to another dispatcher: drop it.
+        LOG.info("question was cancelled or reclaimed before its answer landed question=%s", question_id)
         return
     if not response.ok:
         LOG.warning(

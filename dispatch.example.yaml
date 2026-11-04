@@ -24,6 +24,8 @@ runtime:
   prompt_group: "default"
   # Side questions run outside the Decide/Execute slots, but still need a concurrency cap.
   max_questions: 1
+  # Summaries run in the background, after the Decide that asked for them finished.
+  max_summaries: 1
   # Budget for the graph snapshot handed to a worker. "enabled: false" pastes the graph verbatim.
   # A worker can override the window through CONTEXT_WINDOW (or PI_MODEL_CONTEXT_WINDOW) in its env.
   context_budget:

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 
-from cairn.dispatcher.config import DispatchConfig, WorkerConfig
-from cairn.dispatcher.context import GraphView, prepare_snapshot, summarize_prompt
+from cairn.dispatcher.config import ContextBudgetConfig, DispatchConfig, WorkerConfig
+from cairn.dispatcher.context import GraphView, prepare_snapshot
 from cairn.dispatcher.contracts import parse_json_output, validate_decide_payload
 from cairn.dispatcher.prompting import (
     format_fact_ids,
@@ -28,11 +29,11 @@ from cairn.dispatcher.tasks.common import (
     task_healthcheck_enabled,
     write_graph_snapshot_reference,
 )
+from cairn.dispatcher.tasks.summary import SummaryRequest, run_summary_task
 from cairn.dispatcher.workers.registry import get_driver
-from cairn.server.models import ProjectDetail
+from cairn.server.models import ContextSummary, ProjectDetail
 
 LOG = logging.getLogger(__name__)
-MAX_SUMMARY_CHARS = 4000
 
 
 def run_decide_task(
@@ -43,8 +44,14 @@ def run_decide_task(
     export_yaml: str,
     worker: WorkerConfig,
     cancellation: TaskCancellation,
+    *,
+    summary_sink: Callable[[SummaryRequest], bool] | None = None,
 ) -> str:
-    """Decide: read the whole FGS graph, evolve it, never touch the world."""
+    """Decide: read the whole FGS graph, evolve it, never touch the world.
+
+    ``summary_sink`` lets the scheduler fold expired history into the stored summaries
+    after this run finishes instead of blocking it with a second model call.
+    """
     driver = get_driver(worker.type, config.runtime.execution)
     project_id = project.project.id
     task_started = time.perf_counter()
@@ -94,11 +101,8 @@ def run_decide_task(
             worker,
             overhead_tokens=overhead_tokens,
             phase="decide",
-            driver=driver,
             container_manager=container_manager,
-            container_name=container_name,
-            lease=lease,
-            cancellation=cancellation,
+            summary_sink=summary_sink,
         )
         prompt = render_prompt(
             template,
@@ -403,27 +407,22 @@ def _prepare_graph_view(
     *,
     overhead_tokens: int,
     phase: str,
-    driver,
     container_manager: ExecutionBackend,
-    container_name: str,
-    lease: HeartbeatLease,
-    cancellation: TaskCancellation,
+    summary_sink: Callable[[SummaryRequest], bool] | None = None,
 ) -> GraphView:
-    """Fit the graph into the worker's context budget, summarizing old facts once."""
+    """Fit the graph into the worker's context budget.
+
+    Summarization is never awaited on the Decide path: the pending history is handed to
+    ``summary_sink`` (the scheduler's background pool) and this run keeps using the
+    previous summary, so a Decide stays one model call. Without a sink the call runs
+    inline, which only happens when the task is invoked directly.
+    """
     budget_config = config.runtime.context_budget
-    summary, covered = load_stored_summary(client, project_id, enabled=budget_config.enabled)
-    view = prepare_snapshot(
-        graph_yaml,
-        config=budget_config,
-        worker=worker,
-        overhead_tokens=overhead_tokens,
-        phase=phase,
-        summary=summary,
-        summary_facts=covered,
-    )
+    stored = load_stored_summary(client, project_id, enabled=budget_config.enabled)
+    view = _snapshot(graph_yaml, budget_config, worker, overhead_tokens, phase, stored)
     LOG.info(
         "graph snapshot project=%s phase=%s worker=%s budget_tokens=%s snapshot_tokens=%s compacted=%s "
-        "truncated=%s older_facts=%s summarized=%s",
+        "truncated=%s older=%s/%s/%s covered=%s/%s/%s",
         project_id,
         phase,
         worker.name,
@@ -432,98 +431,78 @@ def _prepare_graph_view(
         view.compacted,
         view.truncated,
         len(view.old_facts),
-        covered,
+        len(view.old_steps),
+        len(view.old_findings),
+        stored.facts_covered,
+        stored.steps_covered,
+        stored.findings_covered,
     )
-    if not view.needs_summary or budget_config.summary_max_calls <= 0:
+    request = _summary_request(view, stored, project_id=project_id, worker=worker)
+    if request is None or budget_config.summary_max_calls <= 0:
         return view
 
-    pending = view.old_facts[covered:]
-    summary_text = _summarize_history(
-        driver=driver,
-        config=config,
-        container_manager=container_manager,
-        container_name=container_name,
-        worker=worker,
-        project_id=project_id,
-        previous_summary=summary,
-        facts=pending,
-        lease=lease,
-        cancellation=cancellation,
-    )
-    if not summary_text:
+    if summary_sink is not None:
+        if summary_sink(request):
+            LOG.info(
+                "graph history queued for summarization project=%s worker=%s facts=%s steps=%s findings=%s",
+                project_id,
+                worker.name,
+                len(request.facts),
+                len(request.steps),
+                len(request.findings),
+            )
+        else:
+            LOG.info("graph summary already running project=%s", project_id)
         return view
-    try:
-        client.save_context_summary(
-            project_id, summary=summary_text, facts_covered=len(view.old_facts)
-        )
-    except Exception:  # noqa: BLE001
-        LOG.warning("context summary write failed project=%s", project_id, exc_info=True)
+
+    # No scheduler attached (direct invocation): keep the inline behaviour.
+    if run_summary_task(config, client, container_manager, worker, request) != "summarized":
+        return view
+    fresh = load_stored_summary(client, project_id, enabled=budget_config.enabled)
+    return _snapshot(graph_yaml, budget_config, worker, overhead_tokens, phase, fresh)
+
+
+def _snapshot(
+    graph_yaml: str,
+    budget_config: ContextBudgetConfig,
+    worker: WorkerConfig,
+    overhead_tokens: int,
+    phase: str,
+    stored: ContextSummary,
+) -> GraphView:
     return prepare_snapshot(
         graph_yaml,
         config=budget_config,
         worker=worker,
         overhead_tokens=overhead_tokens,
         phase=phase,
-        summary=summary_text,
-        summary_facts=len(view.old_facts),
+        summary=stored.summary,
+        summary_facts=stored.facts_covered,
+        step_summary=stored.step_summary,
+        summary_steps=stored.steps_covered,
+        finding_summary=stored.finding_summary,
+        summary_findings=stored.findings_covered,
     )
 
 
-def _summarize_history(
-    *,
-    driver,
-    config: DispatchConfig,
-    container_manager: ExecutionBackend,
-    container_name: str,
-    worker: WorkerConfig,
-    project_id: str,
-    previous_summary: str,
-    facts: list[dict],
-    lease: HeartbeatLease,
-    cancellation: TaskCancellation,
-) -> str | None:
-    """One bounded summarization call: a single attempt, its own timeout, no retries."""
-    if not facts:
-        return None
-    budget_config = config.runtime.context_budget
-    prompt = summarize_prompt(previous_summary, facts)
-    LOG.info(
-        "summarizing graph history project=%s worker=%s facts=%s timeout=%ss",
-        project_id,
-        worker.name,
-        len(facts),
-        budget_config.summary_timeout,
+def _summary_request(
+    view: GraphView, stored: ContextSummary, *, project_id: str, worker: WorkerConfig
+) -> SummaryRequest | None:
+    """The history this snapshot could not carry, or ``None`` when nothing is pending."""
+    request = SummaryRequest(
+        project_id=project_id,
+        worker=worker.name,
+        facts=view.old_facts[stored.facts_covered :],
+        facts_covered=len(view.old_facts),
+        previous_facts=stored.summary,
+        steps=view.old_steps[stored.steps_covered :],
+        steps_covered=len(view.old_steps),
+        previous_steps=stored.step_summary,
+        findings=view.old_findings[stored.findings_covered :],
+        findings_covered=len(view.old_findings),
+        previous_findings=stored.finding_summary,
     )
-    try:
-        session = driver.prepare_session()
-        command = driver.build_execute(worker, prompt, session)
-        result = run_worker_process(
-            container_manager,
-            container_name,
-            worker,
-            command.argv,
-            phase="decide_summary",
-            timeout_seconds=budget_config.summary_timeout,
-            lease=lease,
-            cancellation=cancellation,
-        )
-    except Exception:  # noqa: BLE001
-        LOG.warning("graph summarization failed project=%s", project_id, exc_info=True)
-        return None
-    if result.cancelled or result.timed_out or result.returncode != 0:
-        LOG.warning(
-            "graph summarization gave up project=%s worker=%s cancelled=%s timed_out=%s code=%s",
-            project_id,
-            worker.name,
-            result.cancelled,
-            result.timed_out,
-            result.returncode,
-        )
-        return None
-    text = driver.extract_response_text(result.stdout, result.stderr).strip()
-    if not text:
-        return None
-    return text[:MAX_SUMMARY_CHARS]
+    return request or None
 
 
 def _healthcheck(driver, worker: WorkerConfig, timeout: int, project_id: str, cancellation, lease) -> str | None:

@@ -327,6 +327,19 @@ def test_question_can_be_claimed_then_answered_once(client: TestClient) -> None:
     )
     assert response.status_code == 409
 
+    # Only the claiming dispatcher may answer; anyone else is rejected.
+    response = client.post(
+        f"/projects/{project_id}/questions/q001/answer",
+        json={"status": "answered", "answer": "hijacked", "worker": "worker-b"},
+    )
+    assert response.status_code == 409
+    response = client.post(
+        f"/projects/{project_id}/questions/q001/answer",
+        json={"status": "answered", "answer": "anonymous"},
+    )
+    assert response.status_code == 409
+    assert client.get(f"/projects/{project_id}/questions/q001").json()["status"] == "running"
+
     response = client.post(
         f"/projects/{project_id}/questions/q001/answer",
         json={
@@ -444,19 +457,44 @@ def test_context_summary_round_trip(client: TestClient) -> None:
 
     response = client.get(f"/projects/{project_id}/context")
     assert response.status_code == 200
-    assert response.json() == {"summary": "", "facts_covered": 0}
+    assert response.json() == {
+        "summary": "",
+        "facts_covered": 0,
+        "step_summary": "",
+        "steps_covered": 0,
+        "finding_summary": "",
+        "findings_covered": 0,
+    }
 
-    response = client.put(
-        f"/projects/{project_id}/context",
-        json={"summary": "- db reachable (origin)", "facts_covered": 1},
-    )
-    assert response.status_code == 200
-    assert response.json() == {"summary": "- db reachable (origin)", "facts_covered": 1}
-
-    assert client.get(f"/projects/{project_id}/context").json() == {
+    stored = {
         "summary": "- db reachable (origin)",
         "facts_covered": 1,
+        "step_summary": "- sqlmap against /login found nothing (s001)",
+        "steps_covered": 1,
+        "finding_summary": "- openssh 8.2 on 22/tcp (d001)",
+        "findings_covered": 1,
     }
+    response = client.put(f"/projects/{project_id}/context", json=stored)
+    assert response.status_code == 200
+    assert response.json() == stored
+    assert client.get(f"/projects/{project_id}/context").json() == stored
+
+    # A slow background summary must not roll a channel back to older coverage.
+    response = client.put(
+        f"/projects/{project_id}/context",
+        json={"summary": "- stale text", "facts_covered": 0, "step_summary": "- stale"},
+    )
+    assert response.status_code == 200
+    assert response.json() == stored
+
+    # Newer coverage replaces the channel, and channels advance independently.
+    response = client.put(
+        f"/projects/{project_id}/context",
+        json={"summary": "- db reachable, ssh open (origin)", "facts_covered": 2},
+    )
+    assert response.json()["summary"] == "- db reachable, ssh open (origin)"
+    assert response.json()["facts_covered"] == 2
+    assert response.json()["step_summary"] == stored["step_summary"]
 
     assert client.get("/projects/proj_999/context").status_code == 404
     assert client.put(
