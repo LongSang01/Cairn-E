@@ -83,3 +83,14 @@ workers:
   #     PI_API_KEY: "sk-xxx"
   #     PI_PROVIDER_API: "openai-completions"
   #     PI_MODEL_CONTEXT_WINDOW: "262144"
+
+# Web front (cairn-nginx) settings — consumed by the nginx Basic Auth entrypoint
+# in Docker Compose mode; the dispatcher itself ignores this section.
+# Passwords are written as plaintext here and hashed (SHA-512 crypt) into
+# nginx's .htpasswd at container start.
+# web:
+#   auth:
+#     realm: "Cairn"
+#     users:
+#       - name: admin
+#         password: "<password>"

@@ -175,6 +175,40 @@ class WorkerConfig(BaseModel):
         return self
 
 
+class WebAuthUser(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_credentials(self) -> "WebAuthUser":
+        # Mirrors the nginx entrypoint's constraints (see deploy/nginx/40-cairn-auth.sh).
+        if self.name.startswith("-") or ":" in self.name or "\t" in self.name:
+            raise ValueError('user name must not start with "-" or contain ":" or tabs')
+        if "\t" in self.password:
+            raise ValueError("password must not contain tabs")
+        return self
+
+
+class WebAuthConfig(BaseModel):
+    """Basic Auth users for the cairn-nginx web front. Plaintext passwords are
+    hashed (SHA-512 crypt) by the nginx entrypoint at container start."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    realm: str = Field(min_length=1, default="Cairn")
+    users: list[WebAuthUser] = Field(default_factory=list)
+
+
+class WebConfig(BaseModel):
+    """Web front (cairn-nginx) settings; ignored by the dispatcher runtime."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    auth: WebAuthConfig | None = None
+
+
 class DispatchConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -185,6 +219,7 @@ class DispatchConfig(BaseModel):
     local: LocalConfig | None = None
     common_env: dict[str, str] = Field(default_factory=dict)
     workers: list[WorkerConfig]
+    web: WebConfig | None = None
 
     @model_validator(mode="before")
     @classmethod

@@ -159,14 +159,16 @@ cp dispatch.example.yaml dispatch.yaml
 Pull the base image used to build Cairn:
  
 ```bash
-docker pull ghcr.io/astral-sh/uv:python3.13-trixie
+docker pull ghcr.io/astral-sh/uv:python3.13-trixie-slim
 ```
  
 ```bash
 docker compose up --build
 ```
  
-This starts `cairn-server` on port `8000` and `cairn-dispatcher` once the server passes its health check. The dispatcher mounts `dispatch.yaml` from the project root and connects to Docker via the host socket. Data is persisted to `./datas/cairn/`.
+This starts `cairn-server` on the internal network only, fronted by `cairn-nginx` on port `8000` with HTTP Basic Auth, plus `cairn-dispatcher` once the server passes its health check. The dispatcher mounts `dispatch.yaml` from the project root and connects to Docker via the host socket. Data is persisted to `./datas/cairn/`.
+
+The nginx front reads `web.auth` from `dispatch.yaml` at startup; without it, the proxy starts with a warning and no authentication. Users store plaintext passwords — the nginx entrypoint hashes them (SHA-512 crypt via the base image's built-in busybox `mkpasswd`, no extra packages) into its `.htpasswd` at container start. Keep `server:` pointing at `http://cairn-server:8000` (internal) in Compose mode. To add or change users, edit `web.auth` and restart:
  
 ### Manual
  

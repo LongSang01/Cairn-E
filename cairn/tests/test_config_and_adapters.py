@@ -46,6 +46,38 @@ def test_dispatch_config_rejects_duplicate_workers_and_excess_project_parallelis
         DispatchConfig.model_validate(payload)
 
 
+def test_dispatch_config_web_auth_accepts_plaintext_users_and_rejects_bad_entries() -> None:
+    payload = make_config().model_dump()
+    payload["web"] = {
+        "auth": {
+            "realm": "Cairn",
+            "users": [{"name": "admin", "password": "secret"}],
+        }
+    }
+
+    config = DispatchConfig.model_validate(payload)
+
+    assert config.web is not None and config.web.auth is not None
+    assert config.web.auth.realm == "Cairn"
+    assert config.web.auth.users[0].password == "secret"
+
+    payload["web"]["auth"]["users"][0]["password"] = ""
+    with pytest.raises(ValidationError):
+        DispatchConfig.model_validate(payload)
+
+    payload["web"]["auth"]["users"][0] = {"name": "admin"}
+    with pytest.raises(ValidationError):
+        DispatchConfig.model_validate(payload)
+
+    payload["web"]["auth"]["users"][0] = {"name": "bad:name", "password": "secret"}
+    with pytest.raises(ValidationError, match="user name"):
+        DispatchConfig.model_validate(payload)
+
+    payload["web"] = {"basic_auth": {}}
+    with pytest.raises(ValidationError):
+        DispatchConfig.model_validate(payload)
+
+
 def test_pi_worker_rejects_invalid_context_window() -> None:
     with pytest.raises(ValidationError, match="PI_MODEL_CONTEXT_WINDOW must be greater than 0"):
         WorkerConfig.model_validate(

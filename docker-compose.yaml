@@ -5,8 +5,10 @@ services:
       dockerfile: Dockerfile
     image: cairn-app
     container_name: cairn-server
-    ports:
-      - "8000:8000"
+    # Browser traffic goes through cairn-nginx (Basic Auth); the server is
+    # only reachable on the compose network.
+    expose:
+      - "8000"
     volumes:
       - ./datas/cairn/:/root/.local/share/cairn/
     healthcheck:
@@ -21,6 +23,27 @@ services:
       start_period: 3s
     restart: unless-stopped
     command: ["uv", "run", "cairn", "serve", "--host", "0.0.0.0", "--no-access-log"]
+  cairn-nginx:
+    build:
+      context: deploy/nginx
+      dockerfile: Dockerfile
+    image: cairn-nginx
+    container_name: cairn-nginx
+    ports:
+      - "8000:80"
+    volumes:
+      # read-only: the entrypoint renders .htpasswd + nginx config from web.auth
+      - ./dispatch.yaml:/cairn/dispatch.yaml:ro
+    depends_on:
+      cairn-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -S -O /dev/null http://127.0.0.1/ 2>&1 | grep -qE ' (200|401) '"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 3s
+    restart: unless-stopped
   cairn-dispatcher:
     build:
       context: .

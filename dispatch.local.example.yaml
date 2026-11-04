@@ -67,3 +67,14 @@ workers:
   #   task_types: [decide]
   #   max_running: 1
   #   priority: 2
+
+# Web front (cairn-nginx) settings — only used in Docker Compose mode when a
+# cairn-nginx proxy fronts the server. Ignored by the dispatcher. Passwords are
+# written as plaintext here and hashed (SHA-512 crypt) into nginx's .htpasswd
+# at start.
+# web:
+#   auth:
+#     realm: "Cairn"
+#     users:
+#       - name: admin
+#         password: "<password>"
