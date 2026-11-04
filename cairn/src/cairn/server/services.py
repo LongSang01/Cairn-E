@@ -5,7 +5,15 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
-from cairn.server.models import Finding, Goal, ProjectDecide, ProjectMeta, Step
+from cairn.server.models import (
+    Finding,
+    Goal,
+    ProjectDecide,
+    ProjectMeta,
+    Session,
+    SessionMessage,
+    Step,
+)
 
 PROJECT_COLUMNS = (
     "id, title, status, created_at, decide_worker, decide_trigger, "
@@ -60,6 +68,10 @@ def next_hint_id(conn: sqlite3.Connection, project_id: str) -> str:
 
 def next_finding_id(conn: sqlite3.Connection, project_id: str) -> str:
     return _next_scoped_id(conn, "finding", "d", project_id)
+
+
+def next_session_id(conn: sqlite3.Connection, project_id: str) -> str:
+    return _next_scoped_id(conn, "session", "x", project_id)
 
 
 def get_project_or_404(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
@@ -338,3 +350,51 @@ def expire_decide_leases(conn: sqlite3.Connection, project_id: str | None = None
         query = query.replace("WHERE ", "WHERE id = ? AND ", 1)
         params = (project_id, now, timeout)
     conn.execute(query, params)
+
+
+def session_to_model(row: sqlite3.Row) -> Session:
+    return Session(
+        id=row["id"],
+        worker=row["worker"],
+        worker_type=row["worker_type"],
+        phase=row["phase"],
+        step=row["step_id"],
+        native_session=row["native_session"],
+        status=row["status"],
+        returncode=row["returncode"],
+        timed_out=bool(row["timed_out"]),
+        duration_ms=row["duration_ms"],
+        error=row["error"],
+        created_at=row["created_at"],
+    )
+
+
+def build_sessions(conn: sqlite3.Connection, project_id: str) -> list[Session]:
+    rows = conn.execute(
+        "SELECT * FROM sessions WHERE project_id = ? ORDER BY created_at, rowid",
+        (project_id,),
+    ).fetchall()
+    return [session_to_model(row) for row in rows]
+
+
+def build_session_messages(
+    conn: sqlite3.Connection, project_id: str, session_id: str
+) -> list[SessionMessage]:
+    rows = conn.execute(
+        "SELECT seq, role, content, raw FROM session_messages "
+        "WHERE project_id = ? AND session_id = ? ORDER BY seq",
+        (project_id, session_id),
+    ).fetchall()
+    return [
+        SessionMessage(seq=r["seq"], role=r["role"], content=r["content"], raw=r["raw"])
+        for r in rows
+    ]
+
+
+def get_session_or_404(conn: sqlite3.Connection, project_id: str, session_id: str) -> sqlite3.Row:
+    row = conn.execute(
+        "SELECT * FROM sessions WHERE id = ? AND project_id = ?", (session_id, project_id)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Session not found")
+    return row

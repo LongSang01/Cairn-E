@@ -584,6 +584,10 @@
           :class="sideTab === 'hints' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">
           Hints <span class="ml-0.5 text-[10px] opacity-60" x-text="project.hints.length"></span>
         </button>
+        <button @click="sideTab = 'sessions'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
+          :class="sideTab === 'sessions' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">
+          Sessions <span class="ml-0.5 text-[10px] opacity-60" x-text="(project.sessions || []).length"></span>
+        </button>
         <button @click="sideTab = 'log'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
           :class="sideTab === 'log' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">Log</button>
       </div>
@@ -785,6 +789,51 @@
               <p class="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words" x-text="h.content"></p>
             </div>
           </button>
+        </template>
+      </div>
+
+      <!-- Sessions -->
+      <div x-show="sideTab === 'sessions'" class="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/40">
+        <template x-if="(project.sessions || []).length === 0">
+          <p class="text-sm text-slate-300 text-center mt-12">No model sessions yet</p>
+        </template>
+        <template x-for="session in [...(project.sessions || [])].reverse()" :key="session.id">
+          <section class="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+            <button type="button" @click="toggleSession(session.id)" class="w-full text-left px-4 py-3 space-y-2 hover:bg-slate-50/70 transition">
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex items-center gap-1.5 min-w-0">
+                  <span class="px-1.5 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide" :class="sessionPhaseClass(session.phase)" x-text="session.phase"></span>
+                  <span class="text-xs font-medium text-slate-700 truncate" x-text="session.worker"></span>
+                </div>
+                <span class="w-2 h-2 rounded-full shrink-0" :class="sessionStatusDotClass(session.status)"></span>
+              </div>
+              <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400">
+                <span x-text="session.step ? `${session.id} · ${session.step}` : session.id"></span>
+                <span x-show="session.duration_ms != null" x-text="formatDurationMs(session.duration_ms)"></span>
+                <span x-show="session.timed_out" class="text-amber-500">timeout</span>
+                <span x-show="session.returncode != null && session.returncode !== 0" class="text-rose-500" x-text="`exit ${session.returncode}`"></span>
+                <span class="ml-auto tabular-nums" x-text="formatTime(session.created_at)"></span>
+              </div>
+              <p x-show="session.error" class="text-[11px] text-rose-500 break-words" x-text="session.error"></p>
+            </button>
+            <div x-show="isSessionOpen(session.id)" x-transition class="border-t border-slate-100 bg-slate-50/60 px-3 py-3 space-y-2">
+              <template x-if="sessionLoadingId === session.id">
+                <p class="text-[11px] text-slate-400 text-center py-2">Loading…</p>
+              </template>
+              <template x-if="sessionLoadingId !== session.id && sessionMessages(session.id).length === 0">
+                <p class="text-[11px] text-slate-400 text-center py-2">No messages recorded</p>
+              </template>
+              <template x-for="message in sessionMessages(session.id)" :key="`${session.id}-${message.seq}`">
+                <div class="rounded-xl px-3 py-2 border" :class="sessionMessageClass(message.role)">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-[10px] font-semibold uppercase tracking-widest opacity-70" x-text="message.role"></span>
+                    <span class="text-[10px] opacity-40 tabular-nums" x-text="`#${message.seq}`"></span>
+                  </div>
+                  <p class="text-xs leading-relaxed whitespace-pre-wrap break-words" x-text="message.content"></p>
+                </div>
+              </template>
+            </div>
+          </section>
         </template>
       </div>
 
@@ -1133,6 +1182,9 @@ function cairnApp() {
     pollTimer: null,
     cy: null,
     sideTab: 'detail',
+    openSessionIds: [],
+    sessionLoadingId: null,
+    sessionMessageCache: {},
     selectedNode: null,
     selectedFacts: [],
     selectedTimelineEntryId: null,
@@ -1638,7 +1690,66 @@ function cairnApp() {
     },
 
     async loadProject(id) {
-      try { this.project = await this.api('GET', `/projects/${id}`); } catch(e) { this.showToast(e.message, 'error'); }
+      try {
+        const project = await this.api('GET', `/projects/${id}`);
+        if (this.project && this.project.project.id !== project.project.id) this.resetSessionState();
+        this.project = project;
+      } catch(e) { this.showToast(e.message, 'error'); }
+    },
+
+    // --- Sessions: one model conversation per dispatcher run -------------------
+
+    isSessionOpen(sessionId) {
+      return this.openSessionIds.includes(sessionId);
+    },
+
+    sessionMessages(sessionId) {
+      return this.sessionMessageCache[sessionId] || [];
+    },
+
+    async toggleSession(sessionId) {
+      if (this.isSessionOpen(sessionId)) {
+        this.openSessionIds = this.openSessionIds.filter(id => id !== sessionId);
+        return;
+      }
+      this.openSessionIds = [...this.openSessionIds, sessionId];
+      if (!this.sessionMessageCache[sessionId] && this.selectedProjectId) {
+        this.sessionLoadingId = sessionId;
+        try {
+          const detail = await this.api('GET', `/projects/${this.selectedProjectId}/sessions/${sessionId}`);
+          this.sessionMessageCache = { ...this.sessionMessageCache, [sessionId]: detail.messages || [] };
+        } catch (e) {
+          this.showToast(e.message, 'error');
+        } finally {
+          if (this.sessionLoadingId === sessionId) this.sessionLoadingId = null;
+        }
+      }
+    },
+
+    resetSessionState() {
+      this.openSessionIds = [];
+      this.sessionLoadingId = null;
+      this.sessionMessageCache = {};
+    },
+
+    sessionPhaseClass(phase) {
+      if (phase === 'decide') return 'bg-violet-50 text-violet-600 ring-1 ring-violet-200';
+      if (phase === 'execute') return 'bg-teal-50 text-teal-600 ring-1 ring-teal-200';
+      return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+    },
+
+    sessionStatusDotClass(status) {
+      if (status === 'success') return 'bg-emerald-400';
+      if (status === 'rejected') return 'bg-amber-400';
+      if (status === 'cancelled') return 'bg-slate-300';
+      return 'bg-rose-400';
+    },
+
+    sessionMessageClass(role) {
+      if (role === 'user') return 'bg-brand-50/70 border-brand-100 text-slate-700';
+      if (role === 'assistant') return 'bg-white border-slate-200 text-slate-700';
+      if (role === 'system') return 'bg-slate-100 border-slate-200 text-slate-500';
+      return 'bg-slate-50 border-slate-100 text-slate-500 font-mono';
     },
 
     async toggleProjectStop() {
@@ -2158,6 +2269,7 @@ function cairnApp() {
       }
       this.rememberProjectListScroll();
       this.selectedProjectId = id;
+      this.resetSessionState();
       this.selectedNode = null;
       this.selectedFacts = [];
       this.selectedTimelineEntryId = null;
@@ -2193,6 +2305,7 @@ function cairnApp() {
       this.shouldRestoreProjectListScroll = true;
       this.project = null;
       this.selectedProjectId = '';
+      this.resetSessionState();
       this.selectedNode = null;
       this.selectedFacts = [];
       this.selectedTimelineEntryId = null;

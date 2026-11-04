@@ -21,6 +21,7 @@ from cairn.server.models import (
 from cairn.server.services import (
     build_findings,
     build_goals,
+    build_sessions,
     build_steps,
     check_project_active,
     check_project_completed,
@@ -169,6 +170,7 @@ def get_project(project_id: str):
             steps=build_steps(conn, project_id),
             findings=build_findings(conn, project_id),
             hints=[Hint(**dict(h)) for h in hints],
+            sessions=build_sessions(conn, project_id),
         )
 
 

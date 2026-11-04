@@ -194,6 +194,11 @@ class CairnClient:
             json={"from": from_ids, "description": description, "worker": worker},
         )
 
+    # --- Sessions: the transcript of each model conversation -----------------------
+
+    def create_session(self, project_id: str, payload: dict[str, Any]) -> ApiResult:
+        return self._request_json("POST", f"/projects/{project_id}/sessions", json=payload)
+
     def _request_json(self, method: str, path: str, json: dict[str, Any]) -> ApiResult:
         try:
             response = self._session().request(

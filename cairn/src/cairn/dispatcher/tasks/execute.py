@@ -7,6 +7,7 @@ from cairn.dispatcher.config import DispatchConfig, WorkerConfig
 from cairn.dispatcher.contracts import parse_json_output, validate_execute_payload
 from cairn.dispatcher.prompting import load_prompt, render_prompt
 from cairn.dispatcher.protocol.client import CairnClient
+from cairn.dispatcher.session import record_session
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
@@ -118,6 +119,23 @@ def run_execute_task(
         )
         execute_ms = int((time.perf_counter() - execute_started) * 1000)
         session = driver.extract_session(session, first.stdout, first.stderr)
+
+        def record(status: str, error: str | None = None) -> None:
+            record_session(
+                client,
+                project_id,
+                worker=worker.name,
+                worker_type=worker.type,
+                phase="execute",
+                status=status,
+                result=first,
+                step_id=step.id,
+                native_session=session,
+                prompt=prompt,
+                duration_ms=execute_ms,
+                error=error,
+            )
+
         cancelled = cancel_reason(first, cancellation)
         if cancelled is not None:
             LOG.info(
@@ -128,6 +146,7 @@ def run_execute_task(
                 cancelled,
                 execute_ms,
             )
+            record("cancelled", cancelled)
             best_effort_release(client, project_id, step.id, worker.name)
             return "cancelled"
         if lease.failure is not None:
@@ -139,6 +158,7 @@ def run_execute_task(
                 lease.failure.status_code,
                 execute_ms,
             )
+            record("failed", f"heartbeat lost: {lease.failure.status_code}")
             best_effort_release(client, project_id, step.id, worker.name)
             return "failed"
 
@@ -159,6 +179,7 @@ def run_execute_task(
                     preview(first.stdout),
                     preview(first.stderr),
                 )
+                record("failed", f"parse failed: {exc}")
                 return _try_conclude_fallback(
                     config,
                     client,
@@ -183,9 +204,10 @@ def run_execute_task(
                     int((time.perf_counter() - task_started) * 1000),
                     preview(first.stdout),
                 )
+                record("rejected")
                 best_effort_release(client, project_id, step.id, worker.name)
                 return "rejected"
-            return write_step_result(
+            status = write_step_result(
                 client,
                 project_id,
                 step.id,
@@ -195,6 +217,8 @@ def run_execute_task(
                 phase_ms=execute_ms,
                 total_ms=int((time.perf_counter() - task_started) * 1000),
             ).status
+            record("success")
+            return status
 
         if did_timeout(first):
             LOG.warning(
@@ -207,6 +231,7 @@ def run_execute_task(
                 preview(first.stdout),
                 preview(first.stderr),
             )
+            record("failed", "timed out")
             return _try_conclude_fallback(
                 config,
                 client,
@@ -232,6 +257,7 @@ def run_execute_task(
             preview(first.stdout),
             preview(first.stderr),
         )
+        record("failed", f"exit code {first.returncode}")
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
     except Exception:
@@ -265,10 +291,25 @@ def _try_conclude_fallback(
             driver.supports_conclude(),
             bool(session),
         )
+        _record_conclude(
+            client,
+            project_id,
+            worker,
+            step.id,
+            prompt=None,
+            result=None,
+            status="failed",
+            native_session=session,
+            error="conclude fallback unavailable",
+        )
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
     if lease.failure is not None:
         LOG.warning("conclude fallback skipped because heartbeat already lost project=%s step=%s worker=%s", project_id, step.id, worker.name)
+        _record_conclude(
+            client, project_id, worker, step.id, prompt=None, result=None,
+            status="failed", native_session=session, error="heartbeat lost before conclude",
+        )
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
     if cancellation.is_cancelled:
@@ -279,10 +320,18 @@ def _try_conclude_fallback(
             worker.name,
             cancellation.reason,
         )
+        _record_conclude(
+            client, project_id, worker, step.id, prompt=None, result=None,
+            status="cancelled", native_session=session, error=cancellation.reason,
+        )
         best_effort_release(client, project_id, step.id, worker.name)
         return "cancelled"
 
     if not project_allows_conclude_fallback(client, project_id, worker_name=worker.name, step_id=step.id):
+        _record_conclude(
+            client, project_id, worker, step.id, prompt=None, result=None,
+            status="failed", native_session=session, error="project is not active",
+        )
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
 
@@ -316,6 +365,20 @@ def _try_conclude_fallback(
     )
     conclude_ms = int((time.perf_counter() - conclude_started) * 1000)
     cancelled = cancel_reason(result, cancellation)
+
+    def record(status: str, error: str | None = None) -> None:
+        _record_conclude(
+            client,
+            project_id,
+            worker,
+            step.id,
+            prompt=prompt,
+            result=result,
+            status=status,
+            native_session=session,
+            error=error,
+            duration_ms=conclude_ms,
+        )
     if cancelled is not None:
         LOG.info(
             "conclude cancelled project=%s step=%s worker=%s reason=%s conclude_ms=%s",
@@ -325,9 +388,11 @@ def _try_conclude_fallback(
             cancelled,
             conclude_ms,
         )
+        record("cancelled", cancelled)
         best_effort_release(client, project_id, step.id, worker.name)
         return "cancelled"
     if lease.failure is not None:
+        record("failed", f"heartbeat lost: {lease.failure.status_code}")
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
     if result.timed_out or result.returncode != 0:
@@ -342,6 +407,7 @@ def _try_conclude_fallback(
             preview(result.stdout),
             preview(result.stderr),
         )
+        record("failed", "timed out" if result.timed_out else f"exit code {result.returncode}")
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
     try:
@@ -359,6 +425,7 @@ def _try_conclude_fallback(
             preview(result.stdout),
             preview(result.stderr),
         )
+        record("failed", f"parse failed: {exc}")
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
     if kind == "rejected":
@@ -370,9 +437,10 @@ def _try_conclude_fallback(
             conclude_ms,
             preview(result.stdout),
         )
+        record("rejected")
         best_effort_release(client, project_id, step.id, worker.name)
         return "rejected"
-    return write_step_result(
+    status = write_step_result(
         client,
         project_id,
         step.id,
@@ -381,6 +449,37 @@ def _try_conclude_fallback(
         source="execute_conclude",
         phase_ms=conclude_ms,
     ).status
+    record("success")
+    return status
+
+
+def _record_conclude(
+    client: CairnClient,
+    project_id: str,
+    worker: WorkerConfig,
+    step_id: str,
+    *,
+    prompt: str | None,
+    result,
+    status: str,
+    native_session: str | None,
+    error: str | None = None,
+    duration_ms: int | None = None,
+) -> None:
+    record_session(
+        client,
+        project_id,
+        worker=worker.name,
+        worker_type=worker.type,
+        phase="execute_conclude",
+        status=status,
+        result=result,
+        step_id=step_id,
+        native_session=native_session,
+        prompt=prompt,
+        duration_ms=duration_ms,
+        error=error,
+    )
 
 
 def _run_process(

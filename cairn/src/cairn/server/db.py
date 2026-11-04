@@ -96,6 +96,34 @@ CREATE TABLE IF NOT EXISTS hints (
     PRIMARY KEY (id, project_id)
 );
 
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    worker TEXT NOT NULL,
+    worker_type TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    step_id TEXT,
+    native_session TEXT,
+    status TEXT NOT NULL DEFAULT 'failed',
+    returncode INTEGER,
+    timed_out INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (id, project_id)
+);
+
+CREATE TABLE IF NOT EXISTS session_messages (
+    session_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    raw TEXT,
+    PRIMARY KEY (session_id, project_id, seq),
+    FOREIGN KEY (session_id, project_id) REFERENCES sessions(id, project_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS counters (
     name TEXT PRIMARY KEY,
     value INTEGER NOT NULL DEFAULT 0
@@ -150,6 +178,15 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {new_column} TEXT")
         if legacy_column in columns:
             conn.execute(f"UPDATE {table} SET {new_column} = {legacy_column}")
+
+    session_columns = _table_columns(conn, "sessions")
+    for column, ddl in (
+        ("native_session", "TEXT"),
+        ("error", "TEXT"),
+        ("duration_ms", "INTEGER"),
+    ):
+        if column not in session_columns:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} {ddl}")
 
     fact_columns = _table_columns(conn, "facts")
     if "step_id" not in fact_columns:

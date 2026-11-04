@@ -380,6 +380,53 @@ Execute 的 `submit_fact` / `submit_finding` 与 Step 收尾，原子完成：
 
 仅对 `completed` 项目可用。撤回完成声明：删除 completion Step，根 Goal 回到 `active`，外部反馈作为新事实写入，项目回到 `active`。新的 Decide 会因图变化被触发。
 
+### Sessions（对话记录）
+
+Session 记录一次 worker 运行中模型看到的输入和它的输出，用于事后回看"模型到底看到了什么、回了什么"。它不参与图的推理，也不影响调度，只追加。
+
+- `id` 在项目内自增（`x001`、`x002`…）。
+- `phase` ∈ `decide` | `execute` | `execute_conclude`，表示这次运行属于哪个阶段。
+- `step` 仅 Execute 阶段有值。
+- `status` ∈ `success` | `failed` | `cancelled` | `rejected`。
+
+#### POST /projects/{project_id}/sessions
+
+由 dispatcher 调用，写入一次运行的完整对话：
+
+```json
+{
+  "worker": "decider-a",
+  "worker_type": "pi",
+  "phase": "decide",
+  "step": null,
+  "native_session": "可选，worker CLI 自己的 session id",
+  "status": "success",
+  "returncode": 0,
+  "timed_out": false,
+  "duration_ms": 8421,
+  "error": null,
+  "messages": [
+    {"role": "user", "content": "发给模型的 prompt"},
+    {"role": "assistant", "content": "模型输出"},
+    {"role": "tool", "content": "工具输出或原始日志", "raw": null}
+  ]
+}
+```
+
+`role` ∈ `system` | `user` | `assistant` | `tool`；`seq` 由服务端按数组顺序生成。写入前 dispatcher 会遮蔽 `sk-*`、`Bearer *`、`*_API_KEY=*` 一类的凭据。
+
+返回 201 与该 Session 详情（`messages` 带 `seq`）。Session 内容属于旁路信息，不属于 FGS 图，因此导出 YAML / timeline 不包含它。
+
+#### GET /projects/{project_id}/sessions
+
+按时间顺序返回该项目的全部 Session 元数据（不含 `messages`）。
+
+#### GET /projects/{project_id}/sessions/{session_id}
+
+返回单个 Session 及其 `messages`。
+
+Session 随项目一起删除；`GET /projects/{project_id}` 的响应也会带上 `sessions` 列表。
+
 ### 导出
 
 #### GET /projects/{project_id}/export?format=yaml

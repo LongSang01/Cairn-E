@@ -12,6 +12,7 @@ from cairn.dispatcher.prompting import (
     render_prompt,
 )
 from cairn.dispatcher.protocol.client import CairnClient
+from cairn.dispatcher.session import record_session
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
@@ -103,9 +104,26 @@ def run_decide_task(
         execute_ms = int((time.perf_counter() - execute_started) * 1000)
         total_ms = int((time.perf_counter() - task_started) * 1000)
         session = driver.extract_session(session, result.stdout, result.stderr)
+
+        def record(status: str, error: str | None = None) -> None:
+            record_session(
+                client,
+                project_id,
+                worker=worker.name,
+                worker_type=worker.type,
+                phase="decide",
+                status=status,
+                result=result,
+                native_session=session,
+                prompt=prompt,
+                duration_ms=execute_ms,
+                error=error,
+            )
+
         cancelled = cancel_reason(result, cancellation)
         if cancelled is not None:
             LOG.info("decide cancelled project=%s worker=%s reason=%s execute_ms=%s", project_id, worker.name, cancelled, execute_ms)
+            record("cancelled", cancelled)
             return "cancelled"
         if lease.failure is not None:
             LOG.warning(
@@ -115,6 +133,7 @@ def run_decide_task(
                 lease.failure.status_code,
                 execute_ms,
             )
+            record("failed", f"heartbeat lost: {lease.failure.status_code}")
             return "failed"
         if did_timeout(result):
             LOG.warning(
@@ -126,6 +145,7 @@ def run_decide_task(
                 preview(result.stdout),
                 preview(result.stderr),
             )
+            record("failed", "timed out")
             return "failed"
         if result.returncode != 0:
             LOG.warning(
@@ -138,6 +158,7 @@ def run_decide_task(
                 preview(result.stdout),
                 preview(result.stderr),
             )
+            record("failed", f"exit code {result.returncode}")
             return "failed"
 
         try:
@@ -162,6 +183,7 @@ def run_decide_task(
                 preview(result.stdout),
                 preview(result.stderr),
             )
+            record("failed", f"parse failed: {exc}")
             return "failed"
 
         if kind == "rejected":
@@ -173,12 +195,14 @@ def run_decide_task(
                 total_ms,
                 preview(result.stdout),
             )
+            record("rejected")
             return "rejected"
 
         if kind == "complete":
             response = client.complete(project_id, data["from"], data["description"], worker.name)
             if response.status_code == 403:
                 LOG.info("project became inactive during decide complete project=%s worker=%s", project_id, worker.name)
+                record("success")
                 return "success"
             if not response.ok:
                 LOG.warning(
@@ -188,6 +212,7 @@ def run_decide_task(
                     response.status_code,
                     response.text,
                 )
+                record("failed", f"complete write failed: {response.status_code}")
                 return "failed"
             LOG.info(
                 "project completed project=%s worker=%s from=%s execute_ms=%s total_ms=%s",
@@ -197,6 +222,7 @@ def run_decide_task(
                 execute_ms,
                 total_ms,
             )
+            record("success")
             return "success"
 
         if kind == "noop":
@@ -207,6 +233,7 @@ def run_decide_task(
                 execute_ms,
                 total_ms,
             )
+            record("success")
             return "success"
 
         applied = _apply_actions(client, project_id, worker.name, data)
@@ -225,7 +252,9 @@ def run_decide_task(
         )
         if applied["total"] == 0:
             LOG.warning("decide applied no graph change project=%s worker=%s", project_id, worker.name)
+            record("failed", "applied no graph change")
             return "failed"
+        record("success")
         return "success"
     except Exception:
         LOG.exception("decide task crashed project=%s worker=%s", project_id, worker.name)

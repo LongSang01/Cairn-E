@@ -72,6 +72,64 @@ class Hint(BaseModel):
     created_at: str
 
 
+class SessionMessage(BaseModel):
+    """One turn of the conversation the dispatcher had with a model."""
+
+    seq: int
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str
+    raw: str | None = None
+
+
+class Session(BaseModel):
+    """A single worker run: the prompt sent to the model and what it answered."""
+
+    id: str
+    worker: str
+    worker_type: str
+    phase: str
+    step: str | None = None
+    native_session: str | None = None
+    status: str
+    returncode: int | None = None
+    timed_out: bool = False
+    duration_ms: int | None = None
+    error: str | None = None
+    created_at: str
+
+
+class SessionDetail(Session):
+    messages: list[SessionMessage] = Field(default_factory=list)
+
+
+class SubmittedSessionMessage(BaseModel):
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str
+    raw: str | None = None
+
+
+class CreateSessionRequest(BaseModel):
+    worker: str
+    worker_type: str
+    phase: str
+    step: str | None = None
+    native_session: str | None = None
+    status: Literal["success", "failed", "cancelled", "rejected"] = "failed"
+    returncode: int | None = None
+    timed_out: bool = False
+    duration_ms: int | None = None
+    error: str | None = None
+    messages: list[SubmittedSessionMessage] = Field(default_factory=list)
+
+    @field_validator("worker", "worker_type", "phase")
+    @classmethod
+    def validate_non_empty_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
 class ProjectDecide(BaseModel):
     worker: str
     trigger: str
@@ -105,6 +163,7 @@ class ProjectDetail(BaseModel):
     steps: list[Step]
     findings: list[Finding]
     hints: list[Hint]
+    sessions: list[Session] = Field(default_factory=list)
 
 
 class CreateHintInline(BaseModel):

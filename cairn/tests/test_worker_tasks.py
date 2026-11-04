@@ -339,3 +339,61 @@ def test_decide_startup_only_mode_skips_task_healthcheck(monkeypatch) -> None:
 
     assert outcome == "success"
     assert client.created_steps == [("proj_001", ["f001"], "next", "test-worker")]
+
+
+def test_decide_records_model_session(monkeypatch) -> None:
+    config = make_config()
+    client = FakeClient(make_project())
+    driver = FakeDriver()
+    lease = FakeLease()
+
+    monkeypatch.setattr(decide, "get_driver", lambda *_a, **_k: driver)
+    monkeypatch.setattr(decide.HeartbeatLease, "for_decide", _lease_factory(lease))
+    monkeypatch.setattr(
+        decide,
+        "run_worker_process",
+        lambda *_args, **_kwargs: ProcessResult(
+            0,
+            '{"accepted":true,"data":{"steps":[{"from":["f001"],"description":"next","priority":1}]}}',
+            "",
+        ),
+    )
+
+    decide.run_decide_task(
+        config, client, FakeContainerManager(), make_project(), "graph", config.workers[0], TaskCancellation()
+    )
+
+    assert len(client.created_sessions) == 1
+    project_id, payload = client.created_sessions[0]
+    assert project_id == "proj_001"
+    assert payload["phase"] == "decide"
+    assert payload["status"] == "success"
+    assert payload["worker"] == "test-worker"
+    assert payload["messages"][0] == {"role": "user", "content": driver.execute_prompts[0]}
+
+
+def test_execute_records_session_for_execute_and_conclude(monkeypatch) -> None:
+    config = make_config()
+    step = make_step(status="running", worker="test-worker")
+    project = make_project(steps=[step])
+    client = FakeClient(project)
+    results: Iterator[ProcessResult] = iter(
+        [
+            ProcessResult(0, "Still exploring, no json yet.", ""),
+            ProcessResult(0, '{"accepted":true,"data":{"facts":[{"description":"f"}]}}', ""),
+        ]
+    )
+
+    monkeypatch.setattr(execute, "get_driver", lambda *_a, **_k: FakeDriver())
+    monkeypatch.setattr(execute.HeartbeatLease, "for_step", _lease_factory(FakeLease()))
+    monkeypatch.setattr(execute, "_run_process", lambda *_args, **_kwargs: next(results))
+
+    execute.run_execute_task(
+        config, client, FakeContainerManager(), project, "graph", step, config.workers[0], TaskCancellation()
+    )
+
+    phases = [payload["phase"] for _pid, payload in client.created_sessions]
+    assert phases == ["execute", "execute_conclude"]
+    assert all(payload["status"] == "failed" for _pid, payload in client.created_sessions if payload["phase"] == "execute")
+    assert client.created_sessions[1][1]["status"] == "success"
+    assert all(payload["step"] == "s001" for _pid, payload in client.created_sessions)
