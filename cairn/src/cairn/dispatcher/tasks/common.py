@@ -10,7 +10,7 @@ from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
-from cairn.dispatcher.runtime.process import ProcessResult
+from cairn.dispatcher.runtime.process import OutputCallback, ProcessResult
 
 PROCESS_COMMUNICATE_GRACE_SECONDS = 15
 LOG_PREVIEW_LIMIT = 1200
@@ -80,6 +80,7 @@ def run_worker_process(
     timeout_seconds: int,
     lease: HeartbeatLease | None = None,
     cancellation: TaskCancellation | None = None,
+    on_stdout: OutputCallback | None = None,
 ) -> ProcessResult:
     LOG.info(
         "starting container exec container=%s worker=%s phase=%s timeout=%ss",
@@ -94,6 +95,9 @@ def run_worker_process(
         argv,
         timeout_seconds=timeout_seconds,
     )
+    if on_stdout is not None:
+        # Set before start() so no chunk is missed.
+        process.on_stdout = on_stdout
     process.start()
     if lease is not None:
         lease.attach_process(process)

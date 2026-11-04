@@ -7,7 +7,7 @@ from cairn.dispatcher.config import DispatchConfig, WorkerConfig
 from cairn.dispatcher.contracts import parse_json_output, validate_execute_payload
 from cairn.dispatcher.prompting import load_prompt, render_prompt
 from cairn.dispatcher.protocol.client import CairnClient
-from cairn.dispatcher.session import record_session
+from cairn.dispatcher.session import SessionStream, start_session
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
@@ -45,6 +45,7 @@ def run_execute_task(
     healthcheck_timeout = config.runtime.healthcheck_timeout
     lease = HeartbeatLease.for_step(client, project_id, step.id, worker.name, config.runtime.interval)
     lease.start()
+    stream: SessionStream | None = None
     try:
         container_name = container_manager.ensure_running(project_id)
 
@@ -106,6 +107,16 @@ def run_execute_task(
         session = driver.prepare_session()
         execute = driver.build_execute(worker, prompt, session)
         session = execute.session
+        stream = start_session(
+            client,
+            project_id,
+            worker=worker.name,
+            worker_type=worker.type,
+            phase="execute",
+            step_id=step.id,
+            prompt=prompt,
+            native_session=session,
+        )
         execute_started = time.perf_counter()
         first = _run_process(
             container_manager,
@@ -116,24 +127,18 @@ def run_execute_task(
             timeout=config.tasks.execute.timeout,
             lease=lease,
             cancellation=cancellation,
+            on_stdout=stream.feed,
         )
         execute_ms = int((time.perf_counter() - execute_started) * 1000)
         session = driver.extract_session(session, first.stdout, first.stderr)
 
         def record(status: str, error: str | None = None) -> None:
-            record_session(
-                client,
-                project_id,
-                worker=worker.name,
-                worker_type=worker.type,
-                phase="execute",
+            stream.finish(
                 status=status,
                 result=first,
-                step_id=step.id,
-                native_session=session,
-                prompt=prompt,
-                duration_ms=execute_ms,
                 error=error,
+                duration_ms=execute_ms,
+                native_session=session,
             )
 
         cancelled = cancel_reason(first, cancellation)
@@ -262,6 +267,8 @@ def run_execute_task(
         return "failed"
     except Exception:
         LOG.exception("execute task crashed project=%s step=%s worker=%s", project_id, step.id, worker.name)
+        if stream is not None:
+            stream.finish(status="failed", error="task crashed")
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
     finally:
@@ -291,25 +298,10 @@ def _try_conclude_fallback(
             driver.supports_conclude(),
             bool(session),
         )
-        _record_conclude(
-            client,
-            project_id,
-            worker,
-            step.id,
-            prompt=None,
-            result=None,
-            status="failed",
-            native_session=session,
-            error="conclude fallback unavailable",
-        )
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
     if lease.failure is not None:
         LOG.warning("conclude fallback skipped because heartbeat already lost project=%s step=%s worker=%s", project_id, step.id, worker.name)
-        _record_conclude(
-            client, project_id, worker, step.id, prompt=None, result=None,
-            status="failed", native_session=session, error="heartbeat lost before conclude",
-        )
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
     if cancellation.is_cancelled:
@@ -320,18 +312,10 @@ def _try_conclude_fallback(
             worker.name,
             cancellation.reason,
         )
-        _record_conclude(
-            client, project_id, worker, step.id, prompt=None, result=None,
-            status="cancelled", native_session=session, error=cancellation.reason,
-        )
         best_effort_release(client, project_id, step.id, worker.name)
         return "cancelled"
 
     if not project_allows_conclude_fallback(client, project_id, worker_name=worker.name, step_id=step.id):
-        _record_conclude(
-            client, project_id, worker, step.id, prompt=None, result=None,
-            status="failed", native_session=session, error="project is not active",
-        )
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
 
@@ -352,32 +336,42 @@ def _try_conclude_fallback(
     )
     conclude_argv = driver.build_conclude(worker, prompt, session)
     LOG.info("starting conclude fallback project=%s step=%s worker=%s", project_id, step.id, worker.name)
-    conclude_started = time.perf_counter()
-    result = _run_process(
-        container_manager,
-        container_name,
-        worker,
-        conclude_argv,
+    stream = start_session(
+        client,
+        project_id,
+        worker=worker.name,
+        worker_type=worker.type,
         phase="execute_conclude",
-        timeout=config.tasks.execute.conclude_timeout,
-        lease=lease,
-        cancellation=cancellation,
+        step_id=step.id,
+        prompt=prompt,
+        native_session=session,
     )
+    conclude_started = time.perf_counter()
+    try:
+        result = _run_process(
+            container_manager,
+            container_name,
+            worker,
+            conclude_argv,
+            phase="execute_conclude",
+            timeout=config.tasks.execute.conclude_timeout,
+            lease=lease,
+            cancellation=cancellation,
+            on_stdout=stream.feed,
+        )
+    except Exception:
+        stream.finish(status="failed", error="conclude crashed")
+        raise
     conclude_ms = int((time.perf_counter() - conclude_started) * 1000)
     cancelled = cancel_reason(result, cancellation)
 
     def record(status: str, error: str | None = None) -> None:
-        _record_conclude(
-            client,
-            project_id,
-            worker,
-            step.id,
-            prompt=prompt,
-            result=result,
+        stream.finish(
             status=status,
-            native_session=session,
+            result=result,
             error=error,
             duration_ms=conclude_ms,
+            native_session=session,
         )
     if cancelled is not None:
         LOG.info(
@@ -453,35 +447,6 @@ def _try_conclude_fallback(
     return status
 
 
-def _record_conclude(
-    client: CairnClient,
-    project_id: str,
-    worker: WorkerConfig,
-    step_id: str,
-    *,
-    prompt: str | None,
-    result,
-    status: str,
-    native_session: str | None,
-    error: str | None = None,
-    duration_ms: int | None = None,
-) -> None:
-    record_session(
-        client,
-        project_id,
-        worker=worker.name,
-        worker_type=worker.type,
-        phase="execute_conclude",
-        status=status,
-        result=result,
-        step_id=step_id,
-        native_session=native_session,
-        prompt=prompt,
-        duration_ms=duration_ms,
-        error=error,
-    )
-
-
 def _run_process(
     container_manager: ContainerManager,
     container_name: str,
@@ -492,6 +457,7 @@ def _run_process(
     timeout: int,
     lease: HeartbeatLease,
     cancellation: TaskCancellation,
+    on_stdout=None,
 ):
     return run_worker_process(
         container_manager,
@@ -502,4 +468,5 @@ def _run_process(
         timeout_seconds=timeout,
         lease=lease,
         cancellation=cancellation,
+        on_stdout=on_stdout,
     )

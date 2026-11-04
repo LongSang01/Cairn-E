@@ -10,6 +10,8 @@ from cairn.dispatcher.contracts import (
     validate_execute_payload,
 )
 from cairn.dispatcher.runtime.process import ManagedProcess
+from cairn.dispatcher.workers.adapters.claudecode import ClaudeCodeDriver
+from cairn.dispatcher.workers.adapters.codex import CodexDriver
 from cairn.dispatcher.workers.adapters.pi import PiDriver
 
 FACTS = ["origin", "f001"]
@@ -140,6 +142,50 @@ def test_pi_driver_extracts_session_and_last_assistant_text() -> None:
 
     assert driver.extract_session(None, stdout, "") == "session-123"
     assert driver.extract_response_text(stdout, "") == '{"accepted":true,"data":{}}'
+
+
+def test_claudecode_driver_extracts_answer_from_stream_json() -> None:
+    driver = ClaudeCodeDriver()
+    stdout = "\n".join(
+        [
+            json.dumps({"type": "system", "subtype": "init", "session_id": "s1"}),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}],
+                    },
+                }
+            ),
+            json.dumps({"type": "result", "subtype": "success", "result": '{"accepted":true}', "is_error": False}),
+        ]
+    )
+
+    assert driver.extract_response_text(stdout, "") == '{"accepted":true}'
+    # Plain mode output must keep working: stdout is the answer.
+    assert driver.extract_response_text("plain answer", "") == "plain answer"
+
+
+def test_codex_driver_extracts_thread_and_agent_messages() -> None:
+    driver = CodexDriver()
+    stdout = "\n".join(
+        [
+            json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
+            json.dumps({"type": "item.completed", "item": {"type": "reasoning", "text": "thinking"}}),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "command_execution", "command": "ls", "aggregated_output": "a.txt"},
+                }
+            ),
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "first"}}),
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "second"}}),
+        ]
+    )
+
+    assert driver.extract_session(None, stdout, "") == "thread-1"
+    assert driver.extract_response_text(stdout, "") == "first\nsecond"
 
 
 def test_close_stream_closes_response_even_when_stream_close_fails() -> None:

@@ -6,6 +6,11 @@ from pydantic import BaseModel, Field, field_validator
 
 GoalStatus = Literal["active", "achieved", "abandoned"]
 StepStatus = Literal["pending", "running", "done", "abandoned"]
+# Transcript roles: `tool` is the raw-output fallback, `tool_call`/`tool_result`
+# are the individual tool invocations, `thinking` is model reasoning.
+SessionRole = Literal["system", "user", "assistant", "thinking", "tool", "tool_call", "tool_result"]
+# `running` marks a session that is still being appended to while the worker runs.
+SessionStatus = Literal["running", "success", "failed", "cancelled", "rejected"]
 
 
 class Settings(BaseModel):
@@ -76,7 +81,7 @@ class SessionMessage(BaseModel):
     """One turn of the conversation the dispatcher had with a model."""
 
     seq: int
-    role: Literal["system", "user", "assistant", "tool"]
+    role: SessionRole
     content: str
     raw: str | None = None
 
@@ -96,6 +101,7 @@ class Session(BaseModel):
     duration_ms: int | None = None
     error: str | None = None
     created_at: str
+    message_count: int = 0
 
 
 class SessionDetail(Session):
@@ -103,7 +109,7 @@ class SessionDetail(Session):
 
 
 class SubmittedSessionMessage(BaseModel):
-    role: Literal["system", "user", "assistant", "tool"]
+    role: SessionRole
     content: str
     raw: str | None = None
 
@@ -114,7 +120,7 @@ class CreateSessionRequest(BaseModel):
     phase: str
     step: str | None = None
     native_session: str | None = None
-    status: Literal["success", "failed", "cancelled", "rejected"] = "failed"
+    status: SessionStatus = "failed"
     returncode: int | None = None
     timed_out: bool = False
     duration_ms: int | None = None
@@ -128,6 +134,21 @@ class CreateSessionRequest(BaseModel):
         if not text:
             raise ValueError("must not be empty")
         return text
+
+
+class AppendSessionMessagesRequest(BaseModel):
+    messages: list[SubmittedSessionMessage]
+
+
+class FinishSessionRequest(BaseModel):
+    """Finalize a session that was created while the worker was still running."""
+
+    status: SessionStatus
+    returncode: int | None = None
+    timed_out: bool = False
+    duration_ms: int | None = None
+    error: str | None = None
+    native_session: str | None = None
 
 
 class ProjectDecide(BaseModel):

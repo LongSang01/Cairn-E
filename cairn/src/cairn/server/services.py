@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 
@@ -20,9 +20,43 @@ PROJECT_COLUMNS = (
     "decide_started_at, decide_last_heartbeat_at"
 )
 
+# Session rows carry their message count so the list view can show live progress.
+SESSION_COLUMNS = (
+    "s.*, (SELECT COUNT(*) FROM session_messages m "
+    "WHERE m.project_id = s.project_id AND m.session_id = s.id) AS message_count"
+)
+
+# A running session is heartbeated every few seconds; silence means the dispatcher died.
+SESSION_STALE_SECONDS = 60
+
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def utcnow_before(seconds: int) -> str:
+    moment = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def expire_stale_sessions(conn: sqlite3.Connection, project_id: str) -> int:
+    """Mark sessions whose dispatcher stopped heartbeating as failed.
+
+    A crashed or killed dispatcher never sends the closing PATCH, so without this the
+    row would stay `running` and the UI would poll it forever.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE sessions
+        SET status = 'failed',
+            error = COALESCE(error, 'dispatcher stopped before the run finished'),
+            updated_at = ?
+        WHERE project_id = ? AND status = 'running'
+          AND COALESCE(updated_at, created_at) < ?
+        """,
+        (utcnow(), project_id, utcnow_before(SESSION_STALE_SECONDS)),
+    )
+    return cursor.rowcount
 
 
 def next_project_id(conn: sqlite3.Connection) -> str:
@@ -72,6 +106,14 @@ def next_finding_id(conn: sqlite3.Connection, project_id: str) -> str:
 
 def next_session_id(conn: sqlite3.Connection, project_id: str) -> str:
     return _next_scoped_id(conn, "session", "x", project_id)
+
+
+def next_session_message_seq(conn: sqlite3.Connection, project_id: str, session_id: str) -> int:
+    row = conn.execute(
+        "SELECT COALESCE(MAX(seq) + 1, 0) FROM session_messages WHERE project_id = ? AND session_id = ?",
+        (project_id, session_id),
+    ).fetchone()
+    return int(row[0])
 
 
 def get_project_or_404(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
@@ -366,12 +408,15 @@ def session_to_model(row: sqlite3.Row) -> Session:
         duration_ms=row["duration_ms"],
         error=row["error"],
         created_at=row["created_at"],
+        message_count=row["message_count"],
     )
 
 
 def build_sessions(conn: sqlite3.Connection, project_id: str) -> list[Session]:
+    expire_stale_sessions(conn, project_id)
     rows = conn.execute(
-        "SELECT * FROM sessions WHERE project_id = ? ORDER BY created_at, rowid",
+        f"SELECT {SESSION_COLUMNS} FROM sessions s WHERE s.project_id = ? "
+        "ORDER BY s.created_at, s.rowid",
         (project_id,),
     ).fetchall()
     return [session_to_model(row) for row in rows]
@@ -393,7 +438,8 @@ def build_session_messages(
 
 def get_session_or_404(conn: sqlite3.Connection, project_id: str, session_id: str) -> sqlite3.Row:
     row = conn.execute(
-        "SELECT * FROM sessions WHERE id = ? AND project_id = ?", (session_id, project_id)
+        f"SELECT {SESSION_COLUMNS} FROM sessions s WHERE s.id = ? AND s.project_id = ?",
+        (session_id, project_id),
     ).fetchone()
     if row is None:
         raise HTTPException(404, "Session not found")

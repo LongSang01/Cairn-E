@@ -5,13 +5,16 @@ from dataclasses import dataclass
 import logging
 import threading
 import time
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from docker.errors import APIError, DockerException
 from docker.models.containers import Container
 
 LOG = logging.getLogger(__name__)
 EXEC_KILL_JOIN_TIMEOUT_SECONDS = 5.0
+
+# Receives stdout chunks as they arrive, so a live Session can stream the transcript.
+OutputCallback = Callable[[str], None]
 
 
 @dataclass(slots=True)
@@ -30,7 +33,10 @@ class ExecProcess(Protocol):
 
     Container mode uses ManagedProcess; local mode uses LocalProcess. Both expose this
     surface so the task runners, heartbeat lease and cancellation stay backend-agnostic.
+    Assigning `on_stdout` streams chunks to the caller while the process is still running.
     """
+
+    on_stdout: OutputCallback | None
 
     def start(self) -> None: ...
 
@@ -42,9 +48,16 @@ class ExecProcess(Protocol):
 
 
 class ManagedProcess:
-    def __init__(self, container: Container, command: list[str], env: dict[str, str]):
+    def __init__(
+        self,
+        container: Container,
+        command: list[str],
+        env: dict[str, str],
+        on_stdout: OutputCallback | None = None,
+    ):
         self.command = command
         self.env = env
+        self.on_stdout = on_stdout
         self._container = container
         self._api = container.client.api
         self._exec_id: str | None = None
@@ -130,6 +143,7 @@ class ManagedProcess:
                 stdout, stderr = self._split_chunk(chunk)
                 if stdout:
                     self._stdout.append(stdout)
+                    self._emit(stdout)
                 if stderr:
                     self._stderr.append(stderr)
         except DockerException as exc:
@@ -187,6 +201,15 @@ class ManagedProcess:
                 return
         if last_error is not None:
             LOG.warning("failed to kill container exec pid=%s container=%s error=%s", pid, self._container.name, last_error)
+
+    def _emit(self, stdout: str) -> None:
+        callback = self.on_stdout
+        if callback is None:
+            return
+        try:
+            callback(stdout)
+        except Exception:  # noqa: BLE001 - a broken observer must not kill the reader
+            LOG.warning("stdout callback failed", exc_info=True)
 
     @staticmethod
     def _split_chunk(chunk: Any) -> tuple[str, str]:

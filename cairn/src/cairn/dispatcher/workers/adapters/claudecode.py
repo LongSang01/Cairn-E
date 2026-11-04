@@ -3,9 +3,13 @@ from __future__ import annotations
 from cairn.dispatcher.config import WorkerConfig
 from cairn.dispatcher.workers.base import DriverResult, SeedSessionDriver
 from cairn.dispatcher.workers.health import HealthResult, http_ping, proxies_from_env
+from cairn.dispatcher.workers.stream import iter_json_events, text_from_content
 
 
 ANTHROPIC_VERSION = "2023-06-01"
+# Streaming JSON is what makes the transcript complete: plain `-p` only prints the
+# final answer, so tool calls and their results would never reach the sessions view.
+STREAM_FLAGS = ["--output-format", "stream-json", "--verbose"]
 
 
 class ClaudeCodeDriver(SeedSessionDriver):
@@ -43,6 +47,7 @@ class ClaudeCodeDriver(SeedSessionDriver):
                 "--session-id",
                 session,
                 "--dangerously-skip-permissions",
+                *STREAM_FLAGS,
                 "-p",
                 "--",
                 prompt,
@@ -56,7 +61,29 @@ class ClaudeCodeDriver(SeedSessionDriver):
             "-r",
             session,
             "--dangerously-skip-permissions",
+            *STREAM_FLAGS,
             "-p",
             "--",
             prompt,
         ]
+
+    def extract_response_text(self, stdout: str, stderr: str) -> str:
+        """Pick the model's final answer out of the stream-json events."""
+        assistant_text = ""
+        result_text: str | None = None
+        for event in iter_json_events(stdout):
+            kind = event.get("type")
+            if kind == "result" and isinstance(event.get("result"), str):
+                result_text = event["result"]
+            elif kind == "assistant":
+                message = event.get("message")
+                if isinstance(message, dict):
+                    text = text_from_content(message.get("content")).strip()
+                    if text:
+                        assistant_text = text
+        if result_text is not None and result_text.strip():
+            return result_text
+        if assistant_text:
+            return assistant_text
+        # Plain text mode (older CLI, or stream-json unavailable): stdout is the answer.
+        return stdout

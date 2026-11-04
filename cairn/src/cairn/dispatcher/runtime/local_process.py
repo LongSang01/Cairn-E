@@ -7,7 +7,7 @@ import subprocess
 import threading
 from contextlib import suppress
 
-from cairn.dispatcher.runtime.process import ProcessResult
+from cairn.dispatcher.runtime.process import OutputCallback, ProcessResult
 
 LOG = logging.getLogger(__name__)
 
@@ -32,9 +32,11 @@ class LocalProcess:
         env: dict[str, str],
         timeout_seconds: int | None = None,
         term_grace_seconds: int = 5,
+        on_stdout: OutputCallback | None = None,
     ):
         self.command = command
         self.env = env
+        self.on_stdout = on_stdout
         self._cwd = cwd
         self._timeout_seconds = timeout_seconds
         self._term_grace = max(1.0, float(term_grace_seconds))
@@ -60,10 +62,10 @@ class LocalProcess:
             start_new_session=True,
         )
         self._stdout_thread = threading.Thread(
-            target=self._drain, args=(self._process.stdout, self._stdout_chunks), daemon=True
+            target=self._drain, args=(self._process.stdout, self._stdout_chunks, True), daemon=True
         )
         self._stderr_thread = threading.Thread(
-            target=self._drain, args=(self._process.stderr, self._stderr_chunks), daemon=True
+            target=self._drain, args=(self._process.stderr, self._stderr_chunks, False), daemon=True
         )
         self._stdout_thread.start()
         self._stderr_thread.start()
@@ -123,11 +125,16 @@ class LocalProcess:
             with suppress(ProcessLookupError, PermissionError, ValueError):
                 process.send_signal(sig)
 
-    @staticmethod
-    def _drain(pipe, sink: list[str]) -> None:
+    def _drain(self, pipe, sink: list[str], is_stdout: bool = False) -> None:
+        callback = self.on_stdout if is_stdout else None
         try:
             for chunk in iter(lambda: pipe.read(READ_CHUNK_SIZE), ""):
                 sink.append(chunk)
+                if callback is not None:
+                    try:
+                        callback(chunk)
+                    except Exception:  # noqa: BLE001 - a broken observer must not kill the reader
+                        LOG.warning("stdout callback failed", exc_info=True)
         except (ValueError, OSError):
             pass
         finally:

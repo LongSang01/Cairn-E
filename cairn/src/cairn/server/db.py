@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     duration_ms INTEGER,
     error TEXT,
     created_at TEXT NOT NULL,
+    updated_at TEXT,
     PRIMARY KEY (id, project_id)
 );
 
@@ -184,9 +185,12 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         ("native_session", "TEXT"),
         ("error", "TEXT"),
         ("duration_ms", "INTEGER"),
+        ("updated_at", "TEXT"),
     ):
         if column not in session_columns:
             conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} {ddl}")
+    # Sessions created before `updated_at` existed have no heartbeat history.
+    conn.execute("UPDATE sessions SET updated_at = created_at WHERE updated_at IS NULL")
 
     fact_columns = _table_columns(conn, "facts")
     if "step_id" not in fact_columns:

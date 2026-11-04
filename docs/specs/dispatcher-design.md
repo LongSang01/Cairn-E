@@ -259,12 +259,13 @@ check_health(worker, timeout) -> HealthResult
 
 ### CLI 接入约定
 
-Agent CLI 只需满足两点：
+Agent CLI 只需满足三点：
 
 1. 能从 argv 接收完整提示词；
-2. 最终把结构化 JSON 打到 stdout（允许夹杂文本 / markdown 代码块）。
+2. 最终把结构化 JSON 打到 stdout（允许夹杂文本 / markdown 代码块）；
+3. 最好以流式 JSON 输出过程事件（claudecode `--output-format stream-json --verbose`、codex `exec --json`、pi `--mode json`），否则 Session 里只留得下最终回答。
 
-Dispatcher 负责从输出中提取最后一个 JSON 对象。
+Dispatcher 负责从输出中提取最终回答（`extract_response_text`），并把事件流展开成对话记录（`session.build_messages`）。降级路径始终保留：拿不到结构化事件时，原始 stdout / stderr 会作为一条 `tool` 消息写入 Session。
 
 ## 提示词资源
 

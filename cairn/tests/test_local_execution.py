@@ -41,6 +41,22 @@ def test_local_process_captures_stdout_and_exit_code() -> None:
     assert not result.timed_out
 
 
+def test_local_process_streams_stdout_before_exit() -> None:
+    seen: list[str] = []
+    process = LocalProcess(
+        ["python3", "-c", "import sys; print('first', flush=True); print('second', flush=True)"],
+        cwd=os.getcwd(),
+        env=dict(os.environ),
+        timeout_seconds=10,
+        on_stdout=seen.append,
+    )
+    process.start()
+    result = process.communicate(timeout=20)
+
+    assert "".join(seen) == result.stdout
+    assert "first" in result.stdout
+
+
 def test_local_process_inherits_cwd(tmp_path: Path) -> None:
     process = LocalProcess(
         ["python3", "-c", "import os; print(os.getcwd())"],
@@ -319,7 +335,7 @@ def test_codex_local_driver_omits_provider_injection() -> None:
     worker = _bare_worker("codex")
     argv = CodexDriver(local=True).build_execute(worker, "PROMPT", None).argv
 
-    assert argv == ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--", "PROMPT"]
+    assert argv == ["codex", "exec", "--json", "--dangerously-bypass-approvals-and-sandbox", "--", "PROMPT"]
     assert not any("model_providers" in part for part in argv)
     assert "--model" not in argv
 

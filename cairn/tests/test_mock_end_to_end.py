@@ -149,6 +149,24 @@ class InProcessClient:
             {"status": status, "worker": worker, "note": note},
         )
 
+    def create_session(self, project_id: str, payload: dict[str, Any]) -> ApiResult:
+        return self._post(f"/projects/{project_id}/sessions", payload)
+
+    def append_session_messages(
+        self, project_id: str, session_id: str, messages: list[dict[str, Any]]
+    ) -> ApiResult:
+        return self._post(
+            f"/projects/{project_id}/sessions/{session_id}/messages", {"messages": messages}
+        )
+
+    def finish_session(self, project_id: str, session_id: str, payload: dict[str, Any]) -> ApiResult:
+        response = self.http.patch(f"/projects/{project_id}/sessions/{session_id}", json=payload)
+        data = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
+        return ApiResult(response.status_code, data, response.text)
+
+    def session_heartbeat(self, project_id: str, session_id: str) -> ApiResult:
+        return self._post(f"/projects/{project_id}/sessions/{session_id}/heartbeat", {})
+
     def _post(self, path: str, payload: dict[str, Any]) -> ApiResult:
         response = self.http.post(path, json=payload)
         data = response.json() if response.headers.get("content-type", "").startswith("application/json") else None

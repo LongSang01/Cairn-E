@@ -793,7 +793,7 @@
       </div>
 
       <!-- Sessions -->
-      <div x-show="sideTab === 'sessions'" class="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/40">
+      <div x-show="sideTab === 'sessions'" x-ref="sessionList" class="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/40">
         <template x-if="(project.sessions || []).length === 0">
           <p class="text-sm text-slate-300 text-center mt-12">还没有模型会话记录</p>
         </template>
@@ -805,10 +805,14 @@
                   <span class="px-1.5 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide" :class="sessionPhaseClass(session.phase)" x-text="session.phase"></span>
                   <span class="text-xs font-medium text-slate-700 truncate" x-text="session.worker"></span>
                 </div>
-                <span class="w-2 h-2 rounded-full shrink-0" :class="sessionStatusDotClass(session.status)"></span>
+                <div class="flex items-center gap-1.5 shrink-0">
+                  <span x-show="session.status === 'running'" class="text-[10px] font-medium text-sky-600">实时</span>
+                  <span class="w-2 h-2 rounded-full shrink-0" :class="sessionStatusDotClass(session.status)"></span>
+                </div>
               </div>
               <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400">
                 <span x-text="session.step ? `${session.id} · ${session.step}` : session.id"></span>
+                <span x-show="session.message_count" x-text="`${session.message_count} 条`"></span>
                 <span x-show="session.duration_ms != null" x-text="formatDurationMs(session.duration_ms)"></span>
                 <span x-show="session.timed_out" class="text-amber-500">超时</span>
                 <span x-show="session.returncode != null && session.returncode !== 0" class="text-rose-500" x-text="`exit ${session.returncode}`"></span>
@@ -816,22 +820,48 @@
               </div>
               <p x-show="session.error" class="text-[11px] text-rose-500 break-words" x-text="session.error"></p>
             </button>
-            <div x-show="isSessionOpen(session.id)" x-transition class="border-t border-slate-100 bg-slate-50/60 px-3 py-3 space-y-2">
-              <template x-if="sessionLoadingId === session.id">
-                <p class="text-[11px] text-slate-400 text-center py-2">加载中…</p>
-              </template>
-              <template x-if="sessionLoadingId !== session.id && sessionMessages(session.id).length === 0">
-                <p class="text-[11px] text-slate-400 text-center py-2">没有记录到消息</p>
-              </template>
-              <template x-for="message in sessionMessages(session.id)" :key="`${session.id}-${message.seq}`">
-                <div class="rounded-xl px-3 py-2 border" :class="sessionMessageClass(message.role)">
-                  <div class="flex items-center justify-between mb-1">
-                    <span class="text-[10px] font-semibold uppercase tracking-widest opacity-70" x-text="message.role"></span>
-                    <span class="text-[10px] opacity-40 tabular-nums" x-text="`#${message.seq}`"></span>
+            <div x-show="isSessionOpen(session.id)" x-transition class="border-t border-slate-100 bg-slate-50/60">
+              <div class="session-transcript px-3 py-3 space-y-2 overflow-y-auto" :style="`max-height: ${transcriptMaxHeight}px`">
+                <template x-if="sessionLoadingId === session.id && sessionMessages(session.id).length === 0">
+                  <p class="text-[11px] text-slate-400 text-center py-2">加载中…</p>
+                </template>
+                <template x-if="sessionLoadingId !== session.id && sessionMessages(session.id).length === 0">
+                  <p class="text-[11px] text-slate-400 text-center py-2">没有记录到消息</p>
+                </template>
+                <template x-for="message in sessionMessages(session.id)" :key="`${session.id}-${message.seq}`">
+                  <div>
+                  <!-- tool traffic collapses to one line so the conversation stays readable -->
+                  <div x-show="isToolMessage(message.role)">
+                    <button type="button" @click="toggleToolMessage(session.id, message.seq)"
+                            class="w-full text-left rounded-lg border px-2.5 py-1.5 hover:brightness-[0.98] transition"
+                            :class="sessionMessageClass(message.role)">
+                      <div class="flex items-center gap-2">
+                        <span class="text-[10px] font-semibold shrink-0" x-text="sessionRoleLabel(message.role)"></span>
+                        <span class="text-[10px] opacity-70 truncate font-mono" x-text="toolMessageSummary(message)"></span>
+                        <span class="ml-auto text-[10px] opacity-40 shrink-0" x-text="isToolMessageOpen(session.id, message.seq) ? '收起' : '展开'"></span>
+                      </div>
+                      <pre x-show="isToolMessageOpen(session.id, message.seq)" x-cloak
+                           class="mt-1.5 text-[11px] leading-relaxed whitespace-pre-wrap break-words max-h-72 overflow-y-auto opacity-90" x-text="message.content"></pre>
+                    </button>
                   </div>
-                  <p class="text-xs leading-relaxed whitespace-pre-wrap break-words" x-text="message.content"></p>
-                </div>
-              </template>
+                  <div x-show="!isToolMessage(message.role)">
+                    <div class="flex items-center gap-2 mb-0.5">
+                      <span class="text-[10px] font-semibold tracking-wide" :class="sessionRoleClass(message.role)" x-text="sessionRoleLabel(message.role)"></span>
+                      <span class="text-[10px] text-slate-300 tabular-nums ml-auto" x-text="`#${message.seq}`"></span>
+                    </div>
+                    <div class="rounded-2xl px-3 py-2 border" :class="sessionMessageClass(message.role)">
+                      <p class="text-xs leading-relaxed whitespace-pre-wrap break-words" x-text="message.content"></p>
+                    </div>
+                  </div>
+                  </div>
+                </template>
+                <template x-if="isSessionRunning(session.id)">
+                  <p class="text-[11px] text-sky-500 flex items-center gap-1.5 px-1">
+                    <span class="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse"></span>
+                    模型正在输出…
+                  </p>
+                </template>
+              </div>
             </div>
           </section>
         </template>
@@ -1185,6 +1215,9 @@ function cairnApp() {
     openSessionIds: [],
     sessionLoadingId: null,
     sessionMessageCache: {},
+    sessionStreams: {},
+    openToolMessages: {},
+    transcriptMaxHeight: 420,
     selectedNode: null,
     selectedFacts: [],
     selectedTimelineEntryId: null,
@@ -1213,7 +1246,7 @@ function cairnApp() {
     hintForm: { content: '' },
     reopenForm: { projectId: '', projectTitle: '', description: '' },
     renameForm: { projectId: '', originalTitle: '', title: '' },
-    localPrefs: { actor_name: '人类', layout_mode: 'dagre_tb' },
+    localPrefs: { actor_name: 'Human', layout_mode: 'dagre_tb' },
     settingsForm: { step_timeout: 5, decide_timeout: 5 },
     deleteConfirm: { id: '', title: '' },
     isDeletingProject: false,
@@ -1324,7 +1357,7 @@ function cairnApp() {
       try {
         const raw = localStorage.getItem('cairn.localPrefs');
         if (!raw) {
-          this.localPrefs.actor_name = '人类';
+          this.localPrefs.actor_name = 'Human';
         } else {
           const parsed = JSON.parse(raw);
           if (typeof parsed.actor_name === 'string') this.localPrefs.actor_name = parsed.actor_name;
@@ -1342,7 +1375,7 @@ function cairnApp() {
       } catch (e) {
         console.error(e);
       }
-      if (!this.localPrefs.actor_name.trim()) this.localPrefs.actor_name = '人类';
+      if (!this.localPrefs.actor_name.trim()) this.localPrefs.actor_name = 'Human';
       if (!this.isValidLayoutMode(this.localPrefs.layout_mode)) this.localPrefs.layout_mode = 'dagre_tb';
       this.layoutMode = this.localPrefs.layout_mode;
     },
@@ -1364,7 +1397,7 @@ function cairnApp() {
     },
 
     actorName() {
-      return this.localPrefs.actor_name.trim() || '人类';
+      return this.localPrefs.actor_name.trim() || 'Human';
     },
 
     projectStatusBadgeClass(status) {
@@ -1692,8 +1725,13 @@ function cairnApp() {
     async loadProject(id) {
       try {
         const project = await this.api('GET', `/projects/${id}`);
-        if (this.project && this.project.project.id !== project.project.id) this.resetSessionState();
+        const switching = this.project && this.project.project.id !== project.project.id;
+        // A poll refresh must not clobber the live transcript written by the streams,
+        // so re-open the streams after swapping in the polled snapshot.
+        if (switching) this.resetSessionState();
+        else this.stopAllSessionStreams();
         this.project = project;
+        if (!switching) this.openSessionIds.forEach(sessionId => this.startSessionStream(sessionId));
       } catch(e) { this.showToast(e.message, 'error'); }
     },
 
@@ -1707,29 +1745,130 @@ function cairnApp() {
       return this.sessionMessageCache[sessionId] || [];
     },
 
-    async toggleSession(sessionId) {
+    toggleSession(sessionId) {
       if (this.isSessionOpen(sessionId)) {
         this.openSessionIds = this.openSessionIds.filter(id => id !== sessionId);
+        this.stopSessionStream(sessionId);
         return;
       }
       this.openSessionIds = [...this.openSessionIds, sessionId];
-      if (!this.sessionMessageCache[sessionId] && this.selectedProjectId) {
-        this.sessionLoadingId = sessionId;
-        try {
-          const detail = await this.api('GET', `/projects/${this.selectedProjectId}/sessions/${sessionId}`);
-          this.sessionMessageCache = { ...this.sessionMessageCache, [sessionId]: detail.messages || [] };
-        } catch (e) {
-          this.showToast(e.message, 'error');
-        } finally {
-          if (this.sessionLoadingId === sessionId) this.sessionLoadingId = null;
-        }
-      }
+      this.startSessionStream(sessionId);
+    },
+
+    startSessionStream(sessionId) {
+      if (!this.selectedProjectId || this.sessionStreams[sessionId]) return;
+      const url = `/projects/${this.selectedProjectId}/sessions/${sessionId}/stream`;
+      const source = new EventSource(url);
+      this.sessionStreams = { ...this.sessionStreams, [sessionId]: source };
+      this.sessionLoadingId = sessionId;
+
+      const applySnapshot = payload => {
+        if (this.selectedProjectId !== this.project?.project?.id && this.project) return;
+        this.sessionLoadingId = this.sessionLoadingId === sessionId ? null : this.sessionLoadingId;
+        this.sessionMessageCache = { ...this.sessionMessageCache, [sessionId]: payload.messages || [] };
+        this.applySessionMeta(payload.session);
+        this.scrollSessionIfPinned();
+      };
+
+      source.addEventListener('snapshot', event => applySnapshot(JSON.parse(event.data)));
+      source.addEventListener('messages', event => {
+        const payload = JSON.parse(event.data);
+        const known = this.sessionMessageCache[sessionId] || [];
+        const next = known.concat(payload.messages || []);
+        this.sessionMessageCache = { ...this.sessionMessageCache, [sessionId]: next };
+        this.sessionLoadingId = this.sessionLoadingId === sessionId ? null : this.sessionLoadingId;
+        this.applySessionMeta(payload.session);
+        this.scrollSessionIfPinned();
+      });
+      source.addEventListener('end', event => {
+        const payload = JSON.parse(event.data);
+        this.applySessionMeta(payload.session);
+        this.stopSessionStream(sessionId);
+      });
+      source.addEventListener('gone', () => this.stopSessionStream(sessionId));
+      source.onerror = () => {
+        // A finished session closes the stream on purpose; only surface real drops.
+        if (source.readyState === EventSource.CLOSED) this.stopSessionStream(sessionId);
+      };
+    },
+
+    stopSessionStream(sessionId) {
+      const source = this.sessionStreams[sessionId];
+      if (!source) return;
+      source.close();
+      const next = { ...this.sessionStreams };
+      delete next[sessionId];
+      this.sessionStreams = next;
+    },
+
+    stopAllSessionStreams() {
+      Object.keys(this.sessionStreams).forEach(id => this.stopSessionStream(id));
+    },
+
+    applySessionMeta(session) {
+      if (!session) return;
+      const sessions = (this.project && this.project.sessions) || [];
+      const index = sessions.findIndex(item => item.id === session.id);
+      if (index === -1) return;
+      sessions.splice(index, 1, { ...sessions[index], ...session });
+    },
+
+    scrollSessionIfPinned() {
+      if (this.sideTab !== 'sessions') return;
+      this.$nextTick(() => {
+        (this.$el || document).querySelectorAll('.session-transcript').forEach(el => {
+          const pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+          if (pinned) el.scrollTop = el.scrollHeight;
+        });
+        const list = this.$refs.sessionList;
+        if (!list) return;
+        const pinned = list.scrollHeight - list.scrollTop - list.clientHeight < 120;
+        if (pinned) list.scrollTop = list.scrollHeight;
+      });
+    },
+
+    isSessionRunning(sessionId) {
+      const meta = ((this.project && this.project.sessions) || []).find(item => item.id === sessionId);
+      return !!meta && meta.status === 'running';
+    },
+
+    isToolMessage(role) {
+      return role === 'tool_call' || role === 'tool_result' || role === 'tool';
+    },
+
+    isToolMessageOpen(sessionId, seq) {
+      return !!this.openToolMessages[`${sessionId}:${seq}`];
+    },
+
+    toggleToolMessage(sessionId, seq) {
+      const key = `${sessionId}:${seq}`;
+      this.openToolMessages = { ...this.openToolMessages, [key]: !this.openToolMessages[key] };
+    },
+
+    toolMessageSummary(message) {
+      const firstLine = String(message.content || '').split('\n').find(line => line.trim()) || '';
+      return firstLine.length > 80 ? `${firstLine.slice(0, 80)}…` : firstLine;
+    },
+
+    isSessionListAtBottom() {
+      const el = this.$refs.sessionList;
+      if (!el) return false;
+      return el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    },
+
+    stickSessionListToBottom() {
+      this.$nextTick(() => {
+        const el = this.$refs.sessionList;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
     },
 
     resetSessionState() {
+      this.stopAllSessionStreams();
       this.openSessionIds = [];
       this.sessionLoadingId = null;
       this.sessionMessageCache = {};
+      this.openToolMessages = {};
     },
 
     sessionPhaseClass(phase) {
@@ -1739,6 +1878,7 @@ function cairnApp() {
     },
 
     sessionStatusDotClass(status) {
+      if (status === 'running') return 'bg-sky-400 animate-pulse';
       if (status === 'success') return 'bg-emerald-400';
       if (status === 'rejected') return 'bg-amber-400';
       if (status === 'cancelled') return 'bg-slate-300';
@@ -1748,8 +1888,32 @@ function cairnApp() {
     sessionMessageClass(role) {
       if (role === 'user') return 'bg-brand-50/70 border-brand-100 text-slate-700';
       if (role === 'assistant') return 'bg-white border-slate-200 text-slate-700';
+      if (role === 'thinking') return 'bg-transparent border-dashed border-slate-200 text-slate-500 italic';
+      if (role === 'tool_call') return 'bg-amber-50/70 border-amber-100 text-amber-800 font-mono';
+      if (role === 'tool_result') return 'bg-slate-50 border-slate-200 text-slate-600 font-mono';
       if (role === 'system') return 'bg-slate-100 border-slate-200 text-slate-500';
       return 'bg-slate-50 border-slate-100 text-slate-500 font-mono';
+    },
+
+    sessionRoleClass(role) {
+      if (role === 'user') return 'text-brand-500';
+      if (role === 'assistant') return 'text-slate-500';
+      if (role === 'thinking') return 'text-violet-400';
+      if (role === 'system') return 'text-slate-400';
+      return 'text-slate-400';
+    },
+
+    sessionRoleLabel(role) {
+      const labels = {
+        system: '系统',
+        user: '用户',
+        assistant: '助手',
+        thinking: '思考',
+        tool_call: '调用',
+        tool_result: '结果',
+        tool: '输出',
+      };
+      return labels[role] || role;
     },
 
     async toggleProjectStop() {

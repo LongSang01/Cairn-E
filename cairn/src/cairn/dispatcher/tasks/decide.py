@@ -12,7 +12,7 @@ from cairn.dispatcher.prompting import (
     render_prompt,
 )
 from cairn.dispatcher.protocol.client import CairnClient
-from cairn.dispatcher.session import record_session
+from cairn.dispatcher.session import SessionStream, start_session
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
@@ -47,6 +47,7 @@ def run_decide_task(
     healthcheck_timeout = config.runtime.healthcheck_timeout
     lease = HeartbeatLease.for_decide(client, project_id, worker.name, config.runtime.interval)
     lease.start()
+    stream: SessionStream | None = None
     try:
         container_name = container_manager.ensure_running(project_id)
 
@@ -90,6 +91,15 @@ def run_decide_task(
 
         session = driver.prepare_session()
         command = driver.build_execute(worker, prompt, session)
+        stream = start_session(
+            client,
+            project_id,
+            worker=worker.name,
+            worker_type=worker.type,
+            phase="decide",
+            prompt=prompt,
+            native_session=session,
+        )
         execute_started = time.perf_counter()
         result = run_worker_process(
             container_manager,
@@ -100,24 +110,19 @@ def run_decide_task(
             timeout_seconds=config.tasks.decide.timeout,
             lease=lease,
             cancellation=cancellation,
+            on_stdout=stream.feed,
         )
         execute_ms = int((time.perf_counter() - execute_started) * 1000)
         total_ms = int((time.perf_counter() - task_started) * 1000)
         session = driver.extract_session(session, result.stdout, result.stderr)
 
         def record(status: str, error: str | None = None) -> None:
-            record_session(
-                client,
-                project_id,
-                worker=worker.name,
-                worker_type=worker.type,
-                phase="decide",
+            stream.finish(
                 status=status,
                 result=result,
-                native_session=session,
-                prompt=prompt,
-                duration_ms=execute_ms,
                 error=error,
+                duration_ms=execute_ms,
+                native_session=session,
             )
 
         cancelled = cancel_reason(result, cancellation)
@@ -258,6 +263,8 @@ def run_decide_task(
         return "success"
     except Exception:
         LOG.exception("decide task crashed project=%s worker=%s", project_id, worker.name)
+        if stream is not None:
+            stream.finish(status="failed", error="task crashed")
         return "failed"
     finally:
         lease.stop()

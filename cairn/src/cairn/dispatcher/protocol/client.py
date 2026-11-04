@@ -199,6 +199,26 @@ class CairnClient:
     def create_session(self, project_id: str, payload: dict[str, Any]) -> ApiResult:
         return self._request_json("POST", f"/projects/{project_id}/sessions", json=payload)
 
+    def append_session_messages(
+        self, project_id: str, session_id: str, messages: list[dict[str, Any]]
+    ) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/sessions/{session_id}/messages",
+            json={"messages": messages},
+        )
+
+    def finish_session(self, project_id: str, session_id: str, payload: dict[str, Any]) -> ApiResult:
+        return self._request_json(
+            "PATCH", f"/projects/{project_id}/sessions/{session_id}", json=payload
+        )
+
+    def session_heartbeat(self, project_id: str, session_id: str) -> ApiResult:
+        """Tell the server this session is still running even if stdout is quiet."""
+        return self._request_json(
+            "POST", f"/projects/{project_id}/sessions/{session_id}/heartbeat"
+        )
+
     def _request_json(self, method: str, path: str, json: dict[str, Any]) -> ApiResult:
         try:
             response = self._session().request(

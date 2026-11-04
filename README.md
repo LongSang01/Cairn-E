@@ -78,7 +78,7 @@ Two activities, both the same runner injected with different prompts and tools â
 
 Neither activity keeps a cross-session memory. The FGS graph is their shared, externalized memory; every run starts from a clean context.
 
-Each run's conversation with the model is still recorded for review: the dispatcher uploads it as a **Session** (prompt, model replies, tool output, status, duration), with credential-looking strings redacted. Sessions live in the side panel's **Sessions** tab and never feed back into the graph.
+Each run's conversation with the model is still recorded for review: the dispatcher uploads it as a **Session** â€” the full transcript (prompt, reasoning, every tool call and its output, final replies, status, duration), with credential-looking strings redacted. Sessions live in the side panel's **Sessions** tab, stream in while the worker is still running, and never feed back into the graph.
 
 System architecture:
 

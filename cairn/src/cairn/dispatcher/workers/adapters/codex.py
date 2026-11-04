@@ -3,6 +3,7 @@ from __future__ import annotations
 from cairn.dispatcher.config import WorkerConfig
 from cairn.dispatcher.workers.base import DriverResult, RegexSessionDriver
 from cairn.dispatcher.workers.health import HealthResult, http_ping, proxies_from_env
+from cairn.dispatcher.workers.stream import iter_json_events, text_from_content
 
 
 class CodexDriver(RegexSessionDriver):
@@ -40,6 +41,7 @@ class CodexDriver(RegexSessionDriver):
                 argv=[
                     "codex",
                     "exec",
+                    "--json",
                     "--dangerously-bypass-approvals-and-sandbox",
                     "--",
                     prompt,
@@ -50,6 +52,7 @@ class CodexDriver(RegexSessionDriver):
             argv=[
                 "codex",
                 "exec",
+                "--json",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--model",
                 env["CODEX_MODEL"],
@@ -77,6 +80,7 @@ class CodexDriver(RegexSessionDriver):
                 "exec",
                 "resume",
                 session,
+                "--json",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--",
                 prompt,
@@ -87,6 +91,7 @@ class CodexDriver(RegexSessionDriver):
             "exec",
             "resume",
             session,
+            "--json",
             "--dangerously-bypass-approvals-and-sandbox",
             "--model",
             env["CODEX_MODEL"],
@@ -105,3 +110,30 @@ class CodexDriver(RegexSessionDriver):
             "--",
             prompt,
         ]
+
+    def extract_session(self, session: str | None, stdout: str, stderr: str) -> str | None:
+        if session:
+            return session
+        for event in iter_json_events(stdout):
+            if event.get("type") != "thread.started":
+                continue
+            thread_id = event.get("thread_id")
+            if isinstance(thread_id, str) and thread_id:
+                return thread_id
+        return super().extract_session(session, stdout, stderr)
+
+    def extract_response_text(self, stdout: str, stderr: str) -> str:
+        """Join the agent messages from `codex exec --json` into the final answer."""
+        messages: list[str] = []
+        for event in iter_json_events(stdout):
+            if event.get("type") != "item.completed":
+                continue
+            item = event.get("item")
+            if not isinstance(item, dict) or item.get("type") != "agent_message":
+                continue
+            text = text_from_content(item.get("text") or item.get("content")).strip()
+            if text:
+                messages.append(text)
+        if messages:
+            return "\n".join(messages)
+        return stdout

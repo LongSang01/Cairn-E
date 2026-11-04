@@ -135,6 +135,9 @@ class FakeClient:
     released: list[tuple[str, str, str]] = field(default_factory=list)
     released_decide: list[tuple[str, str]] = field(default_factory=list)
     created_sessions: list[tuple[str, dict]] = field(default_factory=list)
+    appended_sessions: list[tuple[str, str, list[dict]]] = field(default_factory=list)
+    finished_sessions: list[tuple[str, str, dict]] = field(default_factory=list)
+    session_heartbeats: list[tuple[str, str]] = field(default_factory=list)
     conclude_status: int = 200
     conclude_fact_ids: list[str] = field(default_factory=lambda: ["f002"])
 
@@ -219,7 +222,21 @@ class FakeClient:
 
     def create_session(self, project_id: str, payload: dict) -> ApiResult:
         self.created_sessions.append((project_id, payload))
-        return ApiResult(201, {})
+        return ApiResult(201, {"id": f"x{len(self.created_sessions):03d}"})
+
+    def append_session_messages(
+        self, project_id: str, session_id: str, messages: list[dict]
+    ) -> ApiResult:
+        self.appended_sessions.append((project_id, session_id, messages))
+        return ApiResult(200, {})
+
+    def finish_session(self, project_id: str, session_id: str, payload: dict) -> ApiResult:
+        self.finished_sessions.append((project_id, session_id, payload))
+        return ApiResult(200, {})
+
+    def session_heartbeat(self, project_id: str, session_id: str) -> ApiResult:
+        self.session_heartbeats.append((project_id, session_id))
+        return ApiResult(200, {})
 
     def decide_heartbeat(self, _project_id: str, _worker: str) -> ApiResult:
         return ApiResult(200, {})

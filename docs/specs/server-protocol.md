@@ -387,11 +387,14 @@ Session 记录一次 worker 运行中模型看到的输入和它的输出，用�
 - `id` 在项目内自增（`x001`、`x002`…）。
 - `phase` ∈ `decide` | `execute` | `execute_conclude`，表示这次运行属于哪个阶段。
 - `step` 仅 Execute 阶段有值。
-- `status` ∈ `success` | `failed` | `cancelled` | `rejected`。
+- `status` ∈ `running` | `success` | `failed` | `cancelled` | `rejected`；`running` 表示 worker 还在跑，消息仍在追加。
+- `message_count` 是该会话已有的消息数，列表接口也会带上，便于显示"增长中"的进度。
+
+写入分四步：跑之前创建（`status: running` + prompt 消息）、跑的过程中追加消息、长时间没有输出时发心跳、结束后用 PATCH 收尾。`running` 会话若 60 秒内没有任何追加或心跳，会被读接口判定为失败（`error` 为 `dispatcher stopped before the run finished`）—— dispatcher 被杀掉时不会留下永远 `running` 的会话。
 
 #### POST /projects/{project_id}/sessions
 
-由 dispatcher 调用，写入一次运行的完整对话：
+由 dispatcher 在 worker 启动前调用，建立会话并写入 prompt：
 
 ```json
 {
@@ -400,22 +403,61 @@ Session 记录一次 worker 运行中模型看到的输入和它的输出，用�
   "phase": "decide",
   "step": null,
   "native_session": "可选，worker CLI 自己的 session id",
+  "status": "running",
+  "messages": [
+    {"role": "user", "content": "发给模型的 prompt"}
+  ]
+}
+```
+
+也接受一次性的完整写入（`status` 为终态并带上全部 `messages`），供创建失败时的兜底使用。返回 201 与该 Session 详情（`messages` 带 `seq`）。
+
+#### POST /projects/{project_id}/sessions/{session_id}/messages
+
+运行过程中追加消息，dispatcher 约每秒推送一次新条目：
+
+```json
+{
+  "messages": [
+    {"role": "assistant", "content": "先看看目录"},
+    {"role": "tool_call", "content": "Bash\nls -la"},
+    {"role": "tool_result", "content": "[exit 0]\na.txt"}
+  ]
+}
+```
+
+`seq` 由服务端接着已有的最大值继续分配（应答里带回完整会话）。因此会话页可以在运行中持续刷新，看到思考、调用、结果的完整过程。
+
+#### POST /projects/{project_id}/sessions/{session_id}/heartbeat
+
+worker 长时间没有输出（例如跑一个很慢的命令）时，dispatcher 每 5 秒调用一次，刷新 `updated_at`，避免会话被判定为卡死。无请求体，返回当前 Session。
+
+#### PATCH /projects/{project_id}/sessions/{session_id}
+
+运行结束后收尾，写入真实结果：
+
+```json
+{
   "status": "success",
   "returncode": 0,
   "timed_out": false,
   "duration_ms": 8421,
   "error": null,
-  "messages": [
-    {"role": "user", "content": "发给模型的 prompt"},
-    {"role": "assistant", "content": "模型输出"},
-    {"role": "tool", "content": "工具输出或原始日志", "raw": null}
-  ]
+  "native_session": "可选，回填 CLI 自己的 session id"
 }
 ```
 
-`role` ∈ `system` | `user` | `assistant` | `tool`；`seq` 由服务端按数组顺序生成。写入前 dispatcher 会遮蔽 `sk-*`、`Bearer *`、`*_API_KEY=*` 一类的凭据。
+`role` ∈ `system` | `user` | `assistant` | `thinking` | `tool_call` | `tool_result` | `tool`。写入前 dispatcher 会遮蔽 `sk-*`、`Bearer *`、`*_API_KEY=*` 一类的凭据。
 
-返回 201 与该 Session 详情（`messages` 带 `seq`）。Session 内容属于旁路信息，不属于 FGS 图，因此导出 YAML / timeline 不包含它。
+记录的是完整过程，而不是只留最终回答：dispatcher 让每个 worker CLI 以流式 JSON 输出（claudecode `--output-format stream-json --verbose`、codex `exec --json`、pi `--mode json`），再把事件流展开成逐条消息：
+
+- `assistant` / `user`：消息里的 text 块，一段一块。
+- `thinking`：`thinking` / `reasoning` 块，或 codex 的 reasoning item。
+- `tool_call`：一次工具调用，第一行是工具名，第二行是命令/路径/pattern 等关键参数。
+- `tool_result`：工具回填的内容，带 `[exit N]` 前缀；单条上限 8000 字符，其余消息单条上限 20000 字符，单会话最多 1000 条。
+- `tool`：整条输出里没有任何可识别事件时的兜底，保留原始 stdout/stderr。
+
+重复事件（pi 的 `turn_end` / `agent_end` 会重放消息、claude 的 `result` 会重复最后一条回答、CLI 回显 prompt）会按内容去重。
 
 #### GET /projects/{project_id}/sessions
 
@@ -423,9 +465,9 @@ Session 记录一次 worker 运行中模型看到的输入和它的输出，用�
 
 #### GET /projects/{project_id}/sessions/{session_id}
 
-返回单个 Session 及其 `messages`。
+返回单个 Session 及其 `messages`。前端在存在 `running` 会话时每 1.5 秒轮询这个接口。
 
-Session 随项目一起删除；`GET /projects/{project_id}` 的响应也会带上 `sessions` 列表。
+Session 内容属于旁路信息，不属于 FGS 图，因此导出 YAML / timeline 不包含它。Session 随项目一起删除；`GET /projects/{project_id}` 的响应也会带上 `sessions` 列表。
 
 ### 导出
 

@@ -367,9 +367,16 @@ def test_decide_records_model_session(monkeypatch) -> None:
     project_id, payload = client.created_sessions[0]
     assert project_id == "proj_001"
     assert payload["phase"] == "decide"
-    assert payload["status"] == "success"
+    # The session is visible while the worker runs, then finalized with the outcome.
+    assert payload["status"] == "running"
     assert payload["worker"] == "test-worker"
     assert payload["messages"][0] == {"role": "user", "content": driver.execute_prompts[0]}
+
+    assert len(client.finished_sessions) == 1
+    _project_id, session_id, finished = client.finished_sessions[0]
+    assert session_id == "x001"
+    assert finished["status"] == "success"
+    assert finished["returncode"] == 0
 
 
 def test_execute_records_session_for_execute_and_conclude(monkeypatch) -> None:
@@ -394,6 +401,41 @@ def test_execute_records_session_for_execute_and_conclude(monkeypatch) -> None:
 
     phases = [payload["phase"] for _pid, payload in client.created_sessions]
     assert phases == ["execute", "execute_conclude"]
-    assert all(payload["status"] == "failed" for _pid, payload in client.created_sessions if payload["phase"] == "execute")
-    assert client.created_sessions[1][1]["status"] == "success"
+    assert all(payload["status"] == "running" for _pid, payload in client.created_sessions)
     assert all(payload["step"] == "s001" for _pid, payload in client.created_sessions)
+
+    assert [payload["status"] for _pid, _sid, payload in client.finished_sessions] == ["failed", "success"]
+
+
+def test_execute_streams_transcript_while_the_worker_runs(monkeypatch) -> None:
+    """stdout chunks reach the live session before the process finishes."""
+    config = make_config()
+    step = make_step(status="running", worker="test-worker")
+    project = make_project(steps=[step])
+    client = FakeClient(project)
+
+    def fake_run(_manager, _name, _worker, _argv, *, on_stdout=None, **_kwargs):
+        assert on_stdout is not None
+        for line in (
+            '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}',
+            '{"type":"item.completed","item":{"type":"command_execution","command":"ls"}}',
+        ):
+            on_stdout(line + "\n")
+        return ProcessResult(0, '{"accepted":true,"data":{"facts":[{"description":"f"}]}}', "")
+
+    monkeypatch.setattr(execute, "get_driver", lambda *_a, **_k: FakeDriver())
+    monkeypatch.setattr(execute.HeartbeatLease, "for_step", _lease_factory(FakeLease()))
+    monkeypatch.setattr(execute, "_run_process", fake_run)
+
+    execute.run_execute_task(
+        config, client, FakeContainerManager(), project, "graph", step, config.workers[0], TaskCancellation()
+    )
+
+    created_project, created = client.created_sessions[0]
+    assert created_project == "proj_001"
+    assert created["status"] == "running"
+    appended = [messages for _pid, _sid, messages in client.appended_sessions]
+    roles = [message["role"] for batch in appended for message in batch]
+    assert "assistant" in roles
+    assert "tool_call" in roles
+    assert client.finished_sessions[0][2]["status"] == "success"
