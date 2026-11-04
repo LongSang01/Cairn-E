@@ -5,7 +5,8 @@ import logging
 import re
 import threading
 import time
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.process import ProcessResult
@@ -596,7 +597,10 @@ class SessionStream:
                 response.status_code,
                 len(batch),
             )
-            self._requeue(batch)
+            if response.status_code != 409:
+                self._requeue(batch)
+            # 409 = the server closed this session (finished or expired); retrying
+            # can never land, so drop the batch instead of requeueing it forever.
             return 0
         self._last_contact = time.monotonic()
         return len(batch)

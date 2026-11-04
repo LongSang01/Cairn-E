@@ -177,6 +177,7 @@ class DispatcherLoop:
         try:
             result = subprocess.run(
                 [binary, "--help"],
+                check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=15,

@@ -290,7 +290,6 @@ def test_execute_timeout_without_session_releases_claim(monkeypatch) -> None:
     step = make_step(status="running", worker="test-worker")
     project = make_project(steps=[step])
     client = FakeClient(project)
-    driver = FakeDriver()
 
     class NoSessionDriver(FakeDriver):
         def prepare_session(self) -> str | None:

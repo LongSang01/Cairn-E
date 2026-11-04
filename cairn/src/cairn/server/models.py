@@ -120,7 +120,10 @@ class CreateSessionRequest(BaseModel):
     phase: str
     step: str | None = None
     native_session: str | None = None
-    status: SessionStatus = "failed"
+    # Required on purpose: a live run creates the session with `running`, the
+    # end-of-run fallback with the real outcome. Defaulting here would silently
+    # record a wrong status when a caller forgets to choose one.
+    status: SessionStatus
     returncode: int | None = None
     timed_out: bool = False
     duration_ms: int | None = None

@@ -11,6 +11,7 @@ from cairn.dispatcher.runtime.process import ProcessResult
 from cairn.dispatcher.session import SessionStream, build_messages, redact
 from cairn.server import db
 from cairn.server.app import app
+from cairn.server.routers import sessions as sessions_router
 
 
 @pytest.fixture
@@ -565,3 +566,96 @@ def test_stream_unknown_session_returns_404(client: TestClient) -> None:
     project_id = _create_project(client)
     response = client.get(f"/projects/{project_id}/sessions/x999/stream")
     assert response.status_code == 404
+
+
+# ------------------------------------------------------------------ regressions
+
+
+def test_create_session_requires_explicit_status(client: TestClient) -> None:
+    project_id = _create_project(client)
+    payload = _session_payload()
+    del payload["status"]
+    assert client.post(f"/projects/{project_id}/sessions", json=payload).status_code == 422
+
+
+def test_finished_session_rejects_appends_and_heartbeats_do_not_touch(client: TestClient) -> None:
+    project_id = _create_project(client)
+    created = client.post(f"/projects/{project_id}/sessions", json=_session_payload()).json()
+    session_id = created["id"]
+    with db.get_conn() as conn:
+        conn.execute(
+            "UPDATE sessions SET updated_at = '2000-01-01T00:00:00Z' WHERE id = ?",
+            (session_id,),
+        )
+
+    appended = client.post(
+        f"/projects/{project_id}/sessions/{session_id}/messages",
+        json={"messages": [{"role": "assistant", "content": "late"}]},
+    )
+    assert appended.status_code == 409
+
+    beat = client.post(f"/projects/{project_id}/sessions/{session_id}/heartbeat")
+    assert beat.status_code == 200
+    assert beat.json()["status"] == "success"
+
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT updated_at FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+    assert row["updated_at"] == "2000-01-01T00:00:00Z"
+
+
+def test_stream_empty_running_session_sends_one_snapshot(
+    client: TestClient, monkeypatch
+) -> None:
+    monkeypatch.setattr(sessions_router, "STREAM_POLL_SECONDS", 0.01)
+    project_id = _create_project(client)
+    session = client.post(
+        f"/projects/{project_id}/sessions",
+        json=_session_payload(
+            status="running", returncode=None, duration_ms=None, messages=[]
+        ),
+    ).json()
+
+    snapshots = 0
+    ticks = 0
+    with client.stream(
+        "GET", f"/projects/{project_id}/sessions/{session['id']}/stream"
+    ) as response:
+        for line in response.iter_lines():
+            if line == "event: snapshot":
+                snapshots += 1
+            elif line == ": keep-alive":
+                ticks += 1
+                if ticks >= 5:
+                    break
+    assert snapshots == 1
+
+
+def test_session_stream_drops_messages_when_server_closed_the_session() -> None:
+    class Closed(_SessionClient):
+        def append_session_messages(
+            self, pid: str, sid: str, messages: list[dict]
+        ) -> ApiResult:
+            self.appended.append(messages)
+            return ApiResult(409, text="Session is not running")
+
+    client = Closed()
+    stream = SessionStream(
+        client,
+        "proj_001",
+        worker="pi-main",
+        worker_type="pi",
+        phase="execute",
+        prompt="solve it",
+        flush_interval=0.02,
+    )
+    stream.start()
+    stream.feed('{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}\n')
+
+    assert _wait_for(lambda: bool(client.appended))
+    time.sleep(0.2)  # several flush intervals: a retry loop would show up here
+    assert len(client.appended) == 1
+
+    stream.finish(status="failed")
+    assert len(client.finished) == 1

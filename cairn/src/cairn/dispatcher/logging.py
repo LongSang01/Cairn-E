@@ -12,7 +12,7 @@ class DispatcherLogFormatter(logging.Formatter):
             shortname = name[len(self._PREFIX):]
         else:
             shortname = name
-        setattr(record, "shortname", shortname)
+        record.shortname = shortname
         return super().format(record)
 
 

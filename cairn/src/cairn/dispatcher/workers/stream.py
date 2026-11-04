@@ -9,7 +9,8 @@ same parsing rules.
 from __future__ import annotations
 
 import json
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 
 def iter_json_events(text: str) -> Iterator[dict[str, Any]]:

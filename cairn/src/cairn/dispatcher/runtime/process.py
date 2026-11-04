@@ -5,7 +5,8 @@ from dataclasses import dataclass
 import logging
 import threading
 import time
-from typing import Any, Callable, Protocol, runtime_checkable
+from collections.abc import Callable
+from typing import Any, Protocol, runtime_checkable
 
 from docker.errors import APIError, DockerException
 from docker.models.containers import Container

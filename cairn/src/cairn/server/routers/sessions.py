@@ -67,6 +67,7 @@ def stream_session(project_id: str, session_id: str):
 
     def generate():
         sent = 0
+        snapshot_sent = False
         last_change = time.monotonic()
         while True:
             with get_conn() as conn:
@@ -79,12 +80,15 @@ def stream_session(project_id: str, session_id: str):
                 messages = build_session_messages(conn, project_id, session_id)
 
             session = session_to_model(row).model_dump()
-            if sent == 0:
+            if not snapshot_sent:
+                # One snapshot per connection, even while the transcript is still
+                # empty; later polls only carry deltas.
                 last_change = time.monotonic()
                 yield event(
                     "snapshot",
                     {"session": session, "messages": [m.model_dump() for m in messages]},
                 )
+                snapshot_sent = True
             else:
                 fresh = [m.model_dump() for m in messages[sent:]]
                 if fresh:
@@ -164,10 +168,16 @@ def create_session(project_id: str, body: CreateSessionRequest):
 
 @router.post("/projects/{project_id}/sessions/{session_id}/messages", response_model=SessionDetail)
 def append_session_messages(project_id: str, session_id: str, body: AppendSessionMessagesRequest):
-    """Append transcript entries to a session that is still running."""
+    """Append transcript entries to a session that is still running.
+
+    A session that already reached a final status is closed: appending would
+    extend a transcript the run summary was already computed from.
+    """
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
-        get_session_or_404(conn, project_id, session_id)
+        row = get_session_or_404(conn, project_id, session_id)
+        if row["status"] != "running":
+            raise HTTPException(409, "Session is not running")
         start = next_session_message_seq(conn, project_id, session_id)
         _insert_messages(conn, project_id, session_id, body.messages, start=start)
         _touch(conn, project_id, session_id)
@@ -180,12 +190,18 @@ def append_session_messages(project_id: str, session_id: str, body: AppendSessio
 
 @router.post("/projects/{project_id}/sessions/{session_id}/heartbeat", response_model=Session)
 def heartbeat_session(project_id: str, session_id: str):
-    """Keep a running session alive while the worker is busy and produces no output."""
+    """Keep a running session alive while the worker is busy and produces no output.
+
+    Beating a finished session is a no-op: its `updated_at` must stay at the real
+    end time so the list order and staleness checks keep meaning something.
+    """
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
-        get_session_or_404(conn, project_id, session_id)
-        _touch(conn, project_id, session_id)
-        return session_to_model(get_session_or_404(conn, project_id, session_id))
+        row = get_session_or_404(conn, project_id, session_id)
+        if row["status"] == "running":
+            _touch(conn, project_id, session_id)
+            row = get_session_or_404(conn, project_id, session_id)
+        return session_to_model(row)
 
 
 @router.patch("/projects/{project_id}/sessions/{session_id}", response_model=Session)

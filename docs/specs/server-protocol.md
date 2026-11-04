@@ -410,7 +410,7 @@ Session 记录一次 worker 运行中模型看到的输入和它的输出，用�
 }
 ```
 
-也接受一次性的完整写入（`status` 为终态并带上全部 `messages`），供创建失败时的兜底使用。返回 201 与该 Session 详情（`messages` 带 `seq`）。
+也接受一次性的完整写入（`status` 为终态并带上全部 `messages`），供创建失败时的兜底使用。`status` 必填——漏传会被拒（`422`），避免默默记成错误的状态。返回 201 与该 Session 详情（`messages` 带 `seq`）。
 
 #### POST /projects/{project_id}/sessions/{session_id}/messages
 
@@ -426,11 +426,11 @@ Session 记录一次 worker 运行中模型看到的输入和它的输出，用�
 }
 ```
 
-`seq` 由服务端接着已有的最大值继续分配（应答里带回完整会话）。因此会话页可以在运行中持续刷新，看到思考、调用、结果的完整过程。
+`seq` 由服务端接着已有的最大值继续分配（应答里带回完整会话）。因此会话页可以在运行中持续刷新，看到思考、调用、结果的完整过程。只有 `running` 状态的会话接受追加；已收尾的会话返回 `409`，dispatcher 收到 `409` 会丢弃该批消息（重试不可能成功）。
 
 #### POST /projects/{project_id}/sessions/{session_id}/heartbeat
 
-worker 长时间没有输出（例如跑一个很慢的命令）时，dispatcher 每 5 秒调用一次，刷新 `updated_at`，避免会话被判定为卡死。无请求体，返回当前 Session。
+worker 长时间没有输出（例如跑一个很慢的命令）时，dispatcher 每 5 秒调用一次，刷新 `updated_at`，避免会话被判定为卡死。无请求体，返回当前 Session。对已收尾的会话是空操作：不会刷新 `updated_at`，`updated_at` 始终保持真实的结束时间。
 
 #### PATCH /projects/{project_id}/sessions/{session_id}
 
@@ -465,9 +465,21 @@ worker 长时间没有输出（例如跑一个很慢的命令）时，dispatcher
 
 #### GET /projects/{project_id}/sessions/{session_id}
 
-返回单个 Session 及其 `messages`。前端在存在 `running` 会话时每 1.5 秒轮询这个接口。
+返回单个 Session 及其 `messages`。前端会话页通过下面的 `/stream` 接口实时刷新；只在 SSE 不可用时才退化为轮询这个接口。
 
 Session 内容属于旁路信息，不属于 FGS 图，因此导出 YAML / timeline 不包含它。Session 随项目一起删除；`GET /projects/{project_id}` 的响应也会带上 `sessions` 列表。
+
+#### GET /projects/{project_id}/sessions/{session_id}/stream
+
+SSE（`text/event-stream`）对话流，会话页用它实时看到消息增长，连接期间不用轮询：
+
+- `snapshot`：连接后的第一个事件，带完整 `session` 与全部 `messages`，中途连上也能直接渲染；同一条连接只发一次。
+- `messages`：只带连接建立之后新增的 `messages`（同时带最新 `session` 元数据）。
+- `end`：会话进入终态，或 300 秒没有任何新增（说明写入端已消失）时发出，带最终 `session`，随后服务端关闭连接。
+- `gone`：会话被删除时发出。
+- 其余时间每约 0.5 秒发一行 `: keep-alive` 注释。
+
+响应带 `Cache-Control: no-cache, no-transform` 与 `X-Accel-Buffering: no`，nginx 代理侧也必须关闭缓冲（本仓库的 [nginx 配置](../../deploy/nginx/default.conf.template) 已设置 `proxy_buffering off`），否则消息会被攒住不刷新。
 
 ### 导出
 

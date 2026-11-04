@@ -14,7 +14,7 @@ def format_export_timestamp(value: str | None) -> str | None:
     if not value:
         return value
     try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value)
     except ValueError:
         return value
     return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
@@ -113,7 +113,6 @@ def _export_timeline(conn, project_id: str) -> str:
     proj, facts, goals, steps, findings, hints, sources_by_step = _load_project_data(conn, project_id)
 
     facts_by_id = {f["id"]: f["description"] for f in facts}
-    goals_by_id = {g["id"]: g["description"] for g in goals}
 
     events: list[tuple[str, int, str]] = []  # (timestamp, order, text)
     order = 0
