@@ -16,6 +16,7 @@ from cairn.server.services import (
     get_claimable_step_or_404,
     get_releasable_step_or_404,
     get_step_or_404,
+    insert_document,
     next_fact_id,
     next_finding_id,
     next_step_id,
@@ -51,14 +52,15 @@ def create_step(project_id: str, body: CreateStepRequest):
         conn.execute(
             """
             INSERT INTO steps (
-                id, project_id, goal_id, kind, description, rationale, priority, status,
+                id, project_id, goal_id, kind, title, description, rationale, priority, status,
                 creator, worker, last_heartbeat_at, created_at, concluded_at, result_fact_id, note
-            ) VALUES (?, ?, ?, 'action', ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+            ) VALUES (?, ?, ?, 'action', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
             """,
             (
                 sid,
                 project_id,
                 body.goal,
+                body.title,
                 body.description,
                 body.rationale,
                 body.priority,
@@ -122,6 +124,12 @@ def update_step(project_id: str, step_id: str, body: UpdateStepRequest):
                 "UPDATE steps SET priority = ? WHERE id = ? AND project_id = ?",
                 (body.priority, step_id, project_id),
             )
+        if body.note is not None and body.status != "abandoned":
+            # A note on a live step is guidance for whoever executes it next.
+            conn.execute(
+                "UPDATE steps SET note = ? WHERE id = ? AND project_id = ?",
+                (body.note, step_id, project_id),
+            )
         if body.status == "abandoned":
             conn.execute(
                 """
@@ -151,10 +159,25 @@ def conclude(project_id: str, step_id: str, body: ConcludeStepRequest):
         for submitted in body.submitted_facts():
             fid = next_fact_id(conn, project_id)
             conn.execute(
-                "INSERT INTO facts (id, project_id, description, step_id, created_at) VALUES (?, ?, ?, ?, ?)",
-                (fid, project_id, submitted.description, step_id, now),
+                """
+                INSERT INTO facts (id, project_id, title, description, step_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (fid, project_id, submitted.title, submitted.description, step_id, now),
             )
-            facts.append(Fact(id=fid, description=submitted.description))
+            for document in submitted.documents:
+                insert_document(
+                    conn,
+                    project_id,
+                    title=document.title,
+                    content=document.content,
+                    fact_id=fid,
+                    step_id=step_id,
+                    created_at=now,
+                )
+            facts.append(
+                Fact(id=fid, description=submitted.description, title=submitted.title)
+            )
 
         for submitted in body.findings or []:
             did = next_finding_id(conn, project_id)

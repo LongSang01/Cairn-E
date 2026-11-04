@@ -5,7 +5,13 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
 from cairn.server.db import get_conn
-from cairn.server.services import expire_decide_leases, expire_steps, get_project_or_404
+from cairn.server.services import (
+    build_documents,
+    doc_ids_by_owner,
+    expire_decide_leases,
+    expire_steps,
+    get_project_or_404,
+)
 
 router = APIRouter(tags=["export"])
 
@@ -28,7 +34,10 @@ def _load_project_data(conn, project_id: str):
     def rows(query: str):
         return conn.execute(query, (project_id,)).fetchall()
 
-    facts = rows("SELECT id, description, step_id, created_at FROM facts WHERE project_id = ? ORDER BY rowid")
+    facts = rows(
+        "SELECT id, title, description, step_id, created_at FROM facts"
+        " WHERE project_id = ? ORDER BY rowid"
+    )
     goals = rows("SELECT * FROM goals WHERE project_id = ? ORDER BY created_at, rowid")
     steps = rows("SELECT * FROM steps WHERE project_id = ? ORDER BY created_at, rowid")
     findings = rows("SELECT * FROM findings WHERE project_id = ? ORDER BY created_at, rowid")
@@ -47,6 +56,7 @@ def _load_project_data(conn, project_id: str):
 
 def _export_yaml(conn, project_id: str) -> str:
     proj, facts, goals, steps, findings, hints, sources_by_step = _load_project_data(conn, project_id)
+    docs_by_fact, docs_by_step = doc_ids_by_owner(conn, project_id)
 
     data: dict = {
         "project": {
@@ -66,7 +76,7 @@ def _export_yaml(conn, project_id: str) -> str:
         ]
 
     data["facts"] = [
-        {"id": f["id"], "description": f["description"], "from_step": f["step_id"]} for f in facts
+        _node_entry(f, docs_by_fact.get(f["id"], []), from_step=f["step_id"]) for f in facts
     ]
     data["goals"] = [
         {
@@ -80,11 +90,10 @@ def _export_yaml(conn, project_id: str) -> str:
     if steps:
         data["steps"] = [
             {
-                "id": s["id"],
+                **_node_entry(s, docs_by_step.get(s["id"], [])),
                 "from": sources_by_step.get(s["id"], []),
                 "goal": s["goal_id"],
                 "kind": s["kind"],
-                "description": s["description"],
                 "rationale": s["rationale"],
                 "priority": s["priority"],
                 "status": s["status"],
@@ -94,6 +103,9 @@ def _export_yaml(conn, project_id: str) -> str:
             }
             for s in steps
         ]
+    documents = _export_yaml_documents(conn, project_id)
+    if documents:
+        data["documents"] = documents
     if findings:
         data["findings"] = [
             {
@@ -107,6 +119,32 @@ def _export_yaml(conn, project_id: str) -> str:
         ]
 
     return yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
+
+
+def _node_entry(row, doc_ids: list[str], **extra) -> dict:
+    """Titles and document ids only: bulk evidence is fetched on demand."""
+    entry = {"id": row["id"]}
+    if "title" in row.keys() and row["title"]:
+        entry["title"] = row["title"]
+    entry["description"] = row["description"]
+    entry.update(extra)
+    if doc_ids:
+        entry["doc_ids"] = doc_ids
+    return entry
+
+
+def _export_yaml_documents(conn, project_id: str) -> list[dict]:
+    return [
+        {
+            "id": doc.id,
+            "title": doc.title,
+            "fact": doc.fact_id,
+            "step": doc.step_id,
+            "size": doc.size,
+            "created_at": format_export_timestamp(doc.created_at),
+        }
+        for doc in build_documents(conn, project_id)
+    ]
 
 
 def _export_timeline(conn, project_id: str) -> str:

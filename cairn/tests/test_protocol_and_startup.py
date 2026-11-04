@@ -28,6 +28,35 @@ def test_client_request_failure_returns_status_zero() -> None:
     assert result.text == "offline"
 
 
+def test_session_heartbeat_posts_without_a_body() -> None:
+    class Response:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        text = "{}"
+
+        def json(self):
+            return {}
+
+    class Session:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, dict | None]] = []
+
+        def request(self, method: str, url: str, json=None, timeout=0):
+            self.calls.append((method, url, json))
+            return Response()
+
+    session = Session()
+    client = CairnClient("http://server/")
+    client._local.session = session
+
+    result = client.session_heartbeat("proj_001", "x001")
+
+    assert result.ok
+    assert session.calls == [
+        ("POST", "http://server/projects/proj_001/sessions/x001/heartbeat", None)
+    ]
+
+
 def test_startup_healthcheck_failure_summary_includes_worker_details() -> None:
     results = [
         StartupHealthcheckResult(

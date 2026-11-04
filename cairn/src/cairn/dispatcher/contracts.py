@@ -26,6 +26,57 @@ def _unwrap_wrapped_payload(payload: dict[str, Any]) -> tuple[bool | None, dict[
     return None, None
 
 
+def _fact_entry(value: Any, field: str) -> dict[str, Any]:
+    """A submitted fact: description plus optional short title and evidence documents."""
+    if isinstance(value, str):
+        return {"description": _text(value, field)}
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be a string or object")
+    entry: dict[str, Any] = {"description": _text(value.get("description"), f"{field}.description")}
+    title = _short_text(value.get("title"), f"{field}.title", 200)
+    if title:
+        entry["title"] = title
+    documents = value.get("documents")
+    if documents is not None:
+        if not isinstance(documents, list):
+            raise ValueError(f"{field}.documents must be an array")
+        items: list[dict[str, str]] = []
+        for index, document in enumerate(documents):
+            if not isinstance(document, dict):
+                raise ValueError(f"{field}.documents[{index}] must be an object")
+            items.append(
+                {
+                    "title": _text(document.get("title"), f"{field}.documents[{index}].title"),
+                    "content": _text(document.get("content"), f"{field}.documents[{index}].content"),
+                }
+            )
+        if items:
+            entry["documents"] = items
+    return entry
+
+
+def _short_text(value: Any, field: str, limit: int) -> str | None:
+    text = _optional_text(value, field)
+    if text is None:
+        return None
+    if len(text) > limit:
+        raise ValueError(f"{field} must be at most {limit} characters")
+    return text
+
+
+def _string_list(value: Any, field: str, limit: int, item_limit: int) -> list[str]:
+    """A bounded list of short strings, used for recall queries and document ids."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be an array")
+    items: list[str] = []
+    for index, entry in enumerate(value):
+        items.append(_short_text(entry, f"{field}[{index}]", item_limit) or "")
+    items = [item for item in items if item]
+    return items[:limit]
+
+
 def _text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} is required")
@@ -81,15 +132,25 @@ def _section(payload: dict[str, Any], key: str, action_key: str) -> list[Any]:
     raise ValueError(f"{key} must be an object or an array")
 
 
-def _dict_entries(container: Any) -> list[dict[str, Any]]:
-    if not isinstance(container, dict):
-        return []
-    items = container.get("add") if "add" in container else container
-    if items is None:
-        return []
-    if not isinstance(items, list):
-        raise ValueError("add must be an array")
-    return items
+def _complete_block(value: Any, fact_ids: list[str]) -> dict[str, Any] | None:
+    """Parse the completion declaration, ignoring the empty template placeholder.
+
+    Models often echo `{"complete": {"from": [], "description": ""}}` from the example
+    while the real work is in `steps`; that is an artifact, not a malformed completion.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("complete must be an object")
+    from_ids = _id_list(value.get("from"), "complete.from", fact_ids)
+    description = _optional_text(value.get("description"), "complete.description")
+    if not from_ids and description is None:
+        return None
+    if not from_ids:
+        raise ValueError("complete.from must not be empty")
+    if description is None:
+        raise ValueError("complete.description is required")
+    return {"from": from_ids, "description": description}
 
 
 def validate_decide_payload(
@@ -100,30 +161,29 @@ def validate_decide_payload(
     fact_ids: list[str],
     goal_ids: list[str],
     step_ids: list[str],
-) -> tuple[str, dict[str, Any] | None]:
-    """Decide only touches the graph: goals, steps, and the completion declaration."""
+) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
+    """Decide only touches the graph: goals, steps, and the completion declaration.
+
+    The third element carries what the run wants looked up next (keyword recall and
+    document ids), which the scheduler persists for the following run.
+    """
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
-        return "rejected", None
+        return "rejected", None, {"recall": [], "doc_ids": []}
     if accepted is None:
         data = payload
     assert data is not None
 
-    complete = data.get("complete")
-    complete_payload: dict[str, Any] | None = None
-    if complete is not None:
-        if not isinstance(complete, dict):
-            raise ValueError("complete must be an object")
-        complete_payload = {
-            "from": _id_list(complete.get("from"), "complete.from", fact_ids),
-            "description": _text(complete.get("description"), "complete.description"),
-        }
-        if not complete_payload["from"]:
-            raise ValueError("complete.from must not be empty")
+    lookups = {
+        "recall": _string_list(data.get("recall"), "recall", 3, 200),
+        "doc_ids": _string_list(data.get("doc_ids"), "doc_ids", 5, 64),
+    }
+
+    complete_payload = _complete_block(data.get("complete"), fact_ids)
 
     goals_section = data.get("goals")
     goal_add: list[dict[str, Any]] = []
-    for index, item in enumerate(_dict_entries(goals_section)):
+    for index, item in enumerate(_section(data, "goals", "add")):
         if not isinstance(item, dict):
             raise ValueError(f"goals.add[{index}] must be an object")
         parent = item.get("parent")
@@ -169,6 +229,7 @@ def validate_decide_payload(
         step_add.append(
             {
                 "description": _text(item.get("description"), f"steps.add[{index}].description"),
+                "title": _short_text(item.get("title"), f"steps.add[{index}].title", 200),
                 "from": _id_list(item.get("from"), f"steps.add[{index}].from", fact_ids),
                 "goal": goal,
                 "priority": _priority(item.get("priority"), f"steps.add[{index}].priority"),
@@ -193,29 +254,35 @@ def validate_decide_payload(
                 if status is not None and status != "abandoned":
                     raise ValueError(f"steps.update[{index}].status only supports abandoned")
                 priority = item.get("priority")
-                if priority is None and status is None:
-                    raise ValueError(f"steps.update[{index}] must set priority or status")
+                note = _optional_text(item.get("note"), f"steps.update[{index}].note")
+                if priority is None and status is None and note is None:
+                    # A note-only update is how Decide pins guidance for the executor.
+                    raise ValueError(f"steps.update[{index}] must set priority, status or note")
                 step_update.append(
                     {
                         "id": sid,
                         "priority": None if priority is None else _priority(priority, f"steps.update[{index}].priority"),
                         "status": status,
-                        "note": _optional_text(item.get("note"), f"steps.update[{index}].note"),
+                        "note": note,
                     }
                 )
 
     if complete_payload is not None:
-        return "complete", complete_payload
+        return "complete", complete_payload, lookups
 
     if not (goal_add or goal_close or step_add or step_update):
         if open_steps_empty:
             raise ValueError("decide must add steps, add goals, or complete when no step is open")
-        return "noop", None
+        return "noop", None, lookups
 
-    return "actions", {
-        "goals": {"add": goal_add, "close": goal_close},
-        "steps": {"add": step_add, "update": step_update},
-    }
+    return (
+        "actions",
+        {
+            "goals": {"add": goal_add, "close": goal_close},
+            "steps": {"add": step_add, "update": step_update},
+        },
+        lookups,
+    )
 
 
 def validate_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
@@ -231,24 +298,14 @@ def validate_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, An
     if status not in ("done", "abandoned"):
         raise ValueError("status must be done or abandoned")
 
-    facts: list[str] = []
+    facts: list[dict[str, Any]] = []
     raw_facts = data.get("facts")
     if isinstance(raw_facts, list):
         for index, item in enumerate(raw_facts):
-            if isinstance(item, str):
-                facts.append(_text(item, f"facts[{index}]"))
-            elif isinstance(item, dict):
-                facts.append(_text(item.get("description"), f"facts[{index}].description"))
-            else:
-                raise ValueError(f"facts[{index}] must be a string or object")
+            facts.append(_fact_entry(item, f"facts[{index}]"))
     singular = data.get("fact")
     if singular is not None:
-        if isinstance(singular, str):
-            facts.append(_text(singular, "fact"))
-        elif isinstance(singular, dict):
-            facts.append(_text(singular.get("description"), "fact.description"))
-        else:
-            raise ValueError("fact must be a string or object")
+        facts.append(_fact_entry(singular, "fact"))
 
     findings: list[dict[str, str]] = []
     raw_findings = data.get("findings")
@@ -266,7 +323,8 @@ def validate_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, An
             )
 
     note = _optional_text(data.get("note"), "note")
-    if status == "done" and not facts:
-        raise ValueError("at least one fact is required when the step is done")
+    if status == "done" and not (facts or findings or note):
+        # Never force a fabricated fact: findings or a note are a valid closure.
+        raise ValueError("a done step must submit a fact, a finding or a note")
 
     return "result", {"facts": facts, "findings": findings, "status": status, "note": note}

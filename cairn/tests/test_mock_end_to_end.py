@@ -18,7 +18,16 @@ from cairn.dispatcher.scheduler.loop import DispatcherLoop
 from cairn.dispatcher.tasks.summary import SummaryRequest
 from cairn.server import db
 from cairn.server.app import app
-from cairn.server.models import ContextSummary, ProjectDetail, ProjectSummary, Question, Settings
+from cairn.server.models import (
+    ContextSummary,
+    Document,
+    ProjectDetail,
+    ProjectSummary,
+    Question,
+    RecallPlan,
+    RecallResponse,
+    Settings,
+)
 
 
 class InProcessClient:
@@ -61,7 +70,7 @@ class InProcessClient:
         step_id: str,
         worker: str,
         *,
-        facts: list[str],
+        facts: list[Any],
         findings: list[dict[str, str]],
         status: str = "done",
         note: str | None = None,
@@ -71,7 +80,9 @@ class InProcessClient:
             {
                 "worker": worker,
                 "status": status,
-                "facts": [{"description": description} for description in facts],
+                "facts": [
+                    fact if isinstance(fact, dict) else {"description": fact} for fact in facts
+                ],
                 "findings": findings,
                 "note": note,
             },
@@ -99,6 +110,7 @@ class InProcessClient:
         from_ids: list[str],
         description: str,
         creator: str,
+        title: str | None = None,
         goal: str | None = None,
         rationale: str | None = None,
         priority: int = 0,
@@ -108,6 +120,7 @@ class InProcessClient:
             {
                 "from": from_ids,
                 "description": description,
+                "title": title,
                 "creator": creator,
                 "goal": goal,
                 "rationale": rationale,
@@ -232,6 +245,31 @@ class InProcessClient:
         )
         data = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
         return ApiResult(response.status_code, data, response.text)
+
+    def get_recall_plan(self, project_id: str) -> RecallPlan:
+        response = self.http.get(f"/projects/{project_id}/recall-plan")
+        response.raise_for_status()
+        return RecallPlan.model_validate(response.json())
+
+    def save_recall_plan(
+        self, project_id: str, *, queries: list[str], doc_ids: list[str]
+    ) -> ApiResult:
+        response = self.http.put(
+            f"/projects/{project_id}/recall-plan",
+            json={"queries": queries, "doc_ids": doc_ids},
+        )
+        data = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
+        return ApiResult(response.status_code, data, response.text)
+
+    def recall(self, project_id: str, query: str, *, limit: int = 5) -> RecallResponse:
+        response = self.http.get(f"/projects/{project_id}/recall", params={"q": query, "limit": limit})
+        response.raise_for_status()
+        return RecallResponse.model_validate(response.json())
+
+    def get_document(self, project_id: str, document_id: str) -> Document:
+        response = self.http.get(f"/projects/{project_id}/documents/{document_id}")
+        response.raise_for_status()
+        return Document.model_validate(response.json())
 
     def _post(self, path: str, payload: dict[str, Any]) -> ApiResult:
         response = self.http.post(path, json=payload)

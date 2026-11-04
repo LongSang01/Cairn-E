@@ -33,8 +33,10 @@ If you genuinely cannot make progress: `{"accepted": false, "reason": "..."}`.
 ## Rules
 
 - `complete` only when the facts already on the graph prove the root goal. Cite them in `from`.
+- Omit `complete` entirely while the goal is unmet. Never send an empty placeholder like `{"from": [], "description": ""}`.
 - A step must state an action and how it turns known facts into a new fact. Small, concrete, verifiable steps beat broad ones.
 - Priority is 0 (lowest) to 9 (highest). Higher priority runs first.
+- A `steps.update` entry may carry only a `note`: that pins short guidance onto a step the executor has not started yet. Combine it with `priority` or `status` when you also want to reprioritize or abandon.
 - Abandon steps that are exhausted, duplicated, or contradicted by new facts.
 - Add at most {max_steps} steps in one run.
 - Never add facts. Only Execute submits facts.
@@ -43,6 +45,25 @@ If you genuinely cannot make progress: `{"accepted": false, "reason": "..."}`.
 
 ```
 {graph_yaml}
+```
+
+## Looking up older history
+
+The graph above only carries the recent window. To reach anything older, add a top-level
+`"recall": ["keyword", ...]` (at most 3) to your JSON; the next run gets title-matched
+facts and steps. Add `"doc_ids": ["doc003"]` to pull up to 5 full evidence documents.
+Both fields are optional and are answered once.
+
+## Earlier matches (from your last lookup)
+
+```
+{recall}
+```
+
+## Documents (from your last lookup)
+
+```
+{documents}
 ```
 
 ## Facts you may cite

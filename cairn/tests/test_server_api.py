@@ -4,6 +4,7 @@ import json
 
 from fastapi.testclient import TestClient
 import pytest
+import yaml
 
 from cairn.server import db
 from cairn.server.app import app
@@ -29,7 +30,9 @@ def _create_project(client: TestClient) -> str:
     )
     assert response.status_code == 201
     payload = response.json()
-    assert payload["facts"] == [{"id": "origin", "description": "starting point"}]
+    assert payload["facts"] == [
+        {"id": "origin", "description": "starting point", "title": None}
+    ]
     assert payload["goals"][0]["id"] == "g001"
     assert payload["goals"][0]["parent"] is None
     return payload["project"]["id"]
@@ -77,7 +80,7 @@ def test_project_workflow_creates_goal_step_finding_completes_and_reopens(client
     )
     assert response.status_code == 200
     payload = response.json()
-    assert payload["facts"] == [{"id": "f001", "description": "new fact"}]
+    assert payload["facts"] == [{"id": "f001", "description": "new fact", "title": None}]
     assert payload["findings"][0]["kind"] == "flaw"
     assert payload["findings"][0]["step"] == "s001"
     assert payload["step"]["status"] == "done"
@@ -108,11 +111,86 @@ def test_project_workflow_creates_goal_step_finding_completes_and_reopens(client
     assert response.status_code == 200
     payload = response.json()
     assert payload["project"]["status"] == "active"
-    assert payload["fact"] == {"id": "f002", "description": "human correction"}
+    assert payload["fact"] == {"id": "f002", "description": "human correction", "title": None}
     assert payload["goal"]["status"] == "active"
 
     detail = client.get(f"/projects/{project_id}").json()
     assert all(step["kind"] != "completion" for step in detail["steps"])
+
+
+def test_step_update_with_only_a_note_stores_guidance(client: TestClient) -> None:
+    project_id = _create_project(client)
+    client.post(
+        f"/projects/{project_id}/steps",
+        json={"from": ["origin"], "description": "probe", "creator": "decider", "worker": None},
+    )
+
+    response = client.post(
+        f"/projects/{project_id}/steps/s001/update",
+        json={"note": "wait for the lockout window first"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["note"] == "wait for the lockout window first"
+    assert response.json()["priority"] == 0
+    assert response.json()["status"] == "pending"
+
+
+def test_titles_documents_and_recall_round_trip(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    response = client.post(
+        f"/projects/{project_id}/steps",
+        json={
+            "from": ["origin"],
+            "description": "probe 6379",
+            "title": "probe redis",
+            "creator": "decider",
+            "worker": None,
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["title"] == "probe redis"
+
+    response = client.post(
+        f"/projects/{project_id}/steps/s001/conclude",
+        json={
+            "worker": "executor",
+            "status": "done",
+            "facts": [
+                {
+                    "title": "redis reachable",
+                    "description": "port 6379 answers PING",
+                    "documents": [{"title": "nmap", "content": "PORT 6379 open"}],
+                }
+            ],
+            "findings": [],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["facts"][0]["title"] == "redis reachable"
+
+    documents = client.get(f"/projects/{project_id}/documents").json()
+    assert [document["title"] for document in documents] == ["nmap"]
+    document_id = documents[0]["id"]
+    assert client.get(f"/projects/{project_id}/documents/{document_id}").json()["content"] == "PORT 6379 open"
+
+    # Recall reaches the fact through its title and links the stored evidence.
+    recall = client.get(f"/projects/{project_id}/recall", params={"q": "redis"}).json()
+    assert recall["facts"][0]["id"] == "f001"
+    assert recall["facts"][0]["title"] == "redis reachable"
+    assert recall["facts"][0]["doc_ids"] == [document_id]
+
+    plan = {"queries": ["redis"], "doc_ids": [document_id]}
+    assert client.put(f"/projects/{project_id}/recall-plan", json=plan).json() == plan
+    assert client.get(f"/projects/{project_id}/recall-plan").json() == plan
+
+    export = yaml.safe_load(client.get(f"/projects/{project_id}/export?format=yaml").text)
+    facts = {fact["id"]: fact for fact in export["facts"]}
+    assert facts["f001"]["title"] == "redis reachable"
+    assert facts["f001"]["doc_ids"] == [document_id]
+    assert export["steps"][0]["title"] == "probe redis"
+    assert export["documents"][0]["id"] == document_id
 
 
 def test_stopping_project_releases_claims_and_decide_but_keeps_hints_writable(client: TestClient) -> None:

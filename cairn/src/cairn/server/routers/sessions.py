@@ -1,5 +1,6 @@
 import asyncio
 import time
+from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, HTTPException
 from starlette.concurrency import run_in_threadpool
@@ -63,6 +64,16 @@ def stream_session(project_id: str, session_id: str):
         expire_stale_sessions(conn, project_id)
         get_session_or_404(conn, project_id, session_id)
 
+    return sse_response(session_event_stream(project_id, session_id))
+
+
+async def session_event_stream(project_id: str, session_id: str) -> AsyncIterator[str]:
+    """The SSE body for one session, kept separate so it can be driven without HTTP.
+
+    ``TestClient`` buffers a whole response, so an open stream cannot be observed while
+    it is still polling; tests consume this generator directly instead.
+    """
+
     def poll() -> tuple[dict, list[dict]] | None:
         """Read one transcript snapshot off the event loop (sqlite3 is blocking)."""
         with get_conn() as conn:
@@ -74,43 +85,40 @@ def stream_session(project_id: str, session_id: str):
             messages = build_session_messages(conn, project_id, session_id)
             return session_to_model(row).model_dump(), [m.model_dump() for m in messages]
 
-    async def generate():
-        sent = 0
-        snapshot_sent = False
-        last_change = time.monotonic()
-        while True:
-            result = await run_in_threadpool(poll)
-            if result is None:
-                yield sse_event("gone", {"id": session_id})
-                return
-            session, messages = result
+    sent = 0
+    snapshot_sent = False
+    last_change = time.monotonic()
+    while True:
+        result = await run_in_threadpool(poll)
+        if result is None:
+            yield sse_event("gone", {"id": session_id})
+            return
+        session, messages = result
 
-            if not snapshot_sent:
-                # One snapshot per connection, even while the transcript is still
-                # empty; later polls only carry deltas.
+        if not snapshot_sent:
+            # One snapshot per connection, even while the transcript is still
+            # empty; later polls only carry deltas.
+            last_change = time.monotonic()
+            yield sse_event("snapshot", {"session": session, "messages": messages})
+            snapshot_sent = True
+        else:
+            fresh = messages[sent:]
+            if fresh:
                 last_change = time.monotonic()
-                yield sse_event("snapshot", {"session": session, "messages": messages})
-                snapshot_sent = True
-            else:
-                fresh = messages[sent:]
-                if fresh:
-                    last_change = time.monotonic()
-                    yield sse_event("messages", {"session": session, "messages": fresh})
-            sent = len(messages)
+                yield sse_event("messages", {"session": session, "messages": fresh})
+        sent = len(messages)
 
-            if session["status"] != "running":
-                yield sse_event("end", {"session": session})
-                return
-            if time.monotonic() - last_change > STREAM_IDLE_LIMIT_SECONDS:
-                # The dispatcher heartbeats every few seconds; a long silence means the
-                # stream lost its writer, so stop holding the connection open.
-                yield sse_event("end", {"session": session})
-                return
+        if session["status"] != "running":
+            yield sse_event("end", {"session": session})
+            return
+        if time.monotonic() - last_change > STREAM_IDLE_LIMIT_SECONDS:
+            # The dispatcher heartbeats every few seconds; a long silence means the
+            # stream lost its writer, so stop holding the connection open.
+            yield sse_event("end", {"session": session})
+            return
 
-            yield ": keep-alive\n\n"
-            await asyncio.sleep(STREAM_POLL_SECONDS)
-
-    return sse_response(generate())
+        yield ": keep-alive\n\n"
+        await asyncio.sleep(STREAM_POLL_SECONDS)
 
 
 @router.post(

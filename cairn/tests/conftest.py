@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from cairn.dispatcher.config import DispatchConfig
 from cairn.dispatcher.protocol.client import ApiResult
@@ -8,12 +9,16 @@ from cairn.dispatcher.workers.base import DriverResult
 from cairn.dispatcher.workers.health import HealthResult
 from cairn.server.models import (
     ContextSummary,
+    Document,
     Fact,
     Finding,
     Goal,
     Hint,
     ProjectDetail,
     ProjectMeta,
+    RecallHit,
+    RecallPlan,
+    RecallResponse,
     Step,
 )
 
@@ -138,8 +143,10 @@ class FakeContainerManager:
 class FakeClient:
     project: ProjectDetail
     concluded: list[tuple[str, str, str, list[str], list[dict]]] = field(default_factory=list)
+    concluded_details: list[list[dict]] = field(default_factory=list)
     completed: list[tuple[str, list[str], str, str]] = field(default_factory=list)
     created_steps: list[tuple[str, list[str], str, str]] = field(default_factory=list)
+    created_step_titles: list[str | None] = field(default_factory=list)
     updated_steps: list[tuple[str, str, object, object]] = field(default_factory=list)
     created_goals: list[tuple[str, str, str]] = field(default_factory=list)
     closed_goals: list[tuple[str, str, str]] = field(default_factory=list)
@@ -153,9 +160,34 @@ class FakeClient:
     conclude_fact_ids: list[str] = field(default_factory=lambda: ["f002"])
     context_summary: ContextSummary = field(default_factory=ContextSummary)
     saved_summaries: list[ContextSummary] = field(default_factory=list)
+    recall_plan: RecallPlan = field(default_factory=RecallPlan)
+    recall_hits: list[RecallHit] = field(default_factory=list)
+    documents: dict[str, Document] = field(default_factory=dict)
+    recalled: list[tuple[str, str]] = field(default_factory=list)
+    fetched_documents: list[str] = field(default_factory=list)
 
     def get_context_summary(self, _project_id: str) -> ContextSummary:
         return self.context_summary
+
+    def get_recall_plan(self, _project_id: str) -> RecallPlan:
+        return self.recall_plan
+
+    def save_recall_plan(
+        self, _project_id: str, *, queries: list[str], doc_ids: list[str]
+    ) -> ApiResult:
+        self.recall_plan = RecallPlan(queries=list(queries), doc_ids=list(doc_ids))
+        return ApiResult(200, self.recall_plan.model_dump())
+
+    def recall(self, _project_id: str, query: str, *, limit: int = 5) -> RecallResponse:
+        self.recalled.append((_project_id, query))
+        hits = [hit for hit in self.recall_hits if query.lower() in (hit.title or hit.description).lower()]
+        return RecallResponse(query=query, facts=hits[:limit], steps=[])
+
+    def get_document(self, _project_id: str, document_id: str) -> Document:
+        self.fetched_documents.append(document_id)
+        if document_id not in self.documents:
+            raise ValueError(f"unknown document: {document_id}")
+        return self.documents[document_id]
 
     def save_context_summary(self, _project_id: str, **fields) -> ApiResult:
         self.context_summary = ContextSummary(**fields)
@@ -171,12 +203,18 @@ class FakeClient:
         step_id: str,
         worker: str,
         *,
-        facts: list[str],
+        facts: list[dict[str, Any]],
         findings: list[dict[str, str]],
         status: str = "done",
         note: str | None = None,
     ) -> ApiResult:
-        self.concluded.append((project_id, step_id, worker, facts, findings))
+        normalized = [
+            item if isinstance(item, dict) else {"description": item} for item in facts
+        ]
+        self.concluded_details.append(normalized)
+        self.concluded.append(
+            (project_id, step_id, worker, [item["description"] for item in normalized], findings)
+        )
         if self.conclude_status != 200:
             return ApiResult(self.conclude_status, text="inactive")
         return ApiResult(
@@ -202,11 +240,13 @@ class FakeClient:
         from_ids: list[str],
         description: str,
         creator: str,
+        title: str | None = None,
         goal: str | None = None,
         rationale: str | None = None,
         priority: int = 0,
     ) -> ApiResult:
         self.created_steps.append((project_id, from_ids, description, creator))
+        self.created_step_titles.append(title)
         return ApiResult(201, {})
 
     def update_step(

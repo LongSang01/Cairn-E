@@ -31,7 +31,7 @@ from cairn.dispatcher.tasks.common import (
 )
 from cairn.dispatcher.tasks.summary import SummaryRequest, run_summary_task
 from cairn.dispatcher.workers.registry import get_driver
-from cairn.server.models import ContextSummary, ProjectDetail
+from cairn.server.models import ContextSummary, ProjectDetail, RecallPlan
 
 LOG = logging.getLogger(__name__)
 
@@ -72,11 +72,13 @@ def run_decide_task(
                 "id": step.id,
                 "from": step.from_,
                 "goal": step.goal,
+                "title": step.title,
                 "description": step.description,
                 "rationale": step.rationale,
                 "priority": step.priority,
                 "status": step.status,
                 "worker": step.worker,
+                "note": step.note,
             }
             for step in project.steps
             if step.kind == "action" and step.status in ("pending", "running")
@@ -86,10 +88,13 @@ def run_decide_task(
         step_ids = [step["id"] for step in open_steps]
 
         template = load_prompt(config.runtime.prompt_group, "decide.md")
+        recall_block, document_block = _consume_recall_plan(client, project_id)
         blocks = {
             "fact_ids": format_fact_ids(fact_ids),
             "open_steps": format_open_steps(open_steps),
             "max_steps": str(config.tasks.decide.max_steps),
+            "recall": recall_block,
+            "documents": document_block,
         }
         # The snapshot gets whatever budget the template and its JSON blocks leave.
         overhead_tokens = prompt_overhead_tokens(template, blocks)
@@ -197,7 +202,7 @@ def run_decide_task(
         try:
             model_output = driver.extract_response_text(result.stdout, result.stderr)
             payload = parse_json_output(model_output)
-            kind, data = validate_decide_payload(
+            kind, data, lookups = validate_decide_payload(
                 payload,
                 open_steps_empty=not open_steps,
                 max_steps=config.tasks.decide.max_steps,
@@ -257,6 +262,11 @@ def run_decide_task(
             )
             record("success")
             return "success"
+
+        # The project keeps running, so persist what this run wants looked up next;
+        # the following Decide injects the results and clears the plan.
+        if lookups["recall"] or lookups["doc_ids"]:
+            _store_lookups(client, project_id, lookups)
 
         if kind == "noop":
             LOG.info(
@@ -343,6 +353,7 @@ def _apply_actions(
             from_ids=step["from"],
             description=step["description"],
             creator=worker_name,
+            title=step.get("title"),
             goal=step["goal"],
             rationale=step["rationale"],
             priority=step["priority"],
@@ -534,3 +545,100 @@ def _healthcheck(driver, worker: WorkerConfig, timeout: int, project_id: str, ca
         )
         return "unhealthy"
     return None
+
+
+RECALL_BLOCK_CHARS = 4000
+DOCUMENT_BLOCK_CHARS = 4000
+
+
+def _consume_recall_plan(client: CairnClient, project_id: str) -> tuple[str, str]:
+    """Render the lookups the previous Decide asked for, then clear them.
+
+    Each request is injected exactly once: leaving it in place would re-spend prompt
+    tokens on results the model has already seen.
+    """
+    try:
+        plan = client.get_recall_plan(project_id)
+    except Exception:  # noqa: BLE001 - recall is an optional aid
+        LOG.warning("recall plan unavailable project=%s", project_id, exc_info=True)
+        return "(none)", "(none)"
+    if not plan.queries and not plan.doc_ids:
+        return "(none)", "(none)"
+
+    recall_text = _render_recall(client, project_id, plan)
+    document_text = _render_documents(client, project_id, plan)
+    try:
+        client.save_recall_plan(project_id, queries=[], doc_ids=[])
+    except Exception:  # noqa: BLE001 - a stale plan only costs a little context
+        LOG.warning("recall plan reset failed project=%s", project_id, exc_info=True)
+    return recall_text, document_text
+
+
+def _render_recall(client: CairnClient, project_id: str, plan: RecallPlan) -> str:
+    lines: list[str] = []
+    used = 0
+    for query in plan.queries:
+        try:
+            result = client.recall(project_id, query, limit=5)
+        except Exception:  # noqa: BLE001 - degrade to no results
+            LOG.warning("recall failed project=%s query=%s", project_id, query, exc_info=True)
+            continue
+        lines.append(f"### {query}")
+        for hit in list(result.facts) + list(result.steps):
+            line = f"- {hit.kind} {hit.id} [{hit.score}]: {hit.title or hit.description[:80]}"
+            if hit.status:
+                line += f" ({hit.status})"
+            if hit.doc_ids:
+                line += f" docs={','.join(hit.doc_ids)}"
+            if used + len(line) + 1 > RECALL_BLOCK_CHARS:
+                lines.append("… (more matches skipped)")
+                LOG.info(
+                    "recall injected project=%s queries=%s hits=%s truncated=true",
+                    project_id,
+                    plan.queries,
+                    len(lines),
+                )
+                return "\n".join(lines)
+            lines.append(line)
+            used += len(line) + 1
+    LOG.info("recall injected project=%s queries=%s hits=%s truncated=false", project_id, plan.queries, len(lines))
+    return "\n".join(lines) or "(none)"
+
+
+def _render_documents(client: CairnClient, project_id: str, plan: RecallPlan) -> str:
+    """Fetch the requested documents, trimming bodies so the whole block stays bounded."""
+    blocks: list[str] = []
+    used = 0
+    for document_id in plan.doc_ids:
+        try:
+            document = client.get_document(project_id, document_id)
+        except Exception:  # noqa: BLE001 - a missing document is not fatal
+            LOG.warning(
+                "document fetch failed project=%s document=%s",
+                project_id,
+                document_id,
+                exc_info=True,
+            )
+            continue
+        header = f"### {document.id} {document.title}\n"
+        room = DOCUMENT_BLOCK_CHARS - used - len(header)
+        if room <= 0:
+            blocks.append("… (more documents skipped)")
+            break
+        body = document.content
+        if len(body) > room:
+            body = body[:room] + "\n… (document truncated)"
+        block = header + body
+        blocks.append(block)
+        used += len(block) + 2  # the blank line between blocks
+    LOG.info("documents injected project=%s ids=%s", project_id, plan.doc_ids)
+    return "\n\n".join(blocks) or "(none)"
+
+
+def _store_lookups(client: CairnClient, project_id: str, lookups: dict) -> None:
+    try:
+        client.save_recall_plan(
+            project_id, queries=lookups["recall"], doc_ids=lookups["doc_ids"]
+        )
+    except Exception:  # noqa: BLE001 - the next run will just not see the results
+        LOG.warning("recall plan write failed project=%s", project_id, exc_info=True)

@@ -9,7 +9,17 @@ from pydantic import TypeAdapter
 import requests
 from requests.adapters import HTTPAdapter
 
-from cairn.server.models import ContextSummary, ProjectDetail, ProjectSummary, Question, Settings
+from cairn.server.models import (
+    ContextSummary,
+    Document,
+    DocumentMeta,
+    ProjectDetail,
+    ProjectSummary,
+    Question,
+    RecallPlan,
+    RecallResponse,
+    Settings,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -84,7 +94,7 @@ class CairnClient:
         step_id: str,
         worker: str,
         *,
-        facts: list[str],
+        facts: list[dict[str, Any]],
         findings: list[dict[str, str]],
         status: str = "done",
         note: str | None = None,
@@ -95,7 +105,7 @@ class CairnClient:
             json={
                 "worker": worker,
                 "status": status,
-                "facts": [{"description": description} for description in facts],
+                "facts": facts,
                 "findings": findings,
                 "note": note,
             },
@@ -125,6 +135,7 @@ class CairnClient:
         from_ids: list[str],
         description: str,
         creator: str,
+        title: str | None = None,
         goal: str | None = None,
         rationale: str | None = None,
         priority: int = 0,
@@ -135,6 +146,7 @@ class CairnClient:
             json={
                 "from": from_ids,
                 "description": description,
+                "title": title,
                 "creator": creator,
                 "goal": goal,
                 "rationale": rationale,
@@ -292,7 +304,63 @@ class CairnClient:
             },
         )
 
-    def _request_json(self, method: str, path: str, json: dict[str, Any]) -> ApiResult:
+    # --- Titles, evidence documents and keyword recall ----------------------------
+
+    def create_document(
+        self,
+        project_id: str,
+        *,
+        title: str,
+        content: str,
+        fact_id: str | None = None,
+        step_id: str | None = None,
+    ) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/documents",
+            json={"title": title, "content": content, "fact_id": fact_id, "step_id": step_id},
+        )
+
+    def get_document(self, project_id: str, document_id: str) -> Document:
+        response = self._session().get(
+            self._url(f"/projects/{project_id}/documents/{document_id}"), timeout=self._timeout
+        )
+        response.raise_for_status()
+        return Document.model_validate(response.json())
+
+    def list_documents(self, project_id: str) -> list[DocumentMeta]:
+        response = self._session().get(
+            self._url(f"/projects/{project_id}/documents"), timeout=self._timeout
+        )
+        response.raise_for_status()
+        return [DocumentMeta.model_validate(item) for item in response.json()]
+
+    def recall(self, project_id: str, query: str, *, limit: int = 5) -> RecallResponse:
+        response = self._session().get(
+            self._url(f"/projects/{project_id}/recall"),
+            params={"q": query, "limit": limit},
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
+        return RecallResponse.model_validate(response.json())
+
+    def get_recall_plan(self, project_id: str) -> RecallPlan:
+        response = self._session().get(
+            self._url(f"/projects/{project_id}/recall-plan"), timeout=self._timeout
+        )
+        response.raise_for_status()
+        return RecallPlan.model_validate(response.json())
+
+    def save_recall_plan(
+        self, project_id: str, *, queries: list[str], doc_ids: list[str]
+    ) -> ApiResult:
+        return self._request_json(
+            "PUT",
+            f"/projects/{project_id}/recall-plan",
+            json={"queries": queries, "doc_ids": doc_ids},
+        )
+
+    def _request_json(self, method: str, path: str, json: dict[str, Any] | None = None) -> ApiResult:
         try:
             response = self._session().request(
                 method,

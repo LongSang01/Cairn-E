@@ -494,8 +494,10 @@ def _compose(
     view["facts"] = [
         {
             "id": fact.get("id"),
+            "title": _cut(fact.get("title"), 120) or _cut(fact.get("description"), 120),
             "description": _cut(fact.get("description"), fact_limit),
             "from_step": fact.get("from_step"),
+            **({"doc_ids": fact["doc_ids"]} if fact.get("doc_ids") else {}),
         }
         for fact in recent_facts
     ]
@@ -520,17 +522,21 @@ def _compose(
                 "from": step.get("from") or [],
                 "goal": step.get("goal"),
                 "kind": step.get("kind"),
+                "title": _cut(step.get("title"), 120) or _cut(step.get("description"), 120),
                 "description": _cut(step.get("description"), 400 if level < 3 else 240),
+                **({"doc_ids": step["doc_ids"]} if step.get("doc_ids") else {}),
                 "rationale": step.get("rationale") if level < 2 else None,
                 "priority": step.get("priority"),
                 "status": step.get("status"),
                 "worker": step.get("worker"),
+                **({"note": _cut(step["note"], 240)} if step.get("note") else {}),
             }
         )
     for step in closed_steps[-recent_items:]:
         entry = {
             "id": step.get("id"),
             "goal": step.get("goal"),
+            "title": _cut(step.get("title"), 120) or _cut(step.get("description"), 120),
             "description": _cut(step.get("description"), 240 if level < 2 else 120),
             "status": step.get("status"),
             "priority": step.get("priority"),
@@ -541,6 +547,8 @@ def _compose(
             entry["rationale"] = step.get("rationale")
         if step.get("note"):
             entry["note"] = _cut(step.get("note"), 160)
+        if step.get("doc_ids"):
+            entry["doc_ids"] = step["doc_ids"]
         step_entries.append(entry)
     if step_entries:
         view["steps"] = step_entries

@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE TABLE IF NOT EXISTS facts (
     id TEXT NOT NULL,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title TEXT,
     description TEXT NOT NULL,
     step_id TEXT,
     created_at TEXT,
@@ -54,6 +55,7 @@ CREATE TABLE IF NOT EXISTS steps (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     goal_id TEXT,
     kind TEXT NOT NULL DEFAULT 'action',
+    title TEXT,
     description TEXT NOT NULL,
     rationale TEXT,
     priority INTEGER NOT NULL DEFAULT 0,
@@ -86,6 +88,19 @@ CREATE TABLE IF NOT EXISTS findings (
     created_at TEXT NOT NULL,
     PRIMARY KEY (id, project_id)
 );
+
+CREATE TABLE IF NOT EXISTS documents (
+    id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    step_id TEXT,
+    fact_id TEXT,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (id, project_id)
+);
+
+CREATE INDEX IF NOT EXISTS documents_by_project ON documents (project_id, created_at);
 
 CREATE TABLE IF NOT EXISTS hints (
     id TEXT NOT NULL,
@@ -216,6 +231,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         ("context_step_summary_facts", "INTEGER NOT NULL DEFAULT 0"),
         ("context_finding_summary", "TEXT"),
         ("context_finding_summary_facts", "INTEGER NOT NULL DEFAULT 0"),
+        ("recall_plan", "TEXT"),
     ):
         if column not in project_columns:
             conn.execute(f"ALTER TABLE projects ADD COLUMN {column} {ddl}")
@@ -225,6 +241,12 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE facts ADD COLUMN step_id TEXT")
     if "created_at" not in fact_columns:
         conn.execute("ALTER TABLE facts ADD COLUMN created_at TEXT")
+    if "title" not in fact_columns:
+        conn.execute("ALTER TABLE facts ADD COLUMN title TEXT")
+
+    step_columns = _table_columns(conn, "steps")
+    if "title" not in step_columns:
+        conn.execute("ALTER TABLE steps ADD COLUMN title TEXT")
 
     # A database created by Cairn 0.x has no goals table content: the root goal lived in a
     # reserved fact named "goal". Promote it to a real Goal node, then drop the fact.

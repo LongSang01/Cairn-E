@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
@@ -7,11 +9,16 @@ from fastapi import HTTPException
 
 from cairn.server.models import (
     ContextSummary,
+    Document,
+    DocumentMeta,
     Finding,
     Goal,
     ProjectDecide,
     ProjectMeta,
     Question,
+    RecallHit,
+    RecallPlan,
+    RecallResponse,
     Session,
     SessionMessage,
     Step,
@@ -104,6 +111,10 @@ def next_hint_id(conn: sqlite3.Connection, project_id: str) -> str:
 
 def next_finding_id(conn: sqlite3.Connection, project_id: str) -> str:
     return _next_scoped_id(conn, "finding", "d", project_id)
+
+
+def next_document_id(conn: sqlite3.Connection, project_id: str) -> str:
+    return _next_scoped_id(conn, "document", "doc", project_id)
 
 
 def next_session_id(conn: sqlite3.Connection, project_id: str) -> str:
@@ -274,6 +285,7 @@ def step_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str) -
         goal=row["goal_id"],
         kind=row["kind"],
         description=row["description"],
+        title=row["title"],
         rationale=row["rationale"],
         priority=row["priority"],
         status=row["status"],
@@ -635,4 +647,218 @@ def _context_summary_from_row(row: sqlite3.Row) -> ContextSummary:
         steps_covered=int(row["context_step_summary_facts"] or 0),
         finding_summary=row["context_finding_summary"] or "",
         findings_covered=int(row["context_finding_summary_facts"] or 0),
+    )
+
+
+# ------------------------------------------------------------------- documents / recall
+
+
+def document_to_meta(row: sqlite3.Row) -> DocumentMeta:
+    content = row["content"] or ""
+    return DocumentMeta(
+        id=row["id"],
+        title=row["title"],
+        fact_id=row["fact_id"],
+        step_id=row["step_id"],
+        size=len(content),
+        created_at=row["created_at"],
+    )
+
+
+def document_to_model(row: sqlite3.Row) -> Document:
+    return Document(
+        id=row["id"],
+        title=row["title"],
+        fact_id=row["fact_id"],
+        step_id=row["step_id"],
+        size=len(row["content"] or ""),
+        created_at=row["created_at"],
+        content=row["content"] or "",
+    )
+
+
+def insert_document(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    title: str,
+    content: str,
+    fact_id: str | None = None,
+    step_id: str | None = None,
+    created_at: str | None = None,
+) -> Document:
+    did = next_document_id(conn, project_id)
+    now = created_at or utcnow()
+    conn.execute(
+        """
+        INSERT INTO documents (id, project_id, step_id, fact_id, title, content, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (did, project_id, step_id, fact_id, title, content, now),
+    )
+    return Document(
+        id=did,
+        title=title,
+        fact_id=fact_id,
+        step_id=step_id,
+        size=len(content),
+        created_at=now,
+        content=content,
+    )
+
+
+def build_documents(conn: sqlite3.Connection, project_id: str) -> list[DocumentMeta]:
+    rows = conn.execute(
+        "SELECT * FROM documents WHERE project_id = ? ORDER BY created_at, rowid",
+        (project_id,),
+    ).fetchall()
+    return [document_to_meta(row) for row in rows]
+
+
+def get_document_or_404(
+    conn: sqlite3.Connection, project_id: str, document_id: str
+) -> sqlite3.Row:
+    row = conn.execute(
+        "SELECT * FROM documents WHERE id = ? AND project_id = ?", (document_id, project_id)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Document not found")
+    return row
+
+
+def doc_ids_by_owner(
+    conn: sqlite3.Connection, project_id: str
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Map owner ids to their document ids without loading document bodies."""
+    by_fact: dict[str, list[str]] = {}
+    by_step: dict[str, list[str]] = {}
+    rows = conn.execute(
+        "SELECT id, fact_id, step_id FROM documents WHERE project_id = ? ORDER BY rowid",
+        (project_id,),
+    ).fetchall()
+    for row in rows:
+        if row["fact_id"]:
+            by_fact.setdefault(row["fact_id"], []).append(row["id"])
+        if row["step_id"]:
+            by_step.setdefault(row["step_id"], []).append(row["id"])
+    return by_fact, by_step
+
+
+_LATIN_TOKEN = re.compile(r"[a-z0-9][a-z0-9_.\-/]{1,}")
+_CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
+RECALL_MAX_LIMIT = 20
+
+
+def recall_tokens(query: str) -> list[str]:
+    """Keyword tokens: latin words plus CJK bigrams, de-duplicated in order."""
+    tokens = [token.lower() for token in _LATIN_TOKEN.findall((query or "").lower())]
+    for run in _CJK_RUN.findall(query or ""):
+        chars = list(run)
+        if len(chars) == 1:
+            tokens.append(run)
+            continue
+        tokens.extend("".join(chars[index : index + 2]) for index in range(len(chars) - 1))
+    unique: dict[str, None] = {}
+    for token in tokens:
+        unique.setdefault(token, None)
+    return list(unique)
+
+
+def _recall_score(tokens: list[str], title: str | None, description: str | None) -> int:
+    heading = (title or "").lower()
+    body = (description or "").lower()
+    score = 0
+    for token in tokens:
+        if token in heading:
+            score += 3
+        elif token in body:
+            score += 1
+    return score
+
+
+def recall(
+    conn: sqlite3.Connection, project_id: str, query: str, *, limit: int = 5
+) -> RecallResponse:
+    """Cheap keyword recall over titles/descriptions; documents are fetched by id."""
+    tokens = recall_tokens(query)
+    if not tokens:
+        raise HTTPException(422, "query must contain at least one keyword")
+    limit = max(1, min(limit, RECALL_MAX_LIMIT))
+    docs_by_fact, docs_by_step = doc_ids_by_owner(conn, project_id)
+
+    facts: list[RecallHit] = []
+    for row in conn.execute(
+        "SELECT id, title, description FROM facts WHERE project_id = ?", (project_id,)
+    ).fetchall():
+        score = _recall_score(tokens, row["title"], row["description"])
+        if score <= 0:
+            continue
+        facts.append(
+            RecallHit(
+                kind="fact",
+                id=row["id"],
+                title=row["title"],
+                description=row["description"],
+                score=score,
+                doc_ids=docs_by_fact.get(row["id"], []),
+            )
+        )
+    facts.sort(key=lambda hit: (-hit.score, hit.id))
+
+    steps: list[RecallHit] = []
+    for row in conn.execute(
+        """
+        SELECT id, title, description, status FROM steps
+        WHERE project_id = ? AND status NOT IN ('pending', 'running')
+        """,
+        (project_id,),
+    ).fetchall():
+        score = _recall_score(tokens, row["title"], row["description"])
+        if score <= 0:
+            continue
+        steps.append(
+            RecallHit(
+                kind="step",
+                id=row["id"],
+                title=row["title"],
+                description=row["description"],
+                status=row["status"],
+                score=score,
+                doc_ids=docs_by_step.get(row["id"], []),
+            )
+        )
+    steps.sort(key=lambda hit: (-hit.score, hit.id))
+
+    return RecallResponse(query=query.strip(), facts=facts[:limit], steps=steps[:limit])
+
+
+def get_recall_plan(conn: sqlite3.Connection, project_id: str) -> RecallPlan:
+    row = conn.execute("SELECT recall_plan FROM projects WHERE id = ?", (project_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "Project not found")
+    return _parse_recall_plan(row["recall_plan"])
+
+
+def save_recall_plan(conn: sqlite3.Connection, project_id: str, plan: RecallPlan) -> RecallPlan:
+    cursor = conn.execute(
+        "UPDATE projects SET recall_plan = ? WHERE id = ?",
+        (json.dumps(plan.model_dump(), ensure_ascii=False), project_id),
+    )
+    if cursor.rowcount == 0:
+        raise HTTPException(404, "Project not found")
+    return plan
+
+
+def _parse_recall_plan(raw: str | None) -> RecallPlan:
+    if not raw:
+        return RecallPlan()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return RecallPlan()
+    if not isinstance(data, dict):
+        return RecallPlan()
+    return RecallPlan(
+        queries=[str(item) for item in data.get("queries") or []][:5],
+        doc_ids=[str(item) for item in data.get("doc_ids") or []][:10],
     )

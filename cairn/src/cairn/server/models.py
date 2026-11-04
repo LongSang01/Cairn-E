@@ -21,10 +21,15 @@ class Settings(BaseModel):
 
 
 class Fact(BaseModel):
-    """A confirmed fact about the world. Append-only."""
+    """A confirmed fact about the world. Append-only.
+
+    ``title`` is the one-line gist used by the snapshot; ``description`` stays the fuller
+    summary, and bulk evidence lives in documents referenced from the export.
+    """
 
     id: str
     description: str
+    title: str | None = None
 
 
 class Goal(BaseModel):
@@ -48,6 +53,7 @@ class Step(BaseModel):
     goal: str | None = None
     kind: Literal["action", "completion"] = "action"
     description: str
+    title: str | None = None
     rationale: str | None = None
     priority: int = 0
     status: StepStatus
@@ -307,6 +313,7 @@ class CreateHintRequest(BaseModel):
 class CreateStepRequest(BaseModel):
     from_: list[str] = Field(default_factory=list, alias="from")
     goal: str | None = None
+    title: str | None = None
     description: str
     rationale: str | None = None
     priority: int = 0
@@ -371,6 +378,94 @@ class DecideClaimRequest(BaseModel):
         return text
 
 
+class SubmittedDocument(BaseModel):
+    """Bulk evidence attached to a fact; the graph only carries its id."""
+
+    title: str
+    content: str
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        if len(text) > 200:
+            raise ValueError("must be at most 200 characters")
+        return text
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be empty")
+        return value
+
+
+class DocumentMeta(BaseModel):
+    """Document header returned by list endpoints (content is fetched on demand)."""
+
+    id: str
+    title: str
+    fact_id: str | None = None
+    step_id: str | None = None
+    size: int
+    created_at: str
+
+
+class Document(DocumentMeta):
+    content: str
+
+
+class CreateDocumentRequest(BaseModel):
+    title: str
+    content: str
+    fact_id: str | None = None
+    step_id: str | None = None
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        if len(text) > 200:
+            raise ValueError("must be at most 200 characters")
+        return text
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be empty")
+        return value
+
+
+class RecallHit(BaseModel):
+    """One keyword-recall hit: enough to decide whether to pull the full node."""
+
+    kind: Literal["fact", "step"]
+    id: str
+    title: str | None = None
+    description: str
+    status: str | None = None
+    score: int = 0
+    doc_ids: list[str] = Field(default_factory=list)
+
+
+class RecallResponse(BaseModel):
+    query: str
+    facts: list[RecallHit] = Field(default_factory=list)
+    steps: list[RecallHit] = Field(default_factory=list)
+
+
+class RecallPlan(BaseModel):
+    """What the last Decide asked to look up; the next run injects the results."""
+
+    queries: list[str] = Field(default_factory=list)
+    doc_ids: list[str] = Field(default_factory=list)
+
+
 class SubmittedFinding(BaseModel):
     kind: str = "finding"
     description: str
@@ -385,7 +480,9 @@ class SubmittedFinding(BaseModel):
 
 
 class SubmittedFact(BaseModel):
+    title: str | None = None
     description: str
+    documents: list[SubmittedDocument] = Field(default_factory=list)
 
     @field_validator("description")
     @classmethod

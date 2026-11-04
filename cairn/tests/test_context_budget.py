@@ -131,6 +131,59 @@ def test_snapshot_that_fits_is_left_untouched() -> None:
     assert view.old_facts == []
 
 
+def test_compacted_view_carries_titles_and_document_ids() -> None:
+    data = {
+        "project": {"title": "engagement", "status": "active"},
+        "facts": [
+            {"id": "f001", "title": "old fact", "description": "x" * 40_000, "from_step": None},
+            {"id": "f002", "title": "recent title", "description": "recent body", "doc_ids": ["doc001"]},
+            {"id": "f003", "description": "no title here", "from_step": None},
+        ],
+        "goals": [{"id": "g001", "parent": None, "description": "root", "status": "active"}],
+        "steps": [
+            {
+                "id": "s001",
+                "from": ["f001"],
+                "goal": "g001",
+                "kind": "action",
+                "title": "probe redis",
+                "description": "step one",
+                "priority": 1,
+                "status": "pending",
+                "worker": "pi-main",
+            },
+            {
+                "id": "s002",
+                "from": ["f001"],
+                "goal": "g001",
+                "kind": "action",
+                "description": "step two",
+                "priority": 1,
+                "status": "done",
+                "result": "f002",
+                "doc_ids": ["doc002"],
+            },
+        ],
+    }
+    graph = yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    budget = resolve_snapshot_budget(SMALL_WINDOW, _worker())
+
+    view = build_graph_view(graph, budget=budget, recent_items=2)
+    snapshot = yaml.safe_load(view.yaml)
+
+    assert view.compacted is True
+    facts = {fact["id"]: fact for fact in snapshot["facts"]}
+    assert facts["f002"]["title"] == "recent title"
+    assert facts["f002"]["doc_ids"] == ["doc001"]
+    # A fact without a title falls back to its description.
+    assert facts["f003"]["title"] == "no title here"
+    assert "doc_ids" not in facts["f003"]
+    steps = {step["id"]: step for step in snapshot["steps"]}
+    assert steps["s001"]["title"] == "probe redis"
+    assert steps["s002"]["title"] == "step two"
+    assert steps["s002"]["doc_ids"] == ["doc002"]
+
+
 def test_oversized_snapshot_is_layered_not_truncated() -> None:
     graph = _graph(facts=80, steps=10)
     budget = resolve_snapshot_budget(SMALL_WINDOW, _worker())

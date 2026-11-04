@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -516,6 +517,19 @@ def test_stream_finished_session_snapshot_then_end(client: TestClient) -> None:
     assert events[1][1]["session"]["status"] == "success"
 
 
+def _parse_sse(chunks: list[str]) -> list[tuple[str, dict]]:
+    """Frames from raw SSE chunks; keep-alive comments carry no event and are skipped."""
+    events: list[tuple[str, dict]] = []
+    name = None
+    for chunk in chunks:
+        for line in chunk.splitlines():
+            if line.startswith("event: "):
+                name = line[len("event: ") :]
+            elif line.startswith("data: "):
+                events.append((name, json.loads(line[len("data: ") :])))
+    return events
+
+
 def test_stream_running_session_emits_only_new_messages(client: TestClient) -> None:
     project_id = _create_project(client)
     session = client.post(
@@ -528,33 +542,39 @@ def test_stream_running_session_emits_only_new_messages(client: TestClient) -> N
         ),
     ).json()
 
-    results: list[tuple[str, dict | None]] = []
-    url = f"/projects/{project_id}/sessions/{session['id']}/stream"
-    with client.stream("GET", url) as response:
-        name = None
-        for line in response.iter_lines():
-            if line.startswith("event: "):
-                name = line[len("event: ") :]
-            elif line.startswith("data: "):
-                payload = json.loads(line[len("data: ") :])
-                results.append((name, payload))
-                if name == "snapshot":
-                    client.post(
-                        f"/projects/{project_id}/sessions/{session['id']}/messages",
-                        json={"messages": [{"role": "assistant", "content": "adding s002"}]},
-                    )
-                    client.patch(
-                        f"/projects/{project_id}/sessions/{session['id']}",
-                        json={"status": "success", "returncode": 0, "duration_ms": 10},
-                    )
-                if name == "end":
-                    break
+    async def drive_stream() -> list[str]:
+        # TestClient buffers a whole response, so a live stream cannot be read through
+        # HTTP; the SSE body generator is driven directly instead.
+        stream = sessions_router.session_event_stream(project_id, session["id"])
+        chunks = [await anext(stream)]
+        assert "event: snapshot" in chunks[0]
+        # The transcript grows while the stream is still open.
+        client.post(
+            f"/projects/{project_id}/sessions/{session['id']}/messages",
+            json={"messages": [{"role": "assistant", "content": "adding s002"}]},
+        )
+        client.patch(
+            f"/projects/{project_id}/sessions/{session['id']}",
+            json={"status": "success", "returncode": 0, "duration_ms": 10},
+        )
+        try:
+            while True:
+                chunks.append(await anext(stream))
+        except StopAsyncIteration:
+            pass
+        finally:
+            await stream.aclose()
+        return chunks
+
+    results = _parse_sse(asyncio.run(drive_stream()))
 
     names = [name for name, _ in results]
     assert names[0] == "snapshot"
     assert "messages" in names
     assert names[-1] == "end"
 
+    snapshot = results[0][1]
+    assert [m["seq"] for m in snapshot["messages"]] == [0]
     streamed = next(payload for name, payload in results if name == "messages")
     assert [m["seq"] for m in streamed["messages"]] == [1]
     assert streamed["messages"][0]["content"] == "adding s002"
@@ -616,19 +636,22 @@ def test_stream_empty_running_session_sends_one_snapshot(
         ),
     ).json()
 
-    snapshots = 0
-    ticks = 0
-    with client.stream(
-        "GET", f"/projects/{project_id}/sessions/{session['id']}/stream"
-    ) as response:
-        for line in response.iter_lines():
-            if line == "event: snapshot":
-                snapshots += 1
-            elif line == ": keep-alive":
-                ticks += 1
-                if ticks >= 5:
-                    break
-    assert snapshots == 1
+    async def drive_stream(ticks: int) -> list[str]:
+        # An open SSE connection is buffered by TestClient; drive the body directly so
+        # the keep-alive cadence can be observed without waiting for the idle limit.
+        stream = sessions_router.session_event_stream(project_id, session["id"])
+        chunks: list[str] = []
+        try:
+            while sum(chunk == ": keep-alive\n\n" for chunk in chunks) < ticks:
+                chunks.append(await anext(stream))
+        finally:
+            await stream.aclose()
+        return chunks
+
+    chunks = asyncio.run(drive_stream(ticks=5))
+
+    assert sum(chunk.count("event: snapshot") for chunk in chunks) == 1
+    assert chunks[0].startswith("event: snapshot")
 
 
 def test_session_stream_drops_messages_when_server_closed_the_session() -> None:

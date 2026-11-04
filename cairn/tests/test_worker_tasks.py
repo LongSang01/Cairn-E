@@ -6,7 +6,7 @@ from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.process import ProcessResult
 from cairn.dispatcher.workers.health import HealthResult
-from cairn.server.models import Goal
+from cairn.server.models import Document, Goal, RecallHit, RecallPlan
 from cairn.dispatcher.tasks import decide, execute
 
 from conftest import (
@@ -68,6 +68,89 @@ def test_decide_writes_graph_snapshot_and_creates_steps(monkeypatch) -> None:
     assert content == graph_yaml
     assert graph_yaml not in driver.execute_prompts[0]
     assert path in driver.execute_prompts[0]
+
+
+def test_decide_injects_and_clears_the_recall_plan(monkeypatch) -> None:
+    config = make_config()
+    project = make_project()
+    client = FakeClient(project)
+    client.recall_plan = RecallPlan(queries=["redis"], doc_ids=["doc001"])
+    client.recall_hits = [
+        RecallHit(
+            kind="fact",
+            id="f900",
+            title="redis reachable",
+            description="port 6379 open",
+            score=9,
+            doc_ids=["doc003"],
+        )
+    ]
+    client.documents = {
+        "doc001": Document(
+            id="doc001",
+            title="nmap",
+            content="PORT 6379 open\n" + "y" * 5_000,
+            size=5_018,
+            created_at="2026-01-01T00:00:00Z",
+        )
+    }
+    driver = FakeDriver()
+    lease = FakeLease()
+
+    monkeypatch.setattr(decide, "get_driver", lambda *_a, **_k: driver)
+    monkeypatch.setattr(decide.HeartbeatLease, "for_decide", _lease_factory(lease))
+    monkeypatch.setattr(
+        decide,
+        "run_worker_process",
+        lambda *_args, **_kwargs: ProcessResult(
+            0,
+            '{"accepted":true,"data":{"steps":[{"from":["f001"],"description":"next"}]}}',
+            "",
+        ),
+    )
+
+    outcome = decide.run_decide_task(
+        config, client, FakeContainerManager(), project, "graph", config.workers[0], TaskCancellation()
+    )
+
+    assert outcome == "success"
+    prompt = driver.execute_prompts[0]
+    assert "redis reachable" in prompt
+    assert "docs=doc003" in prompt
+    assert "PORT 6379 open" in prompt
+    assert "… (document truncated)" in prompt
+    # Read once: the plan is cleared so the next run does not re-spend tokens.
+    assert client.recall_plan == RecallPlan()
+    assert client.recalled == [("proj_001", "redis")]
+    assert client.fetched_documents == ["doc001"]
+
+
+def test_decide_stores_the_next_lookups_and_step_title(monkeypatch) -> None:
+    config = make_config()
+    project = make_project()
+    client = FakeClient(project)
+    lease = FakeLease()
+
+    monkeypatch.setattr(decide, "get_driver", lambda *_a, **_k: FakeDriver())
+    monkeypatch.setattr(decide.HeartbeatLease, "for_decide", _lease_factory(lease))
+    monkeypatch.setattr(
+        decide,
+        "run_worker_process",
+        lambda *_args, **_kwargs: ProcessResult(
+            0,
+            '{"accepted":true,"data":{"recall":["ldap"],"doc_ids":["doc007"],'
+            '"steps":[{"from":["f001"],"description":"probe ldap","title":"probe ldap"}]}}',
+            "",
+        ),
+    )
+
+    outcome = decide.run_decide_task(
+        config, client, FakeContainerManager(), project, "graph", config.workers[0], TaskCancellation()
+    )
+
+    assert outcome == "success"
+    assert client.created_step_titles == ["probe ldap"]
+    assert client.recall_plan == RecallPlan(queries=["ldap"], doc_ids=["doc007"])
 
 
 def test_decide_applies_goal_add_update_and_complete(monkeypatch) -> None:

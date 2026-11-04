@@ -30,6 +30,8 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Run from a checkout without installing: `python -m pytest` finds the package.
+pythonpath = ["src"]
 
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple"
