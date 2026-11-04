@@ -140,8 +140,10 @@ def create_session(project_id: str, body: CreateSessionRequest):
             """
             INSERT INTO sessions (
                 id, project_id, worker, worker_type, phase, step_id, native_session,
-                status, returncode, timed_out, duration_ms, error, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                status, returncode, timed_out, duration_ms,
+                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens,
+                error, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 sid,
@@ -155,6 +157,11 @@ def create_session(project_id: str, body: CreateSessionRequest):
                 body.returncode,
                 1 if body.timed_out else 0,
                 body.duration_ms,
+                body.input_tokens,
+                body.output_tokens,
+                body.cache_read_tokens,
+                body.cache_write_tokens,
+                body.total_tokens,
                 body.error,
                 now,
                 now,
@@ -216,6 +223,8 @@ def finish_session(project_id: str, session_id: str, body: FinishSessionRequest)
             """
             UPDATE sessions
             SET status = ?, returncode = ?, timed_out = ?, duration_ms = ?, error = ?,
+                input_tokens = ?, output_tokens = ?, cache_read_tokens = ?,
+                cache_write_tokens = ?, total_tokens = ?,
                 native_session = COALESCE(?, native_session), updated_at = ?
             WHERE id = ? AND project_id = ?
             """,
@@ -225,6 +234,11 @@ def finish_session(project_id: str, session_id: str, body: FinishSessionRequest)
                 1 if body.timed_out else 0,
                 body.duration_ms,
                 body.error,
+                body.input_tokens,
+                body.output_tokens,
+                body.cache_read_tokens,
+                body.cache_write_tokens,
+                body.total_tokens,
                 body.native_session,
                 utcnow(),
                 session_id,

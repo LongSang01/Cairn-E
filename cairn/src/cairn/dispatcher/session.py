@@ -10,6 +10,7 @@ from typing import Any
 
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.process import ProcessResult
+from cairn.dispatcher.workers.base import Usage, usage_payload
 from cairn.dispatcher.workers.stream import text_from_content
 
 LOG = logging.getLogger(__name__)
@@ -493,6 +494,7 @@ class SessionStream:
         error: str | None = None,
         duration_ms: int | None = None,
         native_session: str | None = None,
+        usage: Usage | None = None,
         extra_streams: Iterable[str] = (),
     ) -> None:
         if self._finished:
@@ -506,7 +508,7 @@ class SessionStream:
             self._builder.finalize(result, extra_streams)
         native_session = native_session or self._native_session
         if self.session_id is None:
-            self._upload_once(status, result, error, duration_ms, native_session)
+            self._upload_once(status, result, error, duration_ms, native_session, usage)
             return
         self._flush()
         payload = {
@@ -516,6 +518,7 @@ class SessionStream:
             "duration_ms": duration_ms,
             "error": redact(error) if error else None,
             "native_session": native_session,
+            **usage_payload(usage),
         }
         try:
             response = self._client.finish_session(self._project_id, self.session_id, payload)
@@ -616,6 +619,7 @@ class SessionStream:
         error: str | None,
         duration_ms: int | None,
         native_session: str | None,
+        usage: Usage | None = None,
     ) -> None:
         """Fallback when the live session could not be created."""
         with self._lock:
@@ -634,6 +638,7 @@ class SessionStream:
             "duration_ms": duration_ms,
             "error": redact(error) if error else None,
             "messages": messages,
+            **usage_payload(usage),
         }
         try:
             response = self._client.create_session(self._project_id, payload)

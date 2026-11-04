@@ -51,8 +51,13 @@ If you genuinely cannot make progress: `{"accepted": false, "reason": "..."}`.
 
 The graph above only carries the recent window. To reach anything older, add a top-level
 `"recall": ["keyword", ...]` (at most 3) to your JSON; the next run gets title-matched
-facts and steps. Add `"doc_ids": ["doc003"]` to pull up to 5 full evidence documents.
+facts and steps. Add `"doc_ids": [{"id": "doc003"}]` to pull up to 5 evidence documents.
 Both fields are optional and are answered once.
+
+A document that does not fit the injection budget is cut in the middle: you get its
+head and its tail, and the gap carries the offset to resume from. Continue it with
+`{"id": "doc003", "from": 4000}` inside `doc_ids` — use exactly the number the marker
+reports, so paging forward never loses text.
 
 ## Earlier matches (from your last lookup)
 

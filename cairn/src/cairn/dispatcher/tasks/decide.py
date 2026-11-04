@@ -22,6 +22,7 @@ from cairn.dispatcher.tasks.common import (
     best_effort_release_decide,
     cancel_reason,
     did_timeout,
+    driver_usage,
     load_stored_summary,
     preview,
     prompt_overhead_tokens,
@@ -148,6 +149,7 @@ def run_decide_task(
         execute_ms = int((time.perf_counter() - execute_started) * 1000)
         total_ms = int((time.perf_counter() - task_started) * 1000)
         session = driver.extract_session(session, result.stdout, result.stderr)
+        usage = driver_usage(driver, result.stdout, result.stderr)
 
         def record(status: str, error: str | None = None) -> None:
             stream.finish(
@@ -156,6 +158,7 @@ def run_decide_task(
                 error=error,
                 duration_ms=execute_ms,
                 native_session=session,
+                usage=usage,
             )
 
         cancelled = cancel_reason(result, cancellation)
@@ -549,6 +552,8 @@ def _healthcheck(driver, worker: WorkerConfig, timeout: int, project_id: str, ca
 
 RECALL_BLOCK_CHARS = 4000
 DOCUMENT_BLOCK_CHARS = 4000
+# A truncated document keeps both ends: the conclusion usually sits at the bottom.
+DOCUMENT_HEAD_RATIO = 0.6
 
 
 def _consume_recall_plan(client: CairnClient, project_id: str) -> tuple[str, str]:
@@ -605,33 +610,76 @@ def _render_recall(client: CairnClient, project_id: str, plan: RecallPlan) -> st
     return "\n".join(lines) or "(none)"
 
 
+def _slice_document(content: str, offset: int, room: int, document_id: str) -> str:
+    """Fit one document into `room` characters, keeping both ends when it overflows.
+
+    The head alone is not enough — conclusions usually land at the end — so the body is
+    split into a leading and a trailing slice. The marker names the exact offset to
+    resume from, which makes truncation "not read yet" instead of "lost forever".
+    """
+    start = max(0, min(offset, len(content)))
+    remaining = content[start:]
+    if len(remaining) <= room:
+        return remaining
+
+    head_len = max(1, int(room * DOCUMENT_HEAD_RATIO))
+    tail_len = max(0, room - head_len)
+    marker = ""
+    for _ in range(3):
+        skipped = max(0, len(remaining) - head_len - tail_len)
+        resume_from = start + head_len
+        marker = (
+            f"… ({skipped} characters omitted; next round request "
+            f'{{"id": "{document_id}", "from": {resume_from}}}) …'
+        )
+        excess = head_len + tail_len + len(marker) + 2 - room
+        if excess <= 0:
+            break
+        head_len = max(1, head_len - excess)
+        tail_len = max(0, room - head_len - len(marker) - 2)
+
+    suffix = "\n… (truncated; read on with a larger offset)"
+    if head_len < room * 0.25 or room <= len(marker) + 24:
+        # Too little budget for both ends (or barely over the limit): one plain cut
+        # wastes far less text than a one-character head plus a long marker.
+        if room <= len(suffix):
+            return remaining[:room]
+        return remaining[: room - len(suffix)] + suffix
+    head = remaining[:head_len]
+    if tail_len <= 0:
+        return f"{head}\n{marker}"
+    return f"{head}\n{marker}\n{remaining[len(remaining) - tail_len:]}"
+
+
 def _render_documents(client: CairnClient, project_id: str, plan: RecallPlan) -> str:
-    """Fetch the requested documents, trimming bodies so the whole block stays bounded."""
+    """Fetch the requested documents, fitting each into the shared injection budget."""
     blocks: list[str] = []
     used = 0
-    for document_id in plan.doc_ids:
+    for request in plan.doc_ids:
         try:
-            document = client.get_document(project_id, document_id)
+            document = client.get_document(project_id, request.id)
         except Exception:  # noqa: BLE001 - a missing document is not fatal
             LOG.warning(
                 "document fetch failed project=%s document=%s",
                 project_id,
-                document_id,
+                request.id,
                 exc_info=True,
             )
             continue
         header = f"### {document.id} {document.title}\n"
         room = DOCUMENT_BLOCK_CHARS - used - len(header)
-        if room <= 0:
-            blocks.append("… (more documents skipped)")
+        if room <= 40:
+            blocks.append("… (more documents skipped; ask for them again next round)")
             break
-        body = document.content
-        if len(body) > room:
-            body = body[:room] + "\n… (document truncated)"
+        body = _slice_document(document.content, request.offset, room, document.id)
         block = header + body
         blocks.append(block)
         used += len(block) + 2  # the blank line between blocks
-    LOG.info("documents injected project=%s ids=%s", project_id, plan.doc_ids)
+    LOG.info(
+        "documents injected project=%s reads=%s",
+        project_id,
+        [(request.id, request.offset) for request in plan.doc_ids],
+    )
     return "\n\n".join(blocks) or "(none)"
 
 

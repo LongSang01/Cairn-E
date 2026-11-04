@@ -10,6 +10,7 @@ import pytest
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.runtime.process import ProcessResult
 from cairn.dispatcher.session import SessionStream, build_messages, redact
+from cairn.dispatcher.workers.base import Usage
 from cairn.server import db
 from cairn.server.app import app
 from cairn.server.routers import sessions as sessions_router
@@ -681,3 +682,84 @@ def test_session_stream_drops_messages_when_server_closed_the_session() -> None:
 
     stream.finish(status="failed")
     assert len(client.finished) == 1
+
+
+def test_session_stream_records_usage_on_finish() -> None:
+    client = _SessionClient()
+    stream = SessionStream(
+        client,
+        "proj_001",
+        worker="pi-main",
+        worker_type="pi",
+        phase="execute",
+        prompt="solve it",
+        flush_interval=0.02,
+    )
+    stream.start()
+    assert stream.session_id == "x001"
+
+    stream.finish(
+        status="success",
+        usage=Usage(input_tokens=120, output_tokens=45, cache_read_tokens=30, cache_write_tokens=10),
+    )
+
+    assert len(client.finished) == 1
+    payload = client.finished[0]
+    assert payload["input_tokens"] == 120
+    assert payload["output_tokens"] == 45
+    assert payload["cache_read_tokens"] == 30
+    assert payload["cache_write_tokens"] == 10
+    assert payload["total_tokens"] == 205
+
+
+def test_session_usage_round_trip_and_project_totals(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    created = client.post(
+        f"/projects/{project_id}/sessions",
+        json=_session_payload(
+            status="running",
+            input_tokens=100,
+            output_tokens=40,
+            cache_read_tokens=20,
+            cache_write_tokens=5,
+            total_tokens=165,
+        ),
+    ).json()
+    assert created["input_tokens"] == 100
+    assert created["total_tokens"] == 165
+
+    finished = client.patch(
+        f"/projects/{project_id}/sessions/{created['id']}",
+        json={
+            "status": "success",
+            "returncode": 0,
+            "input_tokens": 120,
+            "output_tokens": 40,
+            "cache_read_tokens": 20,
+            "cache_write_tokens": 5,
+            "total_tokens": 185,
+        },
+    ).json()
+    assert finished["input_tokens"] == 120
+    assert finished["total_tokens"] == 185
+
+    client.post(
+        f"/projects/{project_id}/sessions",
+        json=_session_payload(phase="summary", input_tokens=10, output_tokens=2, total_tokens=12),
+    )
+
+    usage = client.get(f"/projects/{project_id}/usage")
+    assert usage.status_code == 200
+    payload = usage.json()
+    assert payload["project_id"] == project_id
+    assert payload["sessions"] == 2
+    assert payload["input_tokens"] == 130
+    assert payload["output_tokens"] == 42
+    assert payload["cache_read_tokens"] == 20
+    assert payload["cache_write_tokens"] == 5
+    assert payload["total_tokens"] == 197
+    assert payload["by_phase"]["summary"]["total_tokens"] == 12
+    assert payload["by_phase"]["decide"]["total_tokens"] == 185
+    assert payload["by_worker"]["pi-main"]["sessions"] == 2
+    assert client.get("/projects/proj_999/usage").status_code == 404

@@ -5,7 +5,7 @@ from typing import Any
 
 from cairn.dispatcher.config import DispatchConfig
 from cairn.dispatcher.protocol.client import ApiResult
-from cairn.dispatcher.workers.base import DriverResult
+from cairn.dispatcher.workers.base import DriverResult, Usage
 from cairn.dispatcher.workers.health import HealthResult
 from cairn.server.models import (
     ContextSummary,
@@ -317,6 +317,9 @@ class FakeDriver:
 
     def prepare_session(self) -> str:
         return "session-001"
+
+    def extract_usage(self, _stdout: str, _stderr: str) -> Usage | None:
+        return Usage(input_tokens=10, output_tokens=5)
 
     def check_health(self, _worker, *, timeout: float) -> HealthResult:
         return self.health

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 
 from cairn.dispatcher.protocol.client import ApiResult
@@ -74,7 +75,7 @@ def test_decide_injects_and_clears_the_recall_plan(monkeypatch) -> None:
     config = make_config()
     project = make_project()
     client = FakeClient(project)
-    client.recall_plan = RecallPlan(queries=["redis"], doc_ids=["doc001"])
+    client.recall_plan = RecallPlan(queries=["redis"], doc_ids=[{"id": "doc001"}])
     client.recall_hits = [
         RecallHit(
             kind="fact",
@@ -89,8 +90,8 @@ def test_decide_injects_and_clears_the_recall_plan(monkeypatch) -> None:
         "doc001": Document(
             id="doc001",
             title="nmap",
-            content="PORT 6379 open\n" + "y" * 5_000,
-            size=5_018,
+            content="PORT 6379 open\n" + "y" * 6_000 + "CONCLUSION AT THE END",
+            size=6_036,
             created_at="2026-01-01T00:00:00Z",
         )
     }
@@ -118,11 +119,61 @@ def test_decide_injects_and_clears_the_recall_plan(monkeypatch) -> None:
     assert "redis reachable" in prompt
     assert "docs=doc003" in prompt
     assert "PORT 6379 open" in prompt
-    assert "… (document truncated)" in prompt
+    # The document is cut in the middle: head and tail both survive, and the gap tells
+    # the model exactly where to resume.
+    assert "CONCLUSION AT THE END" in prompt
+    marker = re.search(r'\{"id": "doc001", "from": (\d+)\}', prompt)
+    assert marker, prompt[-400:]
+    offset = int(marker.group(1))
+    assert 0 < offset < 6_036
     # Read once: the plan is cleared so the next run does not re-spend tokens.
     assert client.recall_plan == RecallPlan()
     assert client.recalled == [("proj_001", "redis")]
     assert client.fetched_documents == ["doc001"]
+
+
+def test_decide_resumes_a_document_from_the_reported_offset(monkeypatch) -> None:
+    config = make_config()
+    project = make_project()
+    client = FakeClient(project)
+    client.recall_plan = RecallPlan(doc_ids=[{"id": "doc001", "from": 4_000}])
+    client.documents = {
+        "doc001": Document(
+            id="doc001",
+            title="scan",
+            content="HEAD" + "m" * 3_996 + "TAIL" + "z" * 8_000,
+            size=12_004,
+            created_at="2026-01-01T00:00:00Z",
+        )
+    }
+    driver = FakeDriver()
+    lease = FakeLease()
+
+    monkeypatch.setattr(decide, "get_driver", lambda *_a, **_k: driver)
+    monkeypatch.setattr(decide.HeartbeatLease, "for_decide", _lease_factory(lease))
+    monkeypatch.setattr(
+        decide,
+        "run_worker_process",
+        lambda *_args, **_kwargs: ProcessResult(
+            0,
+            '{"accepted":true,"data":{"steps":[{"from":["f001"],"description":"next"}]}}',
+            "",
+        ),
+    )
+
+    outcome = decide.run_decide_task(
+        config, client, FakeContainerManager(), project, "graph", config.workers[0], TaskCancellation()
+    )
+
+    assert outcome == "success"
+    prompt = driver.execute_prompts[0]
+    # Resuming skips the first 4000 characters, and because the remaining 8004 still
+    # exceed the budget the next offset moves forward instead of starting over.
+    assert "HEAD" not in prompt
+    assert "TAIL" in prompt
+    marker = re.search(r'\{"id": "doc001", "from": (\d+)\}', prompt)
+    assert marker, prompt[-400:]
+    assert int(marker.group(1)) > 4_000
 
 
 def test_decide_stores_the_next_lookups_and_step_title(monkeypatch) -> None:
@@ -138,7 +189,7 @@ def test_decide_stores_the_next_lookups_and_step_title(monkeypatch) -> None:
         "run_worker_process",
         lambda *_args, **_kwargs: ProcessResult(
             0,
-            '{"accepted":true,"data":{"recall":["ldap"],"doc_ids":["doc007"],'
+            '{"accepted":true,"data":{"recall":["ldap"],"doc_ids":[{"id":"doc007"}],'
             '"steps":[{"from":["f001"],"description":"probe ldap","title":"probe ldap"}]}}',
             "",
         ),
@@ -150,7 +201,7 @@ def test_decide_stores_the_next_lookups_and_step_title(monkeypatch) -> None:
 
     assert outcome == "success"
     assert client.created_step_titles == ["probe ldap"]
-    assert client.recall_plan == RecallPlan(queries=["ldap"], doc_ids=["doc007"])
+    assert client.recall_plan == RecallPlan(queries=["ldap"], doc_ids=[{"id": "doc007"}])
 
 
 def test_decide_applies_goal_add_update_and_complete(monkeypatch) -> None:
@@ -342,8 +393,20 @@ def test_execute_writes_findings_and_status(monkeypatch) -> None:
 
     assert outcome == "success"
     assert client.concluded == [
-        ("proj_001", "s001", "test-worker", ["f"], [{"kind": "flaw", "description": "a product"}])
+        (
+            "proj_001",
+            "s001",
+            "test-worker",
+            ["f"],
+            [{"kind": "flaw", "description": "a product", "severity": "info"}],
+        )
     ]
+    # The driver's reported usage rides along with the session finish payload.
+    finished = [payload for _project, _session, payload in client.finished_sessions if payload.get("status") == "success"]
+    assert finished
+    assert finished[-1]["input_tokens"] == 10
+    assert finished[-1]["output_tokens"] == 5
+    assert finished[-1]["total_tokens"] == 15
 
 
 def test_execute_healthcheck_failure_releases_claim(monkeypatch) -> None:
@@ -590,3 +653,21 @@ def test_decide_hands_expired_history_to_the_scheduler(monkeypatch) -> None:
     # The Decide itself stays one model call: the summary is not run here.
     assert calls == ["worker"]
     assert client.saved_summaries == []
+
+
+def test_slice_document_keeps_head_and_tail_with_a_resume_pointer() -> None:
+    text = "H" * 3_000 + "MIDDLE" + "T" * 3_000
+
+    out = decide._slice_document(text, 0, 1_000, "doc009")
+
+    assert out.startswith("H")
+    assert out.endswith("T")
+    assert '"id": "doc009"' in out
+    assert len(out) <= 1_000
+
+
+def test_slice_document_falls_back_to_a_plain_cut_in_a_tiny_budget() -> None:
+    out = decide._slice_document("z" * 500, 0, 40, "doc009")
+
+    assert len(out) <= 40
+    assert out.startswith("z")

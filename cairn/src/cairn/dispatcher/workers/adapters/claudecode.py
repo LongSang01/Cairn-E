@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from cairn.dispatcher.config import WorkerConfig
-from cairn.dispatcher.workers.base import DriverResult, SeedSessionDriver
+from cairn.dispatcher.workers.base import (
+    DriverResult,
+    SeedSessionDriver,
+    Usage,
+    add_usage,
+    normalize_usage,
+)
 from cairn.dispatcher.workers.health import HealthResult, http_ping, proxies_from_env
 from cairn.dispatcher.workers.stream import iter_json_events, text_from_content
-
 
 ANTHROPIC_VERSION = "2023-06-01"
 # Streaming JSON is what makes the transcript complete: plain `-p` only prints the
@@ -87,3 +92,19 @@ class ClaudeCodeDriver(SeedSessionDriver):
             return assistant_text
         # Plain text mode (older CLI, or stream-json unavailable): stdout is the answer.
         return stdout
+
+    def extract_usage(self, stdout: str, stderr: str) -> Usage | None:
+        """The `result` event carries the run's cumulative usage."""
+        usage: Usage | None = None
+        for event in iter_json_events(stdout):
+            if event.get("type") != "result":
+                continue
+            found = normalize_usage(event.get("usage"))
+            if found is None:
+                # Newer CLIs break the same totals down per model.
+                model_usage = event.get("modelUsage")
+                if isinstance(model_usage, dict):
+                    for entry in model_usage.values():
+                        found = add_usage(found, normalize_usage(entry))
+            usage = add_usage(usage, found)
+        return usage

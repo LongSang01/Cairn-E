@@ -140,3 +140,41 @@ def test_configure_promotes_goal_fact_to_goal_node_and_intents_to_steps(tmp_path
     assert steps["i002"]["status"] == "done"
     assert steps["i003"]["status"] == "pending"
     assert sources == {"f001"}
+
+
+def test_configure_adds_finding_severity_and_session_usage_columns(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "pre_grading.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE findings ("
+            " id TEXT NOT NULL, project_id TEXT NOT NULL, step_id TEXT, kind TEXT NOT NULL,"
+            " description TEXT NOT NULL, creator TEXT NOT NULL, created_at TEXT NOT NULL,"
+            " PRIMARY KEY (id, project_id))"
+        )
+        conn.execute(
+            "INSERT INTO findings (id, project_id, step_id, kind, description, creator, created_at)"
+            " VALUES ('d001', 'proj_001', 's001', 'flaw', 'old row', 'w', '2026-01-01T00:00:00Z')"
+        )
+        conn.execute(
+            "CREATE TABLE sessions ("
+            " id TEXT NOT NULL, project_id TEXT NOT NULL, worker TEXT NOT NULL,"
+            " worker_type TEXT NOT NULL, phase TEXT NOT NULL, status TEXT NOT NULL,"
+            " created_at TEXT NOT NULL, PRIMARY KEY (id, project_id))"
+        )
+        conn.execute(
+            "INSERT INTO sessions (id, project_id, worker, worker_type, phase, status, created_at)"
+            " VALUES ('x001', 'proj_001', 'w', 'pi', 'execute', 'success', '2026-01-01T00:00:00Z')"
+        )
+
+    monkeypatch.setattr(db, "_db_path", None)
+    db.configure(path)
+
+    with db.get_conn() as conn:
+        finding = conn.execute("SELECT severity FROM findings WHERE id = 'd001'").fetchone()
+        session = conn.execute(
+            "SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens"
+            " FROM sessions WHERE id = 'x001'"
+        ).fetchone()
+
+    assert finding["severity"] == "info"
+    assert tuple(session) == (0, 0, 0, 0, 0)

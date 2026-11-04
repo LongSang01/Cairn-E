@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -13,6 +13,15 @@ SessionRole = Literal["system", "user", "assistant", "thinking", "tool", "tool_c
 SessionStatus = Literal["running", "success", "failed", "cancelled", "rejected"]
 # Side question lifecycle: asked by a human, claimed by the dispatcher, then answered.
 QuestionStatus = Literal["pending", "running", "answered", "failed", "cancelled"]
+# How much a finding matters. `info` is the neutral default so older rows keep loading.
+FindingSeverity = Literal["critical", "high", "medium", "low", "info"]
+# Derive the ordered tuple from the Literal so the two can never drift apart.
+FINDING_SEVERITIES: tuple[str, ...] = get_args(FindingSeverity)
+
+
+# Storage ceiling for one evidence document (~200 KB). This is a safety rail, not a
+# prompt budget: Decide still pages through documents with RecallPlan offsets.
+MAX_DOCUMENT_CHARS = 200_000
 
 
 class Settings(BaseModel):
@@ -73,6 +82,7 @@ class Finding(BaseModel):
     id: str
     kind: str
     description: str
+    severity: FindingSeverity = "info"
     step: str | None = None
     creator: str
     created_at: str
@@ -94,7 +104,21 @@ class SessionMessage(BaseModel):
     raw: str | None = None
 
 
-class Session(BaseModel):
+class TokenUsage(BaseModel):
+    """Token counters a worker reported for one run, or summed over many runs.
+
+    Workers whose CLI does not expose usage leave everything at zero rather than
+    guessing, so a project total is always made of measured values only.
+    """
+
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    cache_read_tokens: int = Field(default=0, ge=0)
+    cache_write_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+
+
+class Session(TokenUsage):
     """A single worker run: the prompt sent to the model and what it answered."""
 
     id: str
@@ -122,7 +146,7 @@ class SubmittedSessionMessage(BaseModel):
     raw: str | None = None
 
 
-class CreateSessionRequest(BaseModel):
+class CreateSessionRequest(TokenUsage):
     worker: str
     worker_type: str
     phase: str
@@ -151,7 +175,7 @@ class AppendSessionMessagesRequest(BaseModel):
     messages: list[SubmittedSessionMessage]
 
 
-class FinishSessionRequest(BaseModel):
+class FinishSessionRequest(TokenUsage):
     """Finalize a session that was created while the worker was still running."""
 
     status: SessionStatus
@@ -399,6 +423,11 @@ class SubmittedDocument(BaseModel):
     def validate_content(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("must not be empty")
+        # Storage guard only, deliberately generous: it stops a runaway tool from
+        # writing a hundred-megabyte row. How much of a document the model actually
+        # reads is decided by the Decide injection budget and its resume offsets.
+        if len(value) > MAX_DOCUMENT_CHARS:
+            raise ValueError(f"must be at most {MAX_DOCUMENT_CHARS} characters")
         return value
 
 
@@ -438,6 +467,11 @@ class CreateDocumentRequest(BaseModel):
     def validate_content(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("must not be empty")
+        # Storage guard only, deliberately generous: it stops a runaway tool from
+        # writing a hundred-megabyte row. How much of a document the model actually
+        # reads is decided by the Decide injection budget and its resume offsets.
+        if len(value) > MAX_DOCUMENT_CHARS:
+            raise ValueError(f"must be at most {MAX_DOCUMENT_CHARS} characters")
         return value
 
 
@@ -459,16 +493,28 @@ class RecallResponse(BaseModel):
     steps: list[RecallHit] = Field(default_factory=list)
 
 
+class DocumentRequest(BaseModel):
+    """A document the next Decide should read.
+
+    ``from`` is the character offset to start at, so a read that ran out of injection
+    budget can continue across Decide runs instead of losing the rest of the document.
+    """
+
+    id: str
+    offset: int = Field(default=0, alias="from", ge=0)
+
+
 class RecallPlan(BaseModel):
     """What the last Decide asked to look up; the next run injects the results."""
 
     queries: list[str] = Field(default_factory=list)
-    doc_ids: list[str] = Field(default_factory=list)
+    doc_ids: list[DocumentRequest] = Field(default_factory=list)
 
 
 class SubmittedFinding(BaseModel):
     kind: str = "finding"
     description: str
+    severity: FindingSeverity = "info"
 
     @field_validator("kind", "description")
     @classmethod
@@ -477,6 +523,14 @@ class SubmittedFinding(BaseModel):
         if not text:
             raise ValueError("must not be empty")
         return text
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def normalize_severity(cls, value: object) -> object:
+        if isinstance(value, str):
+            text = value.strip().lower()
+            return text or "info"
+        return value
 
 
 class SubmittedFact(BaseModel):
@@ -625,3 +679,27 @@ class ReopenResponse(BaseModel):
     project: ProjectMeta
     fact: Fact
     goal: Goal
+
+
+class FindingsSummary(BaseModel):
+    """Confirmed findings aggregated for a report: counts plus the findings themselves."""
+
+    project_id: str
+    total: int = 0
+    by_severity: dict[str, int] = Field(default_factory=dict)
+    by_kind: dict[str, int] = Field(default_factory=dict)
+    findings: list[Finding] = Field(default_factory=list)
+
+
+class UsageBucket(TokenUsage):
+    """One group of sessions: the totals a project, phase or worker spent."""
+
+    sessions: int = 0
+
+
+class ProjectUsage(UsageBucket):
+    """Project-wide token totals, broken down by phase and by worker."""
+
+    project_id: str
+    by_phase: dict[str, UsageBucket] = Field(default_factory=dict)
+    by_worker: dict[str, UsageBucket] = Field(default_factory=dict)

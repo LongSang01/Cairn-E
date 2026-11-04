@@ -4,8 +4,15 @@ import json
 import random
 
 from cairn.dispatcher.config import WorkerConfig, resolve_mock_behavior
-from cairn.dispatcher.workers.base import DriverResult, SeedSessionDriver
+from cairn.dispatcher.workers.base import (
+    DriverResult,
+    SeedSessionDriver,
+    Usage,
+    add_usage,
+    normalize_usage,
+)
 from cairn.dispatcher.workers.health import HealthResult
+from cairn.dispatcher.workers.stream import iter_json_events
 
 _SCRIPT = """
 import json,random,sys,time
@@ -104,7 +111,8 @@ if phase=="decide":
 
 if outcome=="facts":
     label = prompt.get("step_id") or phase
-    print(json.dumps({"accepted":True,"data":{"facts":[{"description":f"mock fact for {label}"}],"findings":[{"kind":"mock","description":f"mock finding for {label}"}],"status":"done"}}, ensure_ascii=False))
+    print(json.dumps({"accepted":True,"data":{"facts":[{"description":f"mock fact for {label}"}],"findings":[{"kind":"mock","severity":"medium","description":f"mock finding for {label}"}],"status":"done"}}, ensure_ascii=False))
+    print(json.dumps({"type":"usage","usage":{"input_tokens":120,"output_tokens":45,"cache_read_tokens":30,"cache_write_tokens":10,"total_tokens":205}}, ensure_ascii=False))
 elif outcome=="rejected":
     print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
 else:
@@ -136,3 +144,11 @@ class MockDriver(SeedSessionDriver):
 
     def build_conclude(self, worker: WorkerConfig, prompt: str, session: str) -> list[str]:
         return self._argv(worker, prompt)
+
+    def extract_usage(self, stdout: str, stderr: str) -> Usage | None:
+        """The mock script appends a usage event after its payload."""
+        usage: Usage | None = None
+        for event in iter_json_events(stdout):
+            if event.get("type") == "usage":
+                usage = add_usage(usage, normalize_usage(event.get("usage")))
+        return usage

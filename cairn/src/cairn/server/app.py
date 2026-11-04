@@ -11,6 +11,7 @@ from cairn.server.routers import (
     documents,
     context,
     export,
+    findings,
     goals,
     hints,
     projects,
@@ -19,6 +20,7 @@ from cairn.server.routers import (
     sessions,
     settings,
     steps,
+    usage,
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -47,6 +49,8 @@ app.include_router(questions.router)
 app.include_router(context.router)
 app.include_router(documents.router)
 app.include_router(recall.router)
+app.include_router(findings.router)
+app.include_router(usage.router)
 app.include_router(export.router)
 
 

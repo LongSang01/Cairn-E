@@ -352,7 +352,7 @@ class CairnClient:
         return RecallPlan.model_validate(response.json())
 
     def save_recall_plan(
-        self, project_id: str, *, queries: list[str], doc_ids: list[str]
+        self, project_id: str, *, queries: list[str], doc_ids: list[dict[str, Any]]
     ) -> ApiResult:
         return self._request_json(
             "PUT",

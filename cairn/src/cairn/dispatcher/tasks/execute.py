@@ -16,6 +16,7 @@ from cairn.dispatcher.tasks.common import (
     budgeted_graph_yaml,
     cancel_reason,
     did_timeout,
+    driver_usage,
     preview,
     project_allows_conclude_fallback,
     prompt_overhead_tokens,
@@ -143,6 +144,7 @@ def run_execute_task(
         )
         execute_ms = int((time.perf_counter() - execute_started) * 1000)
         session = driver.extract_session(session, first.stdout, first.stderr)
+        usage = driver_usage(driver, first.stdout, first.stderr)
 
         def record(status: str, error: str | None = None) -> None:
             stream.finish(
@@ -151,6 +153,7 @@ def run_execute_task(
                 error=error,
                 duration_ms=execute_ms,
                 native_session=session,
+                usage=usage,
             )
 
         cancelled = cancel_reason(first, cancellation)
@@ -386,6 +389,7 @@ def _try_conclude_fallback(
         raise
     conclude_ms = int((time.perf_counter() - conclude_started) * 1000)
     cancelled = cancel_reason(result, cancellation)
+    usage = driver_usage(driver, result.stdout, result.stderr)
 
     def record(status: str, error: str | None = None) -> None:
         stream.finish(
@@ -394,6 +398,7 @@ def _try_conclude_fallback(
             error=error,
             duration_ms=conclude_ms,
             native_session=session,
+            usage=usage,
         )
     if cancelled is not None:
         LOG.info(

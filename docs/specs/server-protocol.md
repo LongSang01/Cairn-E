@@ -51,6 +51,8 @@ pending/running ──Decide abandon──▶ abandoned
 
 搜索过程的结构化产物。Finding 的定义由任务决定（例如漏洞挖掘任务里就是各类漏洞），所以 `kind` 是自由字符串，不做枚举。Finding 通过 Execute 的 `conclude` 写入，并记录产生它的 Step。
 
+`severity` 是统一的分级，取 `critical` | `high` | `medium` | `low` | `info`（默认 `info`）。不管任务自定义了多少种 `kind`，严重度都用这一套，报告和界面才能跨项目汇总。
+
 ### Hint
 
 人类判断，任何时刻都可以注入，下一次 Decide / Execute 读取图时自然吸收。
@@ -157,6 +159,7 @@ Decide 的项目级串行租约。租约过期由 server 自动回收。
 {
   "id": "d001",
   "kind": "sqli",
+  "severity": "high",
   "description": "登录接口存在报错注入",
   "step": "s003",
   "creator": "executor-a",
@@ -345,17 +348,19 @@ Execute 的 `submit_fact` / `submit_finding` 与 Step 收尾，原子完成：
   "worker": "executor-a",
   "status": "done",
   "facts": [{"description": "22/tcp open ssh"}],
-  "findings": [{"kind": "weak-credential", "description": "admin:admin 可登录"}],
+  "findings": [{"kind": "weak-credential", "severity": "high", "description": "admin:admin 可登录"}],
   "note": "可选"
 }
 ```
+
+`severity` 可省略，缺省为 `info`；大小写与首尾空白会被归一化，未知取值返回 `422`。
 
 返回：
 
 ```json
 {
   "facts": [{"id": "f002", "description": "22/tcp open ssh"}],
-  "findings": [{"id": "d001", "kind": "weak-credential", "description": "admin:admin 可登录"}],
+  "findings": [{"id": "d001", "kind": "weak-credential", "severity": "high", "description": "admin:admin 可登录"}],
   "step": {"id": "s001", "status": "done", "to": "f002"}
 }
 ```
@@ -389,6 +394,8 @@ Session 记录一次 worker 运行中模型看到的输入和它的输出，用�
 - `step` 仅 Execute 阶段有值。
 - `status` ∈ `running` | `success` | `failed` | `cancelled` | `rejected`；`running` 表示 worker 还在跑，消息仍在追加。
 - `message_count` 是该会话已有的消息数，列表接口也会带上，便于显示"增长中"的进度。
+- 用量字段：`input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_write_tokens` / `total_tokens`。由 dispatcher 从 worker CLI 的输出里解析，创建与收尾时都接受；CLI 不报用量时全部为 0，绝不估算。`total_tokens` 取各分量之和与 CLI 自报总量的较大值。
+- 四个分量互不重叠：`cache_read_tokens` 是独立的缓存命中量。像 codex 这类把缓存算进 `input_tokens` 的 CLI，dispatcher 会先减掉再上报，避免项目总量重复计数。
 
 写入分四步：跑之前创建（`status: running` + prompt 消息）、跑的过程中追加消息、长时间没有输出时发心跳、结束后用 PATCH 收尾。`running` 会话若 60 秒内没有任何追加或心跳，会被读接口判定为失败（`error` 为 `dispatcher stopped before the run finished`）—— dispatcher 被杀掉时不会留下永远 `running` 的会话。
 
@@ -596,15 +603,63 @@ SSE（`text/event-stream`）提问流：
 
 按通道合并写入并返回合并后的完整摘要：**每个通道只向前推进**——覆盖数小于已存值、或文本为空时保留旧值。摘要由后台任务写入，这个规则保证晚到的旧摘要不会覆盖新摘要。摘要属于旁路信息，不进入导出 YAML / timeline。
 
+### Findings（汇总）
+
+#### GET /projects/{project_id}/findings
+
+按创建时间返回全部 Finding。
+
+#### GET /projects/{project_id}/findings/summary
+
+返回已确认 Finding 的聚合，用于报告和界面徽标：
+
+```json
+{
+  "project_id": "proj_001",
+  "total": 3,
+  "by_severity": {"critical": 1, "high": 2},
+  "by_kind": {"sqli": 1, "weak-credential": 2},
+  "findings": []
+}
+```
+
+`by_severity` 按严重度从高到低排列，只包含出现过的等级；`findings` 是完整列表。
+
+### Usage（用量）
+
+#### GET /projects/{project_id}/usage
+
+汇总项目内所有 Session 的实测 token 用量，并给出按阶段、按 worker 的拆分：
+
+```json
+{
+  "project_id": "proj_001",
+  "sessions": 12,
+  "input_tokens": 184000,
+  "output_tokens": 21000,
+  "cache_read_tokens": 96000,
+  "cache_write_tokens": 12000,
+  "total_tokens": 313000,
+  "by_phase": {"decide": {"sessions": 5, "total_tokens": 121000}},
+  "by_worker": {"decider-a": {"sessions": 5, "total_tokens": 121000}}
+}
+```
+
+未上报用量的 Session 计 0，因此总量永远只由实测值组成。
+
 ### 导出
 
 #### GET /projects/{project_id}/export?format=yaml
 
-导出当前 FGS 图快照（`project` / `hints` / `facts` / `goals` / `steps` / `findings`）。
+导出当前 FGS 图快照（`project` / `hints` / `facts` / `goals` / `steps` / `findings`），Finding 带 `severity`。
 
 #### GET /projects/{project_id}/export?format=timeline
 
-导出人类可读的时间线，事件包括：PROJECT CREATED、HINT、GOAL DECLARED / ACHIEVED / DROPPED、STEP DECLARED / CONCLUDED / ABANDONED、FINDING、PROJECT COMPLETED。
+导出人类可读的时间线，事件包括：PROJECT CREATED、HINT、GOAL DECLARED / ACHIEVED / DROPPED、STEP DECLARED / CONCLUDED / ABANDONED、FINDING、PROJECT COMPLETED。FINDING 行会带上 `severity`。
+
+#### GET /projects/{project_id}/export?format=findings
+
+导出 Markdown 发现报告：按严重度分组，组内逐条列出 `id`、`kind`、产生它的 Step 与描述。
 
 非法 `format` 返回 `400`。
 

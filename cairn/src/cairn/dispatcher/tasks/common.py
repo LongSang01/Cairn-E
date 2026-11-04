@@ -11,8 +11,9 @@ from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.backend import ExecutionBackend
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
-from cairn.server.models import ContextSummary
 from cairn.dispatcher.runtime.process import OutputCallback, ProcessResult
+from cairn.dispatcher.workers.base import Usage, WorkerDriver
+from cairn.server.models import ContextSummary
 
 PROCESS_COMMUNICATE_GRACE_SECONDS = 15
 LOG_PREVIEW_LIMIT = 1200
@@ -35,6 +36,24 @@ def preview(text: str, limit: int = LOG_PREVIEW_LIMIT) -> str:
 
 def did_timeout(result: ProcessResult) -> bool:
     return not result.cancelled and (result.timed_out or result.returncode in (124, 137))
+
+
+def driver_usage(driver: WorkerDriver, stdout: str, stderr: str) -> Usage | None:
+    """Token usage reported by this run, or None when its CLI exposes none.
+
+    Usage bookkeeping must never break a run: a driver without the hook (or one whose
+    parser fails) simply records no tokens.
+    """
+    extractor = getattr(driver, "extract_usage", None)
+    if extractor is None:
+        # Duck-typed drivers used by tests and plugins may not implement the hook.
+        return None
+    try:
+        return extractor(stdout, stderr)
+    except Exception:
+        # Usage is observability, not a task result: never fail a run over it.
+        LOG.warning("could not read worker token usage", exc_info=True)
+        return None
 
 
 def cancel_reason(result: ProcessResult, cancellation: TaskCancellation | None = None) -> str | None:
@@ -70,7 +89,8 @@ def load_stored_summary(client: CairnClient, project_id: str, *, enabled: bool) 
         return ContextSummary()
     try:
         return client.get_context_summary(project_id)
-    except Exception:  # noqa: BLE001 - budgeting must never break a run
+    except Exception:
+        # Budgeting must never break a run.
         LOG.warning("context summary unavailable project=%s", project_id, exc_info=True)
         return ContextSummary()
 

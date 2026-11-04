@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from cairn.dispatcher.output_parser import extract_json_object
+from cairn.server.models import FINDING_SEVERITIES
 
 MAX_PRIORITY = 9
 
@@ -77,6 +78,39 @@ def _string_list(value: Any, field: str, limit: int, item_limit: int) -> list[st
     return items[:limit]
 
 
+def _document_requests(value: Any, field: str, limit: int) -> list[dict[str, Any]]:
+    """Document reads: ``{"id": "doc003", "from": 4000}``, one entry per document.
+
+    ``from`` is the offset that lets a truncated document continue next round, so it is
+    validated rather than silently dropped.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be an array")
+    requests: list[dict[str, Any]] = []
+    for index, entry in enumerate(value):
+        name = f"{field}[{index}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f'{name} must be an object like {{"id": "doc003"}}')
+        document_id = _short_text(entry.get("id"), f"{name}.id", 64)
+        raw_offset = entry.get("from")
+        if raw_offset is None:
+            offset = 0
+        elif isinstance(raw_offset, bool) or not isinstance(raw_offset, int):
+            raise ValueError(f"{name}.from must be an integer")
+        elif raw_offset < 0:
+            raise ValueError(f"{name}.from must not be negative")
+        else:
+            offset = raw_offset
+        if not document_id:
+            continue
+        requests.append({"id": document_id, "from": offset})
+        if len(requests) >= limit:
+            break
+    return requests
+
+
 def _text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} is required")
@@ -105,6 +139,19 @@ def _id_list(value: Any, field: str, allowed: list[str]) -> list[str]:
         if text not in cleaned:
             cleaned.append(text)
     return cleaned
+
+
+def _severity(value: Any, field: str) -> str:
+    """A finding's grade; missing means the neutral `info`."""
+    if value is None:
+        return "info"
+    text = _optional_text(value, field)
+    if text is None:
+        return "info"
+    severity = text.lower()
+    if severity not in FINDING_SEVERITIES:
+        raise ValueError(f"{field} must be one of: {', '.join(FINDING_SEVERITIES)}")
+    return severity
 
 
 def _priority(value: Any, field: str) -> int:
@@ -176,7 +223,7 @@ def validate_decide_payload(
 
     lookups = {
         "recall": _string_list(data.get("recall"), "recall", 3, 200),
-        "doc_ids": _string_list(data.get("doc_ids"), "doc_ids", 5, 64),
+        "doc_ids": _document_requests(data.get("doc_ids"), "doc_ids", 5),
     }
 
     complete_payload = _complete_block(data.get("complete"), fact_ids)
@@ -319,6 +366,7 @@ def validate_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, An
                 {
                     "kind": _optional_text(item.get("kind"), f"findings[{index}].kind") or "finding",
                     "description": _text(item.get("description"), f"findings[{index}].description"),
+                    "severity": _severity(item.get("severity"), f"findings[{index}].severity"),
                 }
             )
 

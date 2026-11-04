@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from cairn.dispatcher.config import WorkerConfig
-from cairn.dispatcher.workers.base import DriverResult, RegexSessionDriver
+from cairn.dispatcher.workers.base import (
+    DriverResult,
+    RegexSessionDriver,
+    Usage,
+    add_usage,
+    normalize_usage,
+)
 from cairn.dispatcher.workers.health import HealthResult, http_ping, proxies_from_env
 from cairn.dispatcher.workers.stream import iter_json_events, text_from_content
 
@@ -137,3 +143,14 @@ class CodexDriver(RegexSessionDriver):
         if messages:
             return "\n".join(messages)
         return stdout
+
+    def extract_usage(self, stdout: str, stderr: str) -> Usage | None:
+        """`codex exec --json` reports one usage block per completed turn."""
+        usage: Usage | None = None
+        for event in iter_json_events(stdout):
+            if event.get("type") not in ("turn.completed", "turn_completed"):
+                continue
+            # OpenAI counts cached prompt tokens inside input_tokens.
+            found = normalize_usage(event.get("usage"), cache_in_input=True)
+            usage = add_usage(usage, found)
+        return usage

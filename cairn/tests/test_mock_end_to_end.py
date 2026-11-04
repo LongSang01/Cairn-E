@@ -531,7 +531,7 @@ def test_mock_decide_execute_decide_complete_chain(http_client: TestClient) -> N
         _dispatch_and_wait(loop)   # execute: fact + finding
         project = client.get_project(project_id)
         assert [fact.id for fact in project.facts] == ["origin", "f001"]
-        assert [finding.kind for finding in project.findings] == ["mock"]
+        assert [(finding.kind, finding.severity) for finding in project.findings] == [("mock", "medium")]
 
         _dispatch_and_wait(loop)   # decide: facts grew -> complete
         project = client.get_project(project_id)
@@ -542,6 +542,12 @@ def test_mock_decide_execute_decide_complete_chain(http_client: TestClient) -> N
     assert [step.kind for step in project.steps] == ["action", "completion"]
     assert any("/decide-" in path and "s001" in content for _, path, content in containers.writes)
     assert any("/execute-" in path for _, path, _ in containers.writes)
+
+    # The mock execute run appends a usage event; it must land in the project totals.
+    usage = http_client.get(f"/projects/{project_id}/usage").json()
+    assert usage["by_phase"]["execute"]["total_tokens"] == 205
+    assert usage["by_phase"]["execute"]["input_tokens"] == 120
+    assert usage["total_tokens"] >= 205
 
 
 def test_mock_execute_only_worker_keeps_project_active(http_client: TestClient) -> None:

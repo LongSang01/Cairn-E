@@ -5,12 +5,15 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
 from cairn.server.db import get_conn
+from cairn.server.models import FINDING_SEVERITIES
 from cairn.server.services import (
     build_documents,
+    build_findings_summary,
     doc_ids_by_owner,
     expire_decide_leases,
     expire_steps,
     get_project_or_404,
+    normalize_finding_severity,
 )
 
 router = APIRouter(tags=["export"])
@@ -111,6 +114,7 @@ def _export_yaml(conn, project_id: str) -> str:
             {
                 "id": d["id"],
                 "kind": d["kind"],
+                "severity": normalize_finding_severity(d["severity"]),
                 "description": d["description"],
                 "step": d["step_id"],
                 "created_at": format_export_timestamp(d["created_at"]),
@@ -220,7 +224,8 @@ def _export_timeline(conn, project_id: str) -> str:
     for d in findings:
         ts = format_export_timestamp(d["created_at"]) or ""
         block = (
-            f"[{ts}] FINDING {d['id']} ({d['kind']}) by {d['creator']}\n"
+            f"[{ts}] FINDING {d['id']} ({d['kind']}, {normalize_finding_severity(d['severity'])})"
+            f" by {d['creator']}\n"
             f"  step: {d['step_id'] or '-'}\n  {d['description']}"
         )
         events.append((d["created_at"] or "", order, block))
@@ -231,14 +236,50 @@ def _export_timeline(conn, project_id: str) -> str:
     return "\n\n".join(e[2] for e in events) + "\n"
 
 
+_SEVERITY_LABELS = {
+    "critical": "Critical",
+    "high": "High",
+    "medium": "Medium",
+    "low": "Low",
+    "info": "Info",
+}
+
+
+def _export_findings(conn, project_id: str) -> str:
+    """Findings as a graded report, grouped by severity."""
+    proj = get_project_or_404(conn, project_id)
+    summary = build_findings_summary(conn, project_id)
+    lines = [f"# Findings — {proj['title']}", "", f"Total: {summary.total}"]
+    if summary.total:
+        counts = ", ".join(
+            f"{_SEVERITY_LABELS[severity]} {count}"
+            for severity, count in summary.by_severity.items()
+        )
+        lines.append(f"By severity: {counts}")
+    if not summary.findings:
+        lines.extend(["", "No findings recorded."])
+        return "\n".join(lines) + "\n"
+    for severity in FINDING_SEVERITIES:
+        items = [item for item in summary.findings if item.severity == severity]
+        if not items:
+            continue
+        lines.extend(["", f"## {_SEVERITY_LABELS[severity]} ({len(items)})"])
+        for item in items:
+            step = item.step or "-"
+            lines.append(f"- **{item.id}** [{item.kind}] (step {step}): {item.description}")
+    return "\n".join(lines) + "\n"
+
+
 @router.get("/projects/{project_id}/export")
 def export_project(project_id: str, format: str = "yaml"):
-    if format not in ("yaml", "timeline"):
-        raise HTTPException(400, "Supported formats: yaml, timeline")
+    if format not in ("yaml", "timeline", "findings"):
+        raise HTTPException(400, "Supported formats: yaml, timeline, findings")
 
     with get_conn() as conn:
         if format == "timeline":
             text = _export_timeline(conn, project_id)
+        elif format == "findings":
+            text = _export_findings(conn, project_id)
         else:
             text = _export_yaml(conn, project_id)
 

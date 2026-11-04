@@ -155,7 +155,8 @@ def get_project(project_id: str):
         row = get_project_or_404(conn, project_id)
 
         facts = conn.execute(
-            "SELECT id, title, description FROM facts WHERE project_id = ? ORDER BY rowid",
+            "SELECT id, title, description, step_id FROM facts"
+            " WHERE project_id = ? ORDER BY rowid",
             (project_id,),
         ).fetchall()
         hints = conn.execute(

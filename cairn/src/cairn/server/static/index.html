@@ -414,11 +414,26 @@
         x-text="project.project.status"></span>
     </div>
     <div class="flex-1"></div>
-    <div class="flex items-center gap-4 text-xs text-slate-400">
+    <div class="flex items-center gap-3 text-xs text-slate-400">
       <span x-text="`${project.facts.length} 个事实`"></span>
       <span x-text="`${(project.goals || []).length} 个目标`"></span>
       <span x-text="`${project.steps.length} 个步骤`"></span>
-      <span x-text="`${(project.findings || []).length} 条发现`"></span>
+      <span class="inline-flex items-center gap-1.5" title="发现按严重度分级">
+        <span x-text="`${(project.findings || []).length} 条发现`"></span>
+        <span class="inline-flex items-center gap-2">
+          <template x-for="item in findingSeverityCounts()" :key="`hdr-sev-${item.key}`">
+            <span class="inline-flex items-center gap-1" :title="severityLabel(item.key)">
+              <span class="h-1.5 w-1.5 rounded-full shrink-0" :style="`background:${severityColor(item.key)}`"></span>
+              <span class="font-semibold text-slate-500 tabular-nums" x-text="item.count"></span>
+            </span>
+          </template>
+        </span>
+      </span>
+      <span x-show="usageTotal() > 0" class="inline-flex items-center gap-1 rounded-full border border-slate-200/80 bg-slate-50 px-2 py-0.5"
+        :title="usageTooltip()">
+        <svg class="h-3 w-3 text-slate-400" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12l1-8.5Z"/></svg>
+        <span class="font-medium text-slate-500 tabular-nums" x-text="`${formatTokens(usageTotal())} tokens`"></span>
+      </span>
     </div>
     <div class="flex items-center gap-1.5">
       <template x-if="!replay.active">
@@ -500,6 +515,63 @@
           <option value="elk_tb">ELK ↓</option>
           <option value="elk_lr">ELK →</option>
         </select>
+        <button @click="toggleDigests()"
+          class="h-7 px-2 bg-white/90 backdrop-blur rounded-lg shadow-sm border text-xs transition inline-flex items-center gap-1"
+          :class="showDigests
+            ? 'border-indigo-200 text-indigo-600 hover:bg-indigo-50'
+            : 'border-slate-200/60 text-slate-400 hover:text-slate-600 hover:bg-white'"
+          :title="showDigests ? '隐藏摘要折叠节点' : '显示摘要折叠节点'"
+          aria-label="切换摘要折叠节点">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h7"/></svg>
+          <span>摘要</span>
+        </button>
+      </div>
+
+      <!-- Legend -->
+      <div class="absolute bottom-3 left-3 z-10">
+        <button type="button" @click="showLegend = !showLegend"
+          class="h-7 px-2 bg-white/90 backdrop-blur rounded-lg shadow-sm border border-slate-200/60 text-[11px] text-slate-500 hover:text-slate-700 hover:bg-white transition inline-flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="20" cy="18" r="1.5"/></svg>
+          图例
+        </button>
+        <div x-show="showLegend" x-cloak
+          class="mt-1.5 w-64 rounded-xl border border-slate-200/70 bg-white/95 backdrop-blur shadow-lg p-3 space-y-2 text-[11px] text-slate-500">
+          <div class="grid grid-cols-2 gap-x-3 gap-y-1.5">
+            <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-4 rounded-sm bg-teal-500"></span>起点事实</span>
+            <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-4 rounded-sm bg-indigo-500"></span>事实</span>
+            <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-4 rounded-sm bg-rose-500"></span>根目标</span>
+            <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-4 rounded-sm bg-rose-300"></span>子目标</span>
+            <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-amber-500"></span>进行中步骤</span>
+            <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full border border-dashed border-slate-400"></span>待认领步骤</span>
+            <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-4 rounded-sm bg-indigo-200 border border-dashed border-indigo-400"></span>摘要节点</span>
+            <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rotate-45 bg-yellow-500"></span>发现</span>
+          </div>
+          <div class="pt-2 border-t border-slate-100">
+            <p class="mb-1 text-[10px] uppercase tracking-widest text-slate-400">发现严重度</p>
+            <div class="grid grid-cols-2 gap-x-3 gap-y-1">
+              <template x-for="sev in severityOrder()" :key="`legend-sev-${sev}`">
+                <span class="inline-flex items-center gap-1.5">
+                  <span class="h-2 w-2 rounded-full" :style="`background:${severityColor(sev)}`"></span>
+                  <span x-text="severityLabel(sev)"></span>
+                </span>
+              </template>
+            </div>
+          </div>
+          <p class="pt-1 text-[10px] leading-relaxed text-slate-400">虚线边表示目标归属或摘要归属；点击摘要节点查看折叠内容。</p>
+        </div>
+      </div>
+
+      <!-- Minimap -->
+      <div class="absolute bottom-3 right-3 z-10 rounded-xl border border-slate-200/70 bg-white/90 backdrop-blur shadow-sm p-1.5">
+        <div class="flex items-center justify-between px-1 pb-1 text-[10px] text-slate-400">
+          <span>总览</span>
+          <span class="tabular-nums" x-text="`${graphNodeCount()} 节点`"></span>
+        </div>
+        <canvas x-ref="minimap" width="180" height="118"
+          class="block rounded-lg bg-slate-50/80 cursor-crosshair touch-none"
+          @pointerdown.prevent="onMinimapPointer($event)"
+          @pointermove.prevent="onMinimapPointerMove($event)"
+          title="点击跳转视图"></canvas>
       </div>
 
       <template x-if="project.project.decide">
@@ -598,6 +670,26 @@
 
       <!-- Detail -->
       <div x-show="sideTab === 'detail'" class="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/40">
+        <section x-show="digestEntries().length > 0" class="rounded-2xl border border-indigo-200/70 bg-white shadow-sm overflow-hidden">
+          <div class="px-4 py-2.5 border-b border-indigo-100 bg-indigo-50/70 flex items-center justify-between">
+            <span class="text-[10px] font-semibold text-indigo-500 uppercase tracking-widest">摘要</span>
+            <span class="text-[10px] text-indigo-400" x-text="`折叠 ${contextCoveredTotal()} 条历史`"></span>
+          </div>
+          <div class="divide-y divide-slate-100">
+            <template x-for="entry in digestEntries()" :key="`digest-${entry.kind}`">
+              <button type="button" @click="selectDigest(entry.kind); sideTab = 'detail'"
+                class="w-full text-left px-4 py-2.5 text-xs hover:bg-indigo-50/40 transition">
+                <div class="flex items-center gap-2">
+                  <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600" x-text="entry.kind"></span>
+                  <span class="text-[10px] font-medium text-indigo-600" x-text="entry.title"></span>
+                  <span class="ml-auto text-[10px] text-slate-400 tabular-nums" x-text="`${entry.covered} ${entry.unit}`"></span>
+                </div>
+                <p class="mt-1 text-slate-500 break-words whitespace-pre-wrap line-clamp-3" x-text="entry.text"></p>
+              </button>
+            </template>
+          </div>
+        </section>
+
         <section class="rounded-2xl border border-rose-200/70 bg-white shadow-sm overflow-hidden">
           <div class="px-4 py-2.5 border-b border-rose-100 bg-rose-50/70 flex items-center justify-between">
             <span class="text-[10px] font-semibold text-rose-500 uppercase tracking-widest">目标</span>
@@ -620,20 +712,31 @@
           </div>
         </section>
 
-        <section x-show="(project.findings || []).length > 0" class="rounded-2xl border border-amber-200/70 bg-white shadow-sm overflow-hidden">
-          <div class="px-4 py-2.5 border-b border-amber-100 bg-amber-50/70 flex items-center justify-between">
+        <section x-show="sortedFindings().length > 0" class="rounded-2xl border border-amber-200/70 bg-white shadow-sm overflow-hidden">
+          <div class="px-4 py-2.5 border-b border-amber-100 bg-amber-50/70 flex items-center justify-between gap-2">
             <span class="text-[10px] font-semibold text-amber-600 uppercase tracking-widest">发现</span>
-            <span class="text-[10px] text-amber-500" x-text="`${(project.findings || []).length}`"></span>
+            <div class="flex items-center gap-2">
+              <template x-for="item in findingSeverityCounts()" :key="`find-${item.key}`">
+                <span class="inline-flex items-center gap-1 text-[10px]" :title="severityLabel(item.key)">
+                  <span class="h-1.5 w-1.5 rounded-full shrink-0" :style="`background:${severityColor(item.key)}`"></span>
+                  <span class="text-slate-500 tabular-nums" x-text="item.count"></span>
+                </span>
+              </template>
+              <button type="button" @click="viewFindingsReport()"
+                class="text-[10px] font-medium text-amber-600 hover:text-amber-700 underline decoration-dotted">报告</button>
+            </div>
           </div>
           <div class="divide-y divide-slate-100">
-            <template x-for="d in (project.findings || [])" :key="d.id">
-              <div class="px-4 py-2.5 text-xs">
+            <template x-for="d in sortedFindings()" :key="d.id">
+              <button type="button" @click="selectFinding(d.id); sideTab = 'detail'"
+                class="w-full text-left px-4 py-2.5 text-xs hover:bg-amber-50/40 transition">
                 <div class="flex items-center gap-2">
+                  <span class="text-[10px] font-semibold px-1.5 py-0.5 rounded" :class="severityBadgeClass(d.severity)" x-text="severityLabel(d.severity)"></span>
                   <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-600" x-text="d.kind"></span>
                   <span class="text-[10px] text-slate-300" x-text="d.step || '—'"></span>
                 </div>
                 <p class="mt-1 text-slate-600 break-words" x-text="d.description"></p>
-              </div>
+              </button>
             </template>
           </div>
         </section>
@@ -730,6 +833,7 @@
           <section class="rounded-2xl border border-amber-200/80 bg-white shadow-sm overflow-hidden">
             <div class="px-4 py-3 border-b border-amber-100 bg-amber-50/70">
               <div class="flex items-center gap-2">
+                <span class="px-2 py-0.5 rounded-md text-[10px] font-semibold" :class="severityBadgeClass(selectedFindingRecord().severity)" x-text="severityLabel(selectedFindingRecord().severity)"></span>
                 <span class="px-2 py-0.5 rounded-md bg-amber-100 text-amber-700 text-[10px] font-mono font-bold" x-text="selectedFindingRecord().kind"></span>
                 <span class="text-[11px] text-slate-400 font-mono" x-text="selectedFindingRecord().id"></span>
               </div>
@@ -737,10 +841,29 @@
             <div class="p-4 space-y-4">
               <p class="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words" x-text="selectedFindingRecord().description"></p>
               <div class="pt-4 border-t border-slate-100 space-y-3 text-xs">
+                <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">严重度</span><span class="font-medium text-right" :class="severityTextClass(selectedFindingRecord().severity)" x-text="severityLabel(selectedFindingRecord().severity)"></span></div>
                 <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">步骤</span><span class="font-mono text-slate-600 text-right" x-text="selectedFindingRecord().step || '—'"></span></div>
                 <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">创建者</span><span class="text-slate-600 text-right" x-text="selectedFindingRecord().creator"></span></div>
                 <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">创建时间</span><span class="text-slate-600 text-right" x-text="formatTime(selectedFindingRecord().created_at)"></span></div>
               </div>
+            </div>
+          </section>
+        </template>
+        <template x-if="selectedNode && selectedNode.type === 'digest' && digestRecord()">
+          <section class="rounded-2xl border border-indigo-200/80 bg-white shadow-sm overflow-hidden">
+            <div class="px-4 py-3 border-b border-indigo-100 bg-indigo-50/70">
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex items-center gap-2 min-w-0">
+                  <span class="px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-700 text-[10px] font-bold">摘要</span>
+                  <span class="text-[11px] text-slate-500 font-medium truncate" x-text="digestRecord().title"></span>
+                </div>
+                <span class="text-[10px] text-indigo-500 tabular-nums shrink-0"
+                  x-text="`折叠 ${digestRecord().covered} ${digestRecord().unit}`"></span>
+              </div>
+            </div>
+            <div class="p-4 space-y-3">
+              <p class="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words" x-text="digestRecord().text"></p>
+              <p class="text-[11px] text-slate-400 leading-relaxed">这是滚动上下文摘要：更早的历史已折叠进这段文字，完整记录仍在时间线与导出快照中。</p>
             </div>
           </section>
         </template>
@@ -863,6 +986,9 @@
                 <span x-text="session.step ? `${session.id} · ${session.step}` : session.id"></span>
                 <span x-show="session.message_count" x-text="`${session.message_count} 条`"></span>
                 <span x-show="session.duration_ms != null" x-text="formatDurationMs(session.duration_ms)"></span>
+                <span x-show="session.total_tokens" class="text-slate-400 tabular-nums"
+                  :title="sessionUsageTitle(session)"
+                  x-text="`${formatTokens(session.total_tokens)} tokens`"></span>
                 <span x-show="session.timed_out" class="text-amber-500">超时</span>
                 <span x-show="session.returncode != null && session.returncode !== 0" class="text-rose-500" x-text="`exit ${session.returncode}`"></span>
                 <span class="ml-auto tabular-nums" x-text="formatTime(session.created_at)"></span>
@@ -1196,6 +1322,8 @@
             :class="exportTab === 'yaml' ? 'bg-slate-100 text-slate-700' : 'text-slate-400 hover:text-slate-600'">YAML</button>
           <button @click="switchExportTab('timeline')" class="px-2.5 py-1 text-xs font-medium transition"
             :class="exportTab === 'timeline' ? 'bg-slate-100 text-slate-700' : 'text-slate-400 hover:text-slate-600'">时间线</button>
+          <button @click="switchExportTab('findings')" class="px-2.5 py-1 text-xs font-medium transition"
+            :class="exportTab === 'findings' ? 'bg-slate-100 text-slate-700' : 'text-slate-400 hover:text-slate-600'">发现报告</button>
         </div>
         <p class="text-xs text-slate-400 truncate" x-text="yamlPreviewTitle"></p>
       </div>
@@ -1278,6 +1406,12 @@ function cairnApp() {
     layoutMode: 'dagre_tb',
     sidePanelWidth: 320,
     isResizingPanel: false,
+    usage: null,
+    findingsSummary: null,
+    contextSummary: null,
+    _extrasProjectId: null,
+    showLegend: true,
+    showDigests: true,
 
     showNewProject: false,
     showStepModal: false,
@@ -1520,6 +1654,194 @@ function cairnApp() {
       return this.projectIsActive() && this.selectedFacts.length > 0;
     },
 
+    // --- Findings: severity grading and the aggregated report -------------------
+
+    severityOrder() {
+      return ['critical', 'high', 'medium', 'low', 'info'];
+    },
+
+    severityLabel(severity) {
+      const labels = { critical: '严重', high: '高危', medium: '中危', low: '低危', info: '信息' };
+      return labels[severity] || labels.info;
+    },
+
+    severityBadgeClass(severity) {
+      const classes = {
+        critical: 'bg-rose-100 text-rose-700',
+        high: 'bg-orange-100 text-orange-700',
+        medium: 'bg-amber-100 text-amber-700',
+        low: 'bg-sky-100 text-sky-700',
+        info: 'bg-slate-100 text-slate-600',
+      };
+      return classes[severity] || classes.info;
+    },
+
+    severityTextClass(severity) {
+      const classes = {
+        critical: 'text-rose-600',
+        high: 'text-orange-600',
+        medium: 'text-amber-600',
+        low: 'text-sky-600',
+        info: 'text-slate-500',
+      };
+      return classes[severity] || classes.info;
+    },
+
+    severityColor(severity) {
+      const colors = {
+        critical: '#dc2626',
+        high: '#f97316',
+        medium: '#eab308',
+        low: '#0ea5e9',
+        info: '#94a3b8',
+      };
+      return colors[severity] || colors.info;
+    },
+
+    findingSeverityCounts() {
+      const fromServer = this.findingsSummary?.by_severity;
+      if (fromServer && typeof fromServer === 'object') {
+        return this.severityOrder()
+          .filter(key => Number(fromServer[key]) > 0)
+          .map(key => ({ key, count: Number(fromServer[key]) }));
+      }
+      const counts = {};
+      for (const finding of (this.project?.findings || [])) {
+        const key = finding.severity || 'info';
+        counts[key] = (counts[key] || 0) + 1;
+      }
+      return this.severityOrder()
+        .filter(key => counts[key])
+        .map(key => ({ key, count: counts[key] }));
+    },
+
+    sortedFindings() {
+      const rank = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+      return [...(this.project?.findings || [])].sort((a, b) =>
+        (rank[a.severity] ?? 4) - (rank[b.severity] ?? 4)
+      );
+    },
+
+    graphNodeCount() {
+      if (!this.project) return 0;
+      return this.project.facts.length
+        + (this.project.goals || []).length
+        + (this.project.steps || []).length
+        + (this.project.findings || []).length
+        + this.digestEntries().length;
+    },
+
+    nodeColor(data) {
+      const type = data?.nodeType;
+      if (type === 'origin') return '#14b8a6';
+      if (type === 'goal') return '#f43f5e';
+      if (type === 'subgoal') return '#fda4af';
+      if (type === 'fact') return '#6366f1';
+      if (type === 'in_progress') return '#f59e0b';
+      if (type === 'unclaimed' || type === 'abandoned') return '#cbd5e1';
+      if (type === 'digest') return '#818cf8';
+      if (type === 'finding') return this.severityColor(data?.findingSeverity || 'info');
+      return '#94a3b8';
+    },
+
+    // --- Digest nodes: the rolling summaries folded back into the graph ---------
+
+    digestEntries() {
+      const summary = this.contextSummary;
+      if (!summary) return [];
+      const entries = [];
+      if ((summary.summary || '').trim()) {
+        entries.push({
+          kind: 'facts',
+          title: '事实摘要',
+          unit: '条事实',
+          text: summary.summary,
+          covered: summary.facts_covered || 0,
+        });
+      }
+      if ((summary.step_summary || '').trim()) {
+        entries.push({
+          kind: 'steps',
+          title: '步骤摘要',
+          unit: '个步骤',
+          text: summary.step_summary,
+          covered: summary.steps_covered || 0,
+        });
+      }
+      if ((summary.finding_summary || '').trim()) {
+        entries.push({
+          kind: 'findings',
+          title: '发现摘要',
+          unit: '条发现',
+          text: summary.finding_summary,
+          covered: summary.findings_covered || 0,
+        });
+      }
+      return entries;
+    },
+
+    contextCoveredTotal() {
+      return this.digestEntries().reduce((total, entry) => total + (entry.covered || 0), 0);
+    },
+
+    digestRecord() {
+      if (this.selectedNode?.type !== 'digest') return null;
+      return this.digestEntries().find(entry => entry.kind === this.selectedNode.id) || null;
+    },
+
+    toggleDigests() {
+      this.showDigests = !this.showDigests;
+      this.updateGraph();
+    },
+
+    selectDigest(kind) {
+      if (!kind) return;
+      this.selectedFacts = [];
+      this.selectedTimelineEntryId = null;
+      this.selectedNode = { type: 'digest', id: kind };
+      if (!this.cy) return;
+      this.cy.elements().removeClass('highlight focus faded');
+      const node = this.cy.getElementById(`_digest_${kind}`);
+      if (node.length > 0) node.addClass('focus');
+    },
+
+    // --- Token usage -------------------------------------------------------------
+
+    formatTokens(value) {
+      const number = Number(value) || 0;
+      if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(2)}M`;
+      if (number >= 1_000) return `${(number / 1_000).toFixed(1)}k`;
+      return String(number);
+    },
+
+    usageTotal() {
+      return this.usage?.total_tokens || 0;
+    },
+
+    usageTooltip() {
+      if (!this.usage) return '';
+      const parts = [`${this.usage.sessions || 0} 次运行`];
+      parts.push(`输入 ${this.formatTokens(this.usage.input_tokens)}`);
+      parts.push(`输出 ${this.formatTokens(this.usage.output_tokens)}`);
+      if (this.usage.cache_read_tokens) parts.push(`缓存读 ${this.formatTokens(this.usage.cache_read_tokens)}`);
+      if (this.usage.cache_write_tokens) parts.push(`缓存写 ${this.formatTokens(this.usage.cache_write_tokens)}`);
+      for (const [phase, bucket] of Object.entries(this.usage.by_phase || {})) {
+        parts.push(`${phase}: ${this.formatTokens(bucket.total_tokens)}`);
+      }
+      return parts.join(' · ');
+    },
+
+    sessionUsageTitle(session) {
+      if (!session || !session.total_tokens) return '';
+      return [
+        `输入 ${this.formatTokens(session.input_tokens)}`,
+        `输出 ${this.formatTokens(session.output_tokens)}`,
+        `缓存读 ${this.formatTokens(session.cache_read_tokens)}`,
+        `缓存写 ${this.formatTokens(session.cache_write_tokens)}`,
+        `合计 ${this.formatTokens(session.total_tokens)}`,
+      ].join(' · ');
+    },
+
     async loadProjects() {
       try { this.projects = await this.api('GET', '/projects'); } catch(e) { console.error(e); }
     },
@@ -1593,6 +1915,8 @@ function cairnApp() {
         hints: { header: '#fffbeb', body: '#fffef8', itemA: '#fffaf0', itemB: '#fff6e8' },
         facts: { header: '#eef2ff', body: '#fafaff', itemA: '#f5f7ff', itemB: '#eef3ff' },
         steps: { header: '#ecfdf5', body: '#f8fdfb', itemA: '#f1fbf5', itemB: '#eaf8ef' },
+        findings: { header: '#fffbeb', body: '#fffef8', itemA: '#fffaf0', itemB: '#fff6e8' },
+        documents: { header: '#f0f9ff', body: '#f8fdff', itemA: '#f1faff', itemB: '#e9f7ff' },
       };
       return tints[sectionName] || { header: '#f8fafc', body: '#ffffff', itemA: '#f8fafc', itemB: '#f1f5f9' };
     },
@@ -1692,6 +2016,20 @@ function cairnApp() {
       }).join('');
     },
 
+    highlightReport(text) {
+      const lines = String(text ?? '').split('\n');
+      return lines.map((line) => {
+        if (/^# /.test(line)) {
+          return `<div style="white-space:pre-wrap;padding:10px 16px;background:#fffbeb;color:#92400e;font-weight:700">${this.escapeHtml(line)}</div>`;
+        }
+        if (/^## /.test(line)) {
+          return `<div style="white-space:pre-wrap;padding:6px 16px;background:#fef3c7;color:#92400e;font-weight:600">${this.escapeHtml(line)}</div>`;
+        }
+        const isBlank = /^\s*$/.test(line);
+        return `<div style="white-space:pre-wrap;padding:0 16px;color:#0f172a">${isBlank ? '&nbsp;' : this.escapeHtml(line)}</div>`;
+      }).join('');
+    },
+
     projectLabel(projectId, projectTitle) {
       return projectTitle ? `${projectId} - ${projectTitle}` : projectId;
     },
@@ -1721,6 +2059,15 @@ function cairnApp() {
       this.showYamlModal = true;
     },
 
+    async viewFindingsReport() {
+      if (!this.project) return;
+      this.exportProjectId = this.project.project.id;
+      this.yamlPreviewTitle = this.projectLabel(this.project.project.id, this.project.project.title);
+      this.exportTab = 'findings';
+      await this.loadExportTab('findings');
+      this.showYamlModal = true;
+    },
+
     async switchExportTab(tab) {
       if (tab === this.exportTab) return;
       this.exportTab = tab;
@@ -1732,7 +2079,9 @@ function cairnApp() {
       try {
         const text = await this.fetchText(`/projects/${this.exportProjectId}/export?format=${tab}`);
         this.yamlPreviewText = text;
-        this.yamlPreviewHtml = tab === 'yaml' ? this.highlightYaml(text) : this.highlightTimeline(text);
+        this.yamlPreviewHtml = tab === 'yaml'
+          ? this.highlightYaml(text)
+          : (tab === 'findings' ? this.highlightReport(text) : this.highlightTimeline(text));
       } catch (e) {
         this.showToast(e.message, 'error');
       }
@@ -1785,6 +2134,7 @@ function cairnApp() {
         if (switching) this.resetSessionState();
         else this.stopAllSessionStreams();
         this.project = project;
+        await this.loadProjectExtras(id);
         if (!switching) this.openSessionIds.forEach(sessionId => this.startSessionStream(sessionId));
         if (this.questionsProjectId !== project.project.id) {
           this.resetQuestionState();
@@ -1792,6 +2142,26 @@ function cairnApp() {
           this.loadQuestions();
         }
       } catch(e) { this.showToast(e.message, 'error'); }
+    },
+
+    async loadProjectExtras(id) {
+      // Switching projects must not briefly show the previous project's numbers, but a
+      // single failed poll should keep the last good values instead of blanking them.
+      if (this._extrasProjectId !== id) {
+        this._extrasProjectId = id;
+        this.findingsSummary = null;
+        this.usage = null;
+        this.contextSummary = null;
+      }
+      const [findingsSummary, usage, contextSummary] = await Promise.all([
+        this.api('GET', `/projects/${id}/findings/summary`).catch(() => null),
+        this.api('GET', `/projects/${id}/usage`).catch(() => null),
+        this.api('GET', `/projects/${id}/context`).catch(() => null),
+      ]);
+      if (this._extrasProjectId !== id) return;
+      if (findingsSummary) this.findingsSummary = findingsSummary;
+      if (usage) this.usage = usage;
+      if (contextSummary) this.contextSummary = contextSummary;
     },
 
     // --- Sessions: one model conversation per dispatcher run -------------------
@@ -2641,6 +3011,10 @@ function cairnApp() {
       this.view = 'list';
       this.shouldRestoreProjectListScroll = true;
       this.project = null;
+      this.usage = null;
+      this.findingsSummary = null;
+      this.contextSummary = null;
+      this._extrasProjectId = null;
       this.selectedProjectId = '';
       this.resetSessionState();
       this.selectedNode = null;
@@ -2764,6 +3138,7 @@ function cairnApp() {
           nodeType: 'finding',
           findingId: d.id,
           findingKind: d.kind,
+          findingSeverity: d.severity || 'info',
           width: size.width,
           height: Math.min(size.height, 24),
         }});
@@ -2771,10 +3146,41 @@ function cairnApp() {
           edges.push({ data: { id: `${d.id}_anchor`, source: anchor, target: d.id, edgeType: 'finding' }});
         }
       }
+
+      // Digest nodes: the rolling summaries that folded older history away. They hang
+      // off the world state so the graph still shows where the omitted detail came from.
+      if (this.showDigests && !this.replay.active) {
+        const digestGoal = goals.find(goal => !goal.parent) || null;
+        const fallbackAnchor = this.project.facts.some(fact => fact.id === 'origin')
+          ? 'origin'
+          : (this.project.facts[0]?.id || (digestGoal ? digestGoal.id : null));
+        for (const entry of this.digestEntries()) {
+          const digestId = `_digest_${entry.kind}`;
+          const anchor = entry.kind === 'facts'
+            ? fallbackAnchor
+            : (digestGoal ? digestGoal.id : fallbackAnchor);
+          const label = `${entry.title} · ${entry.covered}`;
+          nodes.push({ data: {
+            id: digestId,
+            label,
+            description: entry.text,
+            nodeType: 'digest',
+            digestKind: entry.kind,
+            width: Math.min(150, Math.max(88, Array.from(label).length * 7 + 20)),
+            height: 28,
+          }});
+          if (anchor) {
+            edges.push({ data: { id: `${digestId}_anchor`, source: anchor, target: digestId, edgeType: 'digest' }});
+          }
+        }
+      }
       return { nodes, edges };
     },
 
     initGraph() {
+      // Every entry point rebuilds the cytoscape instance, so the minimap's window
+      // listener must be removed here rather than at each call site.
+      this.teardownMinimap();
       const container = document.getElementById('cy');
       if (!container) return;
       const { nodes, edges } = this.buildElements();
@@ -2792,6 +3198,7 @@ function cairnApp() {
       rawCy.on('tap', e => { if (e.target === rawCy) self.clearSelection(); });
       this.pulseActive();
       this.setupAutoFit();
+      this.setupMinimap();
     },
 
     graphStyles() {
@@ -2806,6 +3213,12 @@ function cairnApp() {
         { selector: 'node[goalStatus="achieved"]', style: { 'background-color':'#34d399', color:'#065f46','border-color':'#10b981' }},
         { selector: 'node[goalStatus="abandoned"], node[nodeType="abandoned"]', style: { 'background-color':'#e2e8f0', color:'#94a3b8','border-color':'#cbd5e1','border-style':'dashed',opacity:0.75 }},
         { selector: 'node[nodeType="finding"]', style: { ...common, shape:'diamond','background-color':'#eab308','label':'data(label)',color:'#422006','font-size':'9px','font-weight':'bold',width:'data(width)',height:'data(height)','border-width':1,'border-color':'#ca8a04','text-wrap':'wrap','text-max-width':'90px' }},
+        { selector: 'node[findingSeverity="critical"]', style: { 'background-color':'#dc2626','border-color':'#991b1b',color:'#fff' }},
+        { selector: 'node[findingSeverity="high"]', style: { 'background-color':'#f97316','border-color':'#c2410c',color:'#fff' }},
+        { selector: 'node[findingSeverity="medium"]', style: { 'background-color':'#eab308','border-color':'#ca8a04',color:'#422006' }},
+        { selector: 'node[findingSeverity="low"]', style: { 'background-color':'#0ea5e9','border-color':'#0369a1',color:'#fff' }},
+        { selector: 'node[findingSeverity="info"]', style: { 'background-color':'#cbd5e1','border-color':'#94a3b8',color:'#334155' }},
+        { selector: 'node[nodeType="digest"]', style: { ...common, shape:'round-rectangle','background-color':'#e0e7ff','background-opacity':0.92,label:'data(label)',color:'#4338ca','font-size':'9px','font-weight':'bold','text-wrap':'wrap','text-max-width':'96px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':1.2,'border-color':'#818cf8','border-style':'dashed' }},
 
         { selector: 'edge[status="concluded"]', style: { width:2,'line-color':'#6ee7b7','target-arrow-color':'#6ee7b7','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#94a3b8','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'80px','text-wrap':'ellipsis','text-background-color':'#f8fafc','text-background-opacity':0.85,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.9 }},
         { selector: 'edge[status="in_progress"]', style: { width:2,'line-color':'#fbbf24','line-style':'dashed','line-dash-pattern':[8,4],'line-dash-offset':0,'target-arrow-color':'#fbbf24','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#b45309','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'80px','text-wrap':'ellipsis','text-background-color':'#fffbeb','text-background-opacity':0.85,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.9 }},
@@ -2815,6 +3228,7 @@ function cairnApp() {
         { selector: 'edge[edgeType="goal_scope"]', style: { label:'',width:1.4,'line-color':'#fda4af','target-arrow-color':'#fda4af','curve-style':'bezier','line-style':'dotted','line-dash-pattern':[2,5],'target-arrow-shape':'triangle-backcurve','arrow-scale':0.7,'target-distance-from-node':2 }},
         { selector: 'edge[edgeType="completion"]', style: { width:3,'line-color':'#fb7185','target-arrow-color':'#fb7185' }},
         { selector: 'edge[edgeType="finding"]', style: { label:'',width:1.4,'line-color':'#facc15','target-arrow-color':'#facc15','curve-style':'bezier','line-style':'dashed','line-dash-pattern':[3,3],'target-arrow-shape':'diamond','arrow-scale':0.6 }},
+        { selector: 'edge[edgeType="digest"]', style: { label:'',width:1.2,'line-color':'#a5b4fc','target-arrow-color':'#a5b4fc','curve-style':'bezier','line-style':'dashed','line-dash-pattern':[2,4],'target-arrow-shape':'none','opacity':0.8 }},
 
         { selector: '.highlight', style: { 'z-index':999 }},
         { selector: 'edge.highlight', style: { 'z-index':999 }},
@@ -2971,7 +3385,9 @@ function cairnApp() {
           ex.data('label') !== n.data.label ||
           ex.data('description') !== n.data.description ||
           ex.data('width') !== n.data.width ||
-          ex.data('height') !== n.data.height
+          ex.data('height') !== n.data.height ||
+          ex.data('findingSeverity') !== n.data.findingSeverity ||
+          ex.data('digestKind') !== n.data.digestKind
         ) {
           ex.data(n.data); changed = true;
         }
@@ -2982,7 +3398,7 @@ function cairnApp() {
           const a = this.cy.add(e);
           this.fadeInFreshElement(a);
           changed = true;
-        } else if (ex.data('status') !== e.data.status) {
+        } else if (ex.data('status') !== e.data.status || ex.data('edgeType') !== e.data.edgeType) {
           ex.data(e.data);
         }
       }
@@ -3153,6 +3569,111 @@ function cairnApp() {
         this._resizeObserver = null;
       }
     },
+
+    // --- Minimap: a small canvas overview with a viewport rectangle ---------------
+
+    setupMinimap() {
+      const canvas = this.$refs.minimap;
+      if (!canvas || !this.cy) return;
+      this._minimapCanvas = canvas;
+      this._minimapCtx = canvas.getContext('2d');
+      this._minimapHandler = () => this.scheduleMinimap();
+      this.cy.on('viewport layoutstop add remove position', this._minimapHandler);
+      this._minimapResize = () => this.scheduleMinimap();
+      window.addEventListener('resize', this._minimapResize);
+      this.scheduleMinimap();
+    },
+
+    teardownMinimap() {
+      if (this._minimapHandler && this.cy) {
+        this.cy.off('viewport layoutstop add remove position', this._minimapHandler);
+      }
+      this._minimapHandler = null;
+      if (this._minimapResize) {
+        window.removeEventListener('resize', this._minimapResize);
+        this._minimapResize = null;
+      }
+      if (this._minimapFrame) {
+        cancelAnimationFrame(this._minimapFrame);
+        this._minimapFrame = null;
+      }
+      this._minimapCanvas = null;
+      this._minimapCtx = null;
+      this._minimapTransform = null;
+    },
+
+    scheduleMinimap() {
+      if (this._minimapFrame) return;
+      this._minimapFrame = requestAnimationFrame(() => {
+        this._minimapFrame = null;
+        this.drawMinimap();
+      });
+    },
+
+    drawMinimap() {
+      const canvas = this._minimapCanvas;
+      const ctx = this._minimapCtx;
+      const cy = this.cy;
+      if (!canvas || !ctx || !cy) return;
+      const width = canvas.width;
+      const height = canvas.height;
+      ctx.clearRect(0, 0, width, height);
+      const nodes = cy.nodes();
+      if (nodes.length === 0) return;
+      const box = cy.elements().boundingBox();
+      if (!(box.w > 0) || !(box.h > 0)) return;
+      const pad = 7;
+      const scale = Math.min((width - pad * 2) / box.w, (height - pad * 2) / box.h);
+      const ox = pad + (width - pad * 2 - box.w * scale) / 2 - box.x1 * scale;
+      const oy = pad + (height - pad * 2 - box.h * scale) / 2 - box.y1 * scale;
+      this._minimapTransform = { scale, ox, oy };
+      nodes.forEach(node => {
+        const pos = node.position();
+        ctx.fillStyle = this.nodeColor(node.data());
+        ctx.beginPath();
+        ctx.arc(ox + pos.x * scale, oy + pos.y * scale, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      const extent = cy.extent();
+      ctx.strokeStyle = 'rgba(79, 70, 229, 0.85)';
+      ctx.lineWidth = 1.2;
+      ctx.strokeRect(
+        ox + extent.x1 * scale,
+        oy + extent.y1 * scale,
+        Math.max(2, (extent.x2 - extent.x1) * scale),
+        Math.max(2, (extent.y2 - extent.y1) * scale)
+      );
+    },
+
+    onMinimapPointer(event) {
+      this.panFromMinimap(event);
+    },
+
+    onMinimapPointerMove(event) {
+      if (event.buttons === 1) this.panFromMinimap(event);
+    },
+
+    panFromMinimap(event) {
+      const canvas = this._minimapCanvas;
+      const cy = this.cy;
+      const transform = this._minimapTransform;
+      if (!canvas || !cy || !transform) return;
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const x = (event.clientX - rect.left) * (canvas.width / rect.width);
+      const y = (event.clientY - rect.top) * (canvas.height / rect.height);
+      const point = {
+        x: (x - transform.ox) / transform.scale,
+        y: (y - transform.oy) / transform.scale,
+      };
+      const container = cy.container();
+      if (!container) return;
+      const zoom = cy.zoom();
+      cy.animate(
+        { pan: { x: container.clientWidth / 2 - point.x * zoom, y: container.clientHeight / 2 - point.y * zoom } },
+        { duration: 120, easing: 'ease-out' }
+      );
+    },
     applySelectedLayout() {
       this.layoutMode = this.isValidLayoutMode(this.layoutMode) ? this.layoutMode : 'dagre_tb';
       this.localPrefs.layout_mode = this.layoutMode;
@@ -3255,6 +3776,12 @@ function cairnApp() {
         else this.sideTab = 'detail';
         return;
       }
+      if (nt === 'digest') {
+        this.selectDigest(node.data('digestKind'));
+        if (keepLogFocus) this.scrollTimelineToSelection();
+        else this.sideTab = 'detail';
+        return;
+      }
       if (e.originalEvent.shiftKey) {
         this.toggleFactSelection(id);
         if (keepLogFocus) this.scrollTimelineToSelection();
@@ -3334,7 +3861,7 @@ function cairnApp() {
         return;
       }
       if (this.selectedNode.type === 'step') this.applyLineageHighlightForStep(this.selectedNode.id);
-      if (this.selectedNode.type === 'goal' || this.selectedNode.type === 'finding') {
+      if (this.selectedNode.type === 'goal' || this.selectedNode.type === 'finding' || this.selectedNode.type === 'digest') {
         this.syncFactSelections();
         return;
       }

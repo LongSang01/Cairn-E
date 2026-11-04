@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS findings (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     step_id TEXT,
     kind TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'info',
     description TEXT NOT NULL,
     creator TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -123,6 +124,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     returncode INTEGER,
     timed_out INTEGER NOT NULL DEFAULT 0,
     duration_ms INTEGER,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
     error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT,
@@ -217,6 +223,11 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         ("error", "TEXT"),
         ("duration_ms", "INTEGER"),
         ("updated_at", "TEXT"),
+        ("input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("output_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("cache_read_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("total_tokens", "INTEGER NOT NULL DEFAULT 0"),
     ):
         if column not in session_columns:
             conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} {ddl}")
@@ -247,6 +258,11 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     step_columns = _table_columns(conn, "steps")
     if "title" not in step_columns:
         conn.execute("ALTER TABLE steps ADD COLUMN title TEXT")
+
+    # Findings gained a severity grade; older rows have no opinion and stay `info`.
+    finding_columns = _table_columns(conn, "findings")
+    if "severity" not in finding_columns:
+        conn.execute("ALTER TABLE findings ADD COLUMN severity TEXT NOT NULL DEFAULT 'info'")
 
     # A database created by Cairn 0.x has no goals table content: the root goal lived in a
     # reserved fact named "goal". Promote it to a real Goal node, then drop the fact.

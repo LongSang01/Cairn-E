@@ -183,16 +183,27 @@ def conclude(project_id: str, step_id: str, body: ConcludeStepRequest):
             did = next_finding_id(conn, project_id)
             conn.execute(
                 """
-                INSERT INTO findings (id, project_id, step_id, kind, description, creator, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO findings (
+                    id, project_id, step_id, kind, severity, description, creator, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (did, project_id, step_id, submitted.kind, submitted.description, body.worker, now),
+                (
+                    did,
+                    project_id,
+                    step_id,
+                    submitted.kind,
+                    submitted.severity,
+                    submitted.description,
+                    body.worker,
+                    now,
+                ),
             )
             findings.append(
                 Finding(
                     id=did,
                     kind=submitted.kind,
                     description=submitted.description,
+                    severity=submitted.severity,
                     step=step_id,
                     creator=body.worker,
                     created_at=now,

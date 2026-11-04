@@ -63,7 +63,7 @@ def test_decide_payload_collects_title_recall_and_doc_ids() -> None:
             "accepted": True,
             "data": {
                 "recall": ["redis", "  ", "kerberos"],
-                "doc_ids": ["doc001", "doc002"],
+                "doc_ids": [{"id": "doc001"}, {"id": "doc002", "from": 10}],
                 "steps": [{"from": ["f001"], "description": "one", "title": "probe redis"}],
             },
         },
@@ -75,8 +75,66 @@ def test_decide_payload_collects_title_recall_and_doc_ids() -> None:
     )
 
     assert kind == "actions"
-    assert lookups == {"recall": ["redis", "kerberos"], "doc_ids": ["doc001", "doc002"]}
+    assert lookups == {
+        "recall": ["redis", "kerberos"],
+        "doc_ids": [{"id": "doc001", "from": 0}, {"id": "doc002", "from": 10}],
+    }
     assert data["steps"]["add"][0]["title"] == "probe redis"
+
+
+def test_decide_payload_accepts_document_resume_offsets() -> None:
+    _kind, _data, lookups = validate_decide_payload(
+        {
+            "accepted": True,
+            "data": {"doc_ids": [{"id": "doc001"}, {"id": "doc002", "from": 4_000}]},
+        },
+        open_steps_empty=False,
+        max_steps=3,
+        fact_ids=FACTS,
+        goal_ids=GOALS,
+        step_ids=STEPS,
+    )
+
+    assert lookups["doc_ids"] == [
+        {"id": "doc001", "from": 0},
+        {"id": "doc002", "from": 4_000},
+    ]
+
+
+def test_decide_payload_rejects_a_bare_document_id() -> None:
+    with pytest.raises(ValueError, match="must be an object"):
+        validate_decide_payload(
+            {"accepted": True, "data": {"doc_ids": ["doc001"]}},
+            open_steps_empty=False,
+            max_steps=3,
+            fact_ids=FACTS,
+            goal_ids=GOALS,
+            step_ids=STEPS,
+        )
+
+
+def test_decide_payload_rejects_a_negative_resume_offset() -> None:
+    with pytest.raises(ValueError, match="must not be negative"):
+        validate_decide_payload(
+            {"accepted": True, "data": {"doc_ids": [{"id": "doc001", "from": -1}]}},
+            open_steps_empty=False,
+            max_steps=3,
+            fact_ids=FACTS,
+            goal_ids=GOALS,
+            step_ids=STEPS,
+        )
+
+
+def test_decide_payload_rejects_a_non_integer_resume_offset() -> None:
+    with pytest.raises(ValueError, match="must be an integer"):
+        validate_decide_payload(
+            {"accepted": True, "data": {"doc_ids": [{"id": "doc001", "from": "4000"}]}},
+            open_steps_empty=False,
+            max_steps=3,
+            fact_ids=FACTS,
+            goal_ids=GOALS,
+            step_ids=STEPS,
+        )
 
 
 def test_decide_payload_caps_recall_queries_and_documents() -> None:
@@ -85,7 +143,7 @@ def test_decide_payload_caps_recall_queries_and_documents() -> None:
             "accepted": True,
             "data": {
                 "recall": ["a", "b", "c", "d"],
-                "doc_ids": [f"doc{index:03d}" for index in range(1, 9)],
+                "doc_ids": [{"id": f"doc{index:03d}"} for index in range(1, 9)],
                 "steps": [{"from": ["f001"], "description": "one"}],
             },
         },
@@ -97,7 +155,9 @@ def test_decide_payload_caps_recall_queries_and_documents() -> None:
     )
 
     assert lookups["recall"] == ["a", "b", "c"]
-    assert lookups["doc_ids"] == [f"doc{index:03d}" for index in range(1, 6)]
+    assert lookups["doc_ids"] == [
+        {"id": f"doc{index:03d}", "from": 0} for index in range(1, 6)
+    ]
 
 
 def test_decide_payload_rejects_non_array_recall() -> None:
@@ -268,10 +328,40 @@ def test_execute_payload_accepts_findings_and_abandon() -> None:
     assert kind == "result"
     assert data == {
         "facts": [],
-        "findings": [{"kind": "flaw", "description": "product"}],
+        "findings": [{"kind": "flaw", "description": "product", "severity": "info"}],
         "status": "abandoned",
         "note": None,
     }
+
+
+def test_execute_payload_normalises_finding_severity() -> None:
+    _kind, data = validate_execute_payload(
+        {
+            "accepted": True,
+            "data": {
+                "findings": [
+                    {"kind": "flaw", "severity": "HIGH", "description": "product"},
+                    {"kind": "flaw", "severity": " medium ", "description": "product"},
+                ],
+                "status": "abandoned",
+            },
+        }
+    )
+
+    assert [item["severity"] for item in data["findings"]] == ["high", "medium"]
+
+
+def test_execute_payload_rejects_unknown_severity() -> None:
+    with pytest.raises(ValueError, match="severity must be one of"):
+        validate_execute_payload(
+            {
+                "accepted": True,
+                "data": {
+                    "findings": [{"kind": "flaw", "severity": "urgent", "description": "product"}],
+                    "status": "abandoned",
+                },
+            }
+        )
 
 
 def test_pi_driver_extracts_session_and_last_assistant_text() -> None:
@@ -371,6 +461,154 @@ def test_codex_driver_extracts_thread_and_agent_messages() -> None:
 
     assert driver.extract_session(None, stdout, "") == "thread-1"
     assert driver.extract_response_text(stdout, "") == "first\nsecond"
+
+
+def test_pi_driver_sums_token_usage_across_turns() -> None:
+    stdout = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "turn_end",
+                    "message": {
+                        "role": "assistant",
+                        "usage": {"input": 10, "output": 4, "cacheRead": 3, "cacheWrite": 1},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "turn_end",
+                    "message": {"role": "assistant", "usage": {"input": 5, "output": 2}},
+                }
+            ),
+        ]
+    )
+
+    usage = PiDriver().extract_usage(stdout, "")
+
+    assert usage is not None
+    assert usage.payload() == {
+        "input_tokens": 15,
+        "output_tokens": 6,
+        "cache_read_tokens": 3,
+        "cache_write_tokens": 1,
+        "total_tokens": 25,
+    }
+
+
+def test_pi_driver_prefers_agent_end_totals() -> None:
+    stdout = "\n".join(
+        [
+            json.dumps({"type": "turn_end", "message": {"usage": {"input": 10, "output": 4}}}),
+            json.dumps(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {"role": "assistant", "usage": {"input": 10, "output": 4}},
+                        {"role": "assistant", "usage": {"input": 2, "output": 1}},
+                    ],
+                }
+            ),
+        ]
+    )
+
+    usage = PiDriver().extract_usage(stdout, "")
+
+    assert usage is not None
+    assert usage.total_tokens == 17
+
+
+def test_claudecode_driver_reads_result_usage() -> None:
+    stdout = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "result": '{"accepted":true}',
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 30,
+                "cache_creation_input_tokens": 5,
+            },
+        }
+    )
+
+    usage = ClaudeCodeDriver().extract_usage(stdout, "")
+
+    assert usage is not None
+    assert usage.payload() == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cache_read_tokens": 30,
+        "cache_write_tokens": 5,
+        "total_tokens": 155,
+    }
+
+
+def test_codex_driver_sums_usage_per_completed_turn() -> None:
+    stdout = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 20},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {"input_tokens": 7, "cached_input_tokens": 2, "output_tokens": 3},
+                }
+            ),
+        ]
+    )
+
+    usage = CodexDriver().extract_usage(stdout, "")
+
+    assert usage is not None
+    # OpenAI counts cached tokens inside input; the parts here must stay disjoint.
+    assert usage.payload() == {
+        "input_tokens": 65,
+        "output_tokens": 23,
+        "cache_read_tokens": 42,
+        "cache_write_tokens": 0,
+        "total_tokens": 130,
+    }
+
+
+def test_claudecode_driver_falls_back_to_per_model_usage() -> None:
+    stdout = json.dumps(
+        {
+            "type": "result",
+            "result": '{"accepted":true}',
+            "modelUsage": {
+                "claude-sonnet": {
+                    "inputTokens": 60,
+                    "outputTokens": 10,
+                    "cacheReadInputTokens": 5,
+                    "cacheCreationInputTokens": 2,
+                },
+                "claude-haiku": {"inputTokens": 4, "outputTokens": 1},
+            },
+        }
+    )
+
+    usage = ClaudeCodeDriver().extract_usage(stdout, "")
+
+    assert usage is not None
+    assert usage.payload() == {
+        "input_tokens": 64,
+        "output_tokens": 11,
+        "cache_read_tokens": 5,
+        "cache_write_tokens": 2,
+        "total_tokens": 82,
+    }
+
+
+def test_driver_without_usage_metadata_reports_nothing() -> None:
+    assert ClaudeCodeDriver().extract_usage("plain answer", "") is None
+    assert CodexDriver().extract_usage('{"type":"thread.started"}', "") is None
+    assert PiDriver().extract_usage('{"type":"session","id":"s"}', "") is None
 
 
 def test_close_stream_closes_response_even_when_stream_close_fails() -> None:

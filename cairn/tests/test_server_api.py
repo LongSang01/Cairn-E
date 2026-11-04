@@ -75,13 +75,14 @@ def test_project_workflow_creates_goal_step_finding_completes_and_reopens(client
             "worker": "executor",
             "status": "done",
             "facts": [{"description": "new fact"}],
-            "findings": [{"kind": "flaw", "description": "a product"}],
+            "findings": [{"kind": "flaw", "severity": "high", "description": "a product"}],
         },
     )
     assert response.status_code == 200
     payload = response.json()
     assert payload["facts"] == [{"id": "f001", "description": "new fact", "title": None}]
     assert payload["findings"][0]["kind"] == "flaw"
+    assert payload["findings"][0]["severity"] == "high"
     assert payload["findings"][0]["step"] == "s001"
     assert payload["step"]["status"] == "done"
     assert payload["step"]["to"] == "f001"
@@ -103,6 +104,19 @@ def test_project_workflow_creates_goal_step_finding_completes_and_reopens(client
     detail = client.get(f"/projects/{project_id}").json()
     assert [f["id"] for f in detail["facts"]] == ["origin", "f001"]
     assert [d["kind"] for d in detail["findings"]] == ["flaw"]
+    assert [d["severity"] for d in detail["findings"]] == ["high"]
+
+    summary = client.get(f"/projects/{project_id}/findings/summary")
+    assert summary.status_code == 200
+    assert summary.json()["total"] == 1
+    assert summary.json()["by_severity"] == {"high": 1}
+    assert summary.json()["by_kind"] == {"flaw": 1}
+    assert summary.json()["findings"][0]["severity"] == "high"
+
+    report = client.get(f"/projects/{project_id}/export", params={"format": "findings"})
+    assert report.status_code == 200
+    assert "## High (1)" in report.text
+    assert "**d001** [flaw]" in report.text
 
     response = client.post(
         f"/projects/{project_id}/reopen",
@@ -181,9 +195,15 @@ def test_titles_documents_and_recall_round_trip(client: TestClient) -> None:
     assert recall["facts"][0]["title"] == "redis reachable"
     assert recall["facts"][0]["doc_ids"] == [document_id]
 
-    plan = {"queries": ["redis"], "doc_ids": [document_id]}
+    plan = {"queries": ["redis"], "doc_ids": [{"id": document_id, "from": 4_000}]}
     assert client.put(f"/projects/{project_id}/recall-plan", json=plan).json() == plan
     assert client.get(f"/projects/{project_id}/recall-plan").json() == plan
+
+    # A bare id is not a valid read request: the plan carries structured entries.
+    bare = client.put(
+        f"/projects/{project_id}/recall-plan", json={"queries": [], "doc_ids": [document_id]}
+    )
+    assert bare.status_code == 422
 
     export = yaml.safe_load(client.get(f"/projects/{project_id}/export?format=yaml").text)
     facts = {fact["id"]: fact for fact in export["facts"]}

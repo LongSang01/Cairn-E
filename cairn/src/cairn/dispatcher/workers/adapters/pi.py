@@ -5,7 +5,13 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from cairn.dispatcher.config import WorkerConfig
-from cairn.dispatcher.workers.base import DriverResult, WorkerDriver
+from cairn.dispatcher.workers.base import (
+    DriverResult,
+    Usage,
+    WorkerDriver,
+    add_usage,
+    normalize_usage,
+)
 from cairn.dispatcher.workers.health import HealthResult, http_ping, proxies_from_env
 from cairn.dispatcher.workers.stream import iter_json_events
 
@@ -158,6 +164,26 @@ class PiDriver(WorkerDriver):
             if isinstance(text, str) and text:
                 parts.append(text)
         return "\n".join(parts).strip() or stdout
+
+    def extract_usage(self, stdout: str, stderr: str) -> Usage | None:
+        """pi reports usage per message; `agent_end` repeats the whole run."""
+        turn_usage: Usage | None = None
+        for event in self._iter_events(stdout):
+            event_type = event.get("type")
+            if event_type == "agent_end":
+                total: Usage | None = None
+                for message in event.get("messages") or []:
+                    if isinstance(message, dict):
+                        total = add_usage(total, normalize_usage(message.get("usage")))
+                if total is not None:
+                    return total
+            elif event_type == "turn_end":
+                message = event.get("message")
+                found = normalize_usage(message.get("usage")) if isinstance(message, dict) else None
+                if found is None:
+                    found = normalize_usage(event.get("usage"))
+                turn_usage = add_usage(turn_usage, found)
+        return turn_usage
 
     def _wrap_with_models(self, worker: WorkerConfig, pi_argv: list[str], *, enable_tools: bool = True) -> list[str]:
         script = (

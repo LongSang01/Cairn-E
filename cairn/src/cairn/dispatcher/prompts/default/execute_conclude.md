@@ -9,12 +9,14 @@ Report only what is already confirmed. If nothing is confirmed, abandon the step
 ```json
 {"accepted": true, "data": {
   "facts": [{"description": "confirmed statement"}],
-  "findings": [{"kind": "task-defined kind", "description": "product of the search"}],
+  "findings": [{"kind": "task-defined kind", "severity": "critical|high|medium|low|info",
+                "description": "product of the search"}],
   "status": "done"
 }}
 ```
 
 - Do not invent results you did not observe.
+- Grade each finding with `severity` = critical, high, medium, low or info, based only on what was confirmed.
 - Use `"status": "abandoned"` if the step produced nothing.
 - Output this JSON and stop.
 

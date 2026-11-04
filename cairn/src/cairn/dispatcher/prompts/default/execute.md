@@ -14,7 +14,8 @@ Return one raw JSON object, nothing else:
 {"accepted": true, "data": {
   "facts": [{"title": "one-line gist", "description": "a confirmed, objective statement about the world",
              "documents": [{"title": "evidence", "content": "raw output worth keeping"}]}],
-  "findings": [{"kind": "task-defined kind", "description": "a product of the search worth keeping"}],
+  "findings": [{"kind": "task-defined kind", "severity": "critical|high|medium|low|info",
+                "description": "a product of the search worth keeping"}],
   "status": "done",
   "note": "optional"
 }}
@@ -26,6 +27,7 @@ Return one raw JSON object, nothing else:
 - `title` is a short label (a few words) shown in compacted graphs; `description` keeps the full statement.
 - Put bulky evidence (raw tool output, file fragments) in `documents` instead of the description. They are stored with the fact and fetched only when a later Decide asks for them.
 - A finding is something the search produced that is not the goal itself. Its `kind` is defined by the task; reuse an existing kind when possible.
+- Grade every finding with `severity`: `critical` (immediate compromise or a goal reached with it), `high` (direct path to compromise), `medium` (useful weakness or disclosure), `low` (minor hygiene issue), `info` (context only, no impact). Pick the weakest grade the evidence supports; do not inflate.
 - `status` is `done` when the step was carried out, `abandoned` when the direction is invalid or impossible.
 - A `done` step must submit a fact, a finding, or a note. When nothing new was confirmed, report the findings and a note that says what was tried and why it produced no fact; never invent a fact just to close the step.
 - If you cannot do the step at all: `{"accepted": false, "reason": "..."}`.
