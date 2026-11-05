@@ -37,7 +37,8 @@ def test_metrics_exposes_process_and_db_series(client: TestClient) -> None:
     assert "cairn_process_start_time_seconds" in text
     assert "cairn_db_reachable 1.0" in text
     assert "cairn_db_busy_total 0.0" in text
-    assert "cairn_schema_version 1.0" in text
+    expected_version = float(max(version for version, _ in db._MIGRATIONS))
+    assert f"cairn_schema_version {expected_version}" in text
     assert "cairn_projects 1.0" in text
     assert "# TYPE cairn_sessions gauge" in text
     assert "# TYPE cairn_steps gauge" in text

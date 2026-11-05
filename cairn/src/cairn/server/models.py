@@ -116,6 +116,9 @@ class SubmittedSessionMessage(BaseModel):
     role: SessionRole
     content: str
     raw: str | None = None
+    # Client-generated dedupe key: re-sending a message with the same msg_id is a
+    # no-op, so upload retries cannot corrupt the transcript.
+    msg_id: str | None = None
 
 
 class CreateSessionRequest(TokenUsage):
@@ -125,6 +128,9 @@ class CreateSessionRequest(TokenUsage):
     step: str | None = None
     summary: str = Field(default="", max_length=300)
     native_session: str | None = None
+    # Client-generated dedupe key for the whole upload: a retried create converges
+    # onto the session that already landed instead of recording a duplicate run.
+    client_key: str | None = None
     # Required on purpose: a live run creates the session with `running`, the
     # end-of-run fallback with the real outcome. Defaulting here would silently
     # record a wrong status when a caller forgets to choose one.

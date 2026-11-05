@@ -13,7 +13,6 @@ from cairn.dispatcher.runtime.process import ProcessResult
 from cairn.dispatcher.session import SessionStream, build_messages, redact
 from cairn.dispatcher.workers.usage import Usage
 from cairn.server import db
-from cairn.server.app import app
 from cairn.server.routers import sessions as sessions_router
 from cairn.server.services import utcnow_before
 
@@ -22,14 +21,6 @@ from cairn.server.services import utcnow_before
 def _no_upload_backoff(monkeypatch) -> None:
     # Retry behaviour is under test; the wall-clock sleep between attempts is not.
     monkeypatch.setattr(session_module, "UPLOAD_RETRY_BACKOFF_SECONDS", 0)
-
-
-@pytest.fixture
-def client(tmp_path, monkeypatch) -> TestClient:
-    monkeypatch.setattr(db, "_db_path", None)
-    db.configure(tmp_path / "cairn.db")
-    with TestClient(app) as test_client:
-        yield test_client
 
 
 def _create_project(client: TestClient) -> str:
@@ -390,8 +381,12 @@ def test_session_stream_appends_while_the_worker_runs() -> None:
     stream.start()
 
     assert stream.session_id == "x001"
-    assert client.created[0]["status"] == "running"
-    assert client.created[0]["messages"] == [{"role": "user", "content": "solve it"}]
+    created = client.created[0]
+    assert created["status"] == "running"
+    # 会话创建请求携带 client_key,消息在写入前盖上稳定 msg_id(重试不换号)。
+    assert created["client_key"]
+    assert [(m["role"], m["content"]) for m in created["messages"]] == [("user", "solve it")]
+    assert created["messages"][0]["msg_id"]
 
     stream.feed('{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}\n')
     assert _wait_for(lambda: bool(client.appended))
@@ -502,8 +497,10 @@ def test_session_stream_keeps_raw_output_when_events_are_missing() -> None:
     assert "boom" in client.appended[0][-1]["content"]
 
 
-def _sse_events(client: TestClient, url: str) -> list[tuple[str, dict | None]]:
-    with client.stream("GET", url) as response:
+def _sse_events(
+    client: TestClient, url: str, headers: dict[str, str] | None = None
+) -> list[tuple[str, dict | None]]:
+    with client.stream("GET", url, headers=headers) as response:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")
         events: list[tuple[str, dict | None]] = []
@@ -664,7 +661,7 @@ def test_stream_empty_running_session_sends_one_snapshot(
     chunks = asyncio.run(drive_stream(ticks=5))
 
     assert sum(chunk.count("event: snapshot") for chunk in chunks) == 1
-    assert chunks[0].startswith("event: snapshot")
+    assert "event: snapshot" in chunks[0]
 
 
 def test_session_stream_drops_messages_when_server_closed_the_session() -> None:
@@ -870,3 +867,168 @@ def test_sessions_etag_revalidation(client):
     assert client.get(
         f"/projects/{pid}/sessions/{sid}", headers={"If-None-Match": detail.headers["etag"]}
     ).status_code == 200
+
+
+# ------------------------------------------------- 幂等写入(契约 1.0)
+
+
+def test_create_session_with_client_key_is_idempotent(client: TestClient) -> None:
+    project_id = _create_project(client)
+    payload = _session_payload(status="running", messages=[])
+    payload["client_key"] = "dispatch-001"
+    payload["messages"] = [
+        {"role": "user", "content": "solve it", "msg_id": "m0"},
+        {"role": "assistant", "content": "working", "msg_id": "m1"},
+    ]
+
+    first = client.post(f"/projects/{project_id}/sessions", json=payload)
+    assert first.status_code == 201
+    session_id = first.json()["id"]
+
+    # 同 client_key 重试:返回同一会话,已带 msg_id 的消息不重复落库。
+    retry = client.post(f"/projects/{project_id}/sessions", json=payload)
+    assert retry.status_code == 201
+    assert retry.json()["id"] == session_id
+    assert [m["content"] for m in retry.json()["messages"]] == ["solve it", "working"]
+
+    # 重试携带增量消息:只补新增的那条,seq 连续不回绕。
+    payload["messages"] = [
+        {"role": "user", "content": "solve it", "msg_id": "m0"},
+        {"role": "assistant", "content": "more", "msg_id": "m2"},
+    ]
+    merged = client.post(f"/projects/{project_id}/sessions", json=payload)
+    assert merged.status_code == 201
+    assert merged.json()["id"] == session_id
+    messages = merged.json()["messages"]
+    assert [m["content"] for m in messages] == ["solve it", "working", "more"]
+    assert [m["seq"] for m in messages] == [0, 1, 2]
+
+
+def test_create_session_does_not_resurrect_a_finished_session(client: TestClient) -> None:
+    project_id = _create_project(client)
+    terminal = _session_payload(messages=[{"role": "user", "content": "solve it", "msg_id": "m0"}])
+    terminal["client_key"] = "dispatch-002"
+    created = client.post(f"/projects/{project_id}/sessions", json=terminal)
+    assert created.status_code == 201
+    session_id = created.json()["id"]
+
+    # 幻影场景:迟到的 "running" 创建(同 client_key)只合并消息,不复活会话。
+    late_running = _session_payload(status="running", returncode=None, duration_ms=None, messages=[])
+    late_running["client_key"] = "dispatch-002"
+    late_running["messages"] = [
+        {"role": "user", "content": "solve it", "msg_id": "m0"},
+        {"role": "assistant", "content": "answer", "msg_id": "m1"},
+    ]
+    merged = client.post(f"/projects/{project_id}/sessions", json=late_running)
+    assert merged.status_code == 201
+    assert merged.json()["id"] == session_id
+    assert merged.json()["status"] == "success"  # 终态不被 running 覆盖
+    assert [m["content"] for m in merged.json()["messages"]] == ["solve it", "answer"]
+
+    # 会话已终态后,后续创建不再改写任何字段。
+    again = client.post(f"/projects/{project_id}/sessions", json=late_running)
+    assert again.status_code == 201
+    assert again.json() == merged.json()
+
+
+def test_append_deduplicates_messages_by_msg_id(client: TestClient) -> None:
+    project_id = _create_project(client)
+    payload = _session_payload(status="running", messages=[])
+    payload["client_key"] = "dispatch-003"
+    created = client.post(f"/projects/{project_id}/sessions", json=payload).json()
+    url = f"/projects/{project_id}/sessions/{created['id']}/messages"
+
+    first = client.post(
+        url,
+        json={
+            "messages": [
+                {"role": "user", "content": "a", "msg_id": "a"},
+                {"role": "user", "content": "b", "msg_id": "b"},
+            ]
+        },
+    )
+    assert first.status_code == 200
+    assert [m["seq"] for m in first.json()["messages"]] == [0, 1]
+
+    # 重试批次只落新增消息;重复 msg_id 静默跳过,seq 不回绕。
+    second = client.post(
+        url,
+        json={
+            "messages": [
+                {"role": "user", "content": "b", "msg_id": "b"},
+                {"role": "user", "content": "c", "msg_id": "c"},
+            ]
+        },
+    )
+    assert second.status_code == 200
+    messages = second.json()["messages"]
+    assert [(m["seq"], m["content"]) for m in messages] == [(0, "a"), (1, "b"), (2, "c")]
+
+
+# ------------------------------------------------- SSE 断点续传(契约 1.0)
+
+
+def test_stream_resume_skips_snapshot_and_replays_only_newer(client: TestClient) -> None:
+    project_id = _create_project(client)
+    created = client.post(
+        f"/projects/{project_id}/sessions",
+        json=_session_payload(
+            status="running",
+            returncode=None,
+            duration_ms=None,
+            messages=[
+                {"role": "user", "content": "q", "msg_id": "m0"},
+                {"role": "assistant", "content": "a0", "msg_id": "m1"},
+                {"role": "assistant", "content": "a1", "msg_id": "m2"},
+            ],
+        ),
+    ).json()
+    # 先补一条消息,让恢复流有新内容可回放。
+    client.post(
+        f"/projects/{project_id}/sessions/{created['id']}/messages",
+        json={"messages": [{"role": "assistant", "content": "a2", "msg_id": "m3"}]},
+    )
+
+    async def drive_stream() -> list[str]:
+        # TestClient 缓冲整个响应,活跃流直接驱动 SSE 生成器。
+        stream = sessions_router.session_event_stream(
+            project_id, created["id"], last_event_id=1
+        )
+        chunk = await anext(stream)
+        await stream.aclose()
+        return [chunk]
+
+    chunks = asyncio.run(drive_stream())
+    # 断点恢复不重发快照,只回放 seq > 1 的增量;事件 id 为批内最大 seq。
+    assert "event: snapshot" not in chunks[0]
+    assert "id: 3" in chunks[0]
+    results = _parse_sse(chunks)
+    assert [name for name, _ in results] == ["messages"]
+    assert [m["seq"] for m in results[0][1]["messages"]] == [2, 3]
+
+
+def test_stream_resume_over_http_honours_last_event_id_and_since_seq(client: TestClient) -> None:
+    project_id = _create_project(client)
+    created = client.post(
+        f"/projects/{project_id}/sessions",
+        json=_session_payload(
+            messages=[
+                {"role": "user", "content": "q", "msg_id": "m0"},
+                {"role": "assistant", "content": "a0", "msg_id": "m1"},
+                {"role": "assistant", "content": "a1", "msg_id": "m2"},
+            ]
+        ),
+    ).json()
+    url = f"/projects/{project_id}/sessions/{created['id']}/stream"
+
+    resumed = _sse_events(client, url, headers={"Last-Event-ID": "1"})
+    assert [name for name, _ in resumed] == ["messages", "end"]
+    assert [m["seq"] for m in resumed[0][1]["messages"]] == [2]
+
+    incremental = _sse_events(client, url + "?since_seq=0")
+    assert [name for name, _ in incremental] == ["messages", "end"]
+    assert [m["seq"] for m in incremental[0][1]["messages"]] == [1, 2]
+
+    # 非法 Last-Event-ID 回退全量快照,客户端仍可恢复。
+    fallback = _sse_events(client, url, headers={"Last-Event-ID": "not-a-number"})
+    assert [name for name, _ in fallback] == ["snapshot", "end"]

@@ -516,7 +516,9 @@ def test_decide_records_model_session(monkeypatch) -> None:
     assert payload["status"] == "running"
     assert payload["worker"] == "test-worker"
     assert payload["summary"].startswith("决策下一步")
-    assert payload["messages"][0] == {"role": "user", "content": driver.execute_prompts[0]}
+    assert payload["messages"][0]["role"] == "user"
+    assert payload["messages"][0]["content"] == driver.execute_prompts[0]
+    assert payload["messages"][0]["msg_id"]
 
     assert len(client.finished_sessions) == 1
     _project_id, session_id, finished = client.finished_sessions[0]

@@ -3,11 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+from fastapi.testclient import TestClient
+
 from cairn.dispatcher.config import DispatchConfig
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.workers.base import DriverResult
 from cairn.dispatcher.workers.health import HealthResult
 from cairn.dispatcher.workers.usage import Usage
+from cairn.server import db
+from cairn.server.app import app
 from cairn.server.models import (
     ContextSummary,
     Document,
@@ -22,6 +27,15 @@ from cairn.server.models import (
     RecallResponse,
     Step,
 )
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch) -> TestClient:
+    """Fresh API client over an isolated temporary database."""
+    monkeypatch.setattr(db, "_db_path", None)
+    db.configure(tmp_path / "cairn.db")
+    with TestClient(app) as test_client:
+        yield test_client
 
 
 def make_config(runtime: dict | None = None) -> DispatchConfig:

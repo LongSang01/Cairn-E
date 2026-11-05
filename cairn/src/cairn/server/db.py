@@ -248,8 +248,31 @@ def _migration_001_baseline(conn: sqlite3.Connection) -> None:
     _migrate_legacy_intents(conn)
 
 
+def _migration_002_idempotency(conn: sqlite3.Connection) -> None:
+    """Client-supplied dedupe keys so retried uploads cannot duplicate rows.
+
+    The dispatcher retries session creates and message appends after network
+    failures; `client_key` (per session object) and `client_msg_id` (per message)
+    let the server land each upload exactly once. The unique indexes are partial
+    so the many legacy rows without a key are unaffected.
+    """
+    if "client_key" not in _table_columns(conn, "sessions"):
+        conn.execute("ALTER TABLE sessions ADD COLUMN client_key TEXT")
+    if "client_msg_id" not in _table_columns(conn, "session_messages"):
+        conn.execute("ALTER TABLE session_messages ADD COLUMN client_msg_id TEXT")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_client_key "
+        "ON sessions (project_id, client_key) WHERE client_key IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_client_msg_id "
+        "ON session_messages (session_id, client_msg_id) WHERE client_msg_id IS NOT NULL"
+    )
+
+
 _MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (1, _migration_001_baseline),
+    (2, _migration_002_idempotency),
 )
 
 

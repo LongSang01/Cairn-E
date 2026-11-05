@@ -199,8 +199,9 @@ def test_new_database_records_the_baseline_migration(tmp_path, monkeypatch) -> N
     with db.get_conn() as conn:
         again = [row["version"] for row in conn.execute("SELECT version FROM schema_migrations")]
 
-    assert versions == [1]
-    assert again == [1]
+    registered = [version for version, _ in db._MIGRATIONS]
+    assert versions == registered
+    assert again == registered
 
 
 def test_get_conn_reuses_one_connection_per_thread(tmp_path, monkeypatch) -> None:

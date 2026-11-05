@@ -5,6 +5,7 @@ import logging
 import re
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterable
 from typing import Any, Self
 
@@ -432,6 +433,10 @@ class SessionStream:
         self._step_id = step_id
         self._summary = summary
         self._native_session = native_session
+        # One id for the whole session object: the live create and the end-of-run
+        # fallback upload carry the same key, so whichever lands first wins and a
+        # retried create converges onto the session already recorded.
+        self._client_key = uuid.uuid4().hex
         self._flush_interval = flush_interval
         self._heartbeat_interval = heartbeat_interval
         self._last_contact = time.monotonic()
@@ -461,10 +466,22 @@ class SessionStream:
             "step": self._step_id,
             "summary": self._summary,
             "native_session": self._native_session,
+            "client_key": self._client_key,
             "status": status,
-            "messages": messages,
+            "messages": self._stamp_ids(messages),
             **fields,
         }
+
+    @staticmethod
+    def _stamp_ids(messages: list[dict]) -> list[dict]:
+        """Give each message a stable dedupe id so retried uploads land exactly once.
+
+        `setdefault` keeps ids stable across retries and requeues: the same dict
+        travels with the batch and its id survives every re-send.
+        """
+        for message in messages:
+            message.setdefault("msg_id", uuid.uuid4().hex)
+        return messages
 
     def start(self) -> None:
         with self._lock:
@@ -632,7 +649,7 @@ class SessionStream:
         if session_id is None:
             return 0
         with self._lock:
-            batch = self._builder.take_pending()
+            batch = self._stamp_ids(self._builder.take_pending())
         if not batch:
             return 0
         response = self._send_with_retry(

@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Response, status
 
 from cairn import __version__
+from cairn.contracts import CONTRACT_VERSION
 from cairn.server.db import get_conn
 
 router = APIRouter(tags=["health"])
@@ -27,4 +28,5 @@ def healthz(response: Response):
         "version": __version__,
         "database": "ok",
         "schema_version": row["version"] or 0,
+        "contract_version": CONTRACT_VERSION,
     }

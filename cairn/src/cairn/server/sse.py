@@ -22,9 +22,15 @@ SSE_HEADERS = {
 }
 
 
-def sse_event(name: str, payload: dict) -> str:
-    """Frame one named event, JSON-encoded and unescaped for CJK output."""
-    return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+def sse_event(name: str, payload: dict, *, event_id: int | None = None) -> str:
+    """Frame one named event, JSON-encoded and unescaped for CJK output.
+
+    `event_id` becomes the SSE `id:` field: a reconnecting client sends the last id
+    it saw back as `Last-Event-ID`, which is exactly the resume token the session
+    stream needs (the highest message seq it has already received).
+    """
+    id_line = f"id: {event_id}\n" if event_id is not None else ""
+    return f"{id_line}event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 def sse_response(events: AsyncIterator[str] | Iterator[str]) -> StreamingResponse:
