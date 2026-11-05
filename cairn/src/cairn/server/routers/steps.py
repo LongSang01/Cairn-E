@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from cairn.server.db import get_conn
 from cairn.server.models import (
@@ -13,6 +13,7 @@ from cairn.server.models import (
 )
 from cairn.server.services import (
     check_project_active,
+    expire_steps,
     get_claimable_step_or_404,
     get_releasable_step_or_404,
     get_step_or_404,
@@ -111,12 +112,26 @@ def release(project_id: str, step_id: str, body: HeartbeatRequest):
 
 @router.post("/projects/{project_id}/steps/{step_id}/update", response_model=Step)
 def update_step(project_id: str, step_id: str, body: UpdateStepRequest):
-    """Decide's reprioritize / abandon operation. Steps are never deleted."""
+    """Decide's reprioritize / abandon operation. Steps are never deleted.
+
+    A step that is currently ``running`` is owned by its executor: abandoning it here
+    would kill a run whose result is already on its way, and the finished work would be
+    dropped instead of closing the step (proj_008: the final verification finished with
+    exit code 0, but Decide abandoned the step mid-run, so its fact was never recorded
+    and the project could not be completed). The executor's own conclusion, its lease
+    expiring, or the project being stopped are the only ways to end a running step.
+    """
     with get_conn() as conn:
         check_project_active(conn, project_id)
+        expire_steps(conn, project_id)
         row = get_step_or_404(conn, project_id, step_id)
         if row["status"] in ("done", "abandoned"):
             return step_to_model(conn, row, project_id)
+        if body.status == "abandoned" and row["status"] == "running":
+            raise HTTPException(
+                409,
+                f"Step {step_id} is running; its executor must conclude it before it can be abandoned",
+            )
 
         now = utcnow()
         if body.priority is not None:

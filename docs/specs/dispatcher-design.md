@@ -152,6 +152,13 @@ checkpoint 在 Decide 成功后**重新读取图**再写入，这样"Decide 只�
 - 所有 fact / goal / step 引用必须存在于图中，否则整次运行失败。
 - `complete.from` 非空。
 - 新增 Step 数不超过 `max_steps`（超出截断）。
+- `complete` 只有在没有任何 open Step、没有未关闭子 Goal 时才生效。同一 payload 里用
+  `steps.update` 废弃掉最后的 **pending** Step、用 `goals.close` 关掉最后的子 Goal 是正常收尾
+  （先落图操作，最后原子完成）。
+- `running` 的 Step 不能在这个 payload 里被关闭：它归执行它的 worker，服务端会拒绝废弃，
+  `complete` 也随之不生效——等它 `conclude` 出事实后下一轮 Decide 再完成。
+- 携带 `goals.add` / `steps.add` / 只改 `priority`、`note` 的 `steps.update` 时，图操作保留、
+  `complete` 丢弃；既没有任何图操作又有 open Step 的裸 `complete` → 失败。
 - 没有任何动作且当前没有 open Step → 失败（必须推进）。
 - `accepted: false` → 直接判定 rejected。
 

@@ -17,6 +17,9 @@ from ._common import WorkerSelection
 
 LOG = logging.getLogger("cairn.dispatcher.scheduler.loop")
 
+# Bounded budget for Decide runs triggered by an idle (fully terminal) graph.
+MAX_IDLE_DECIDE_RUNS = 3
+
 
 class DispatchMixin:
     def _dispatch_available(self, summaries: list[ProjectSummary]) -> None:
@@ -202,6 +205,12 @@ class DispatchMixin:
                 claim.status_code,
             )
             return False
+        if trigger.startswith("idle:"):
+            # Burn one idle attempt only when the run is actually dispatched; a busy
+            # worker or a lost claim must not consume the budget.
+            checkpoint = self.decide_checkpoints.get(project.project.id)
+            if checkpoint is not None:
+                checkpoint.idle_attempts += 1
         try:
             future = self.executor.submit(
                 run_decide_task,
@@ -437,6 +446,10 @@ class DispatchMixin:
             changes.append(f"findings:{checkpoint.finding_count}->{len(project.findings)}")
         if checkpoint.open_step_count > 0 and open_step_count == 0:
             changes.append(f"open_steps:{checkpoint.open_step_count}->0")
-        if not changes:
-            return None
-        return ",".join(changes)
+        if changes:
+            return ",".join(changes)
+        if open_step_count == 0 and checkpoint.idle_attempts < MAX_IDLE_DECIDE_RUNS:
+            # Everything is terminal but the project is still active: give Decide a
+            # bounded budget to declare completion, otherwise the graph stays a dead end.
+            return f"idle:{checkpoint.idle_attempts + 1}"
+        return None

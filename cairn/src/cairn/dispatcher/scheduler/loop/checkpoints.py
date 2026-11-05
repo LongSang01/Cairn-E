@@ -66,11 +66,32 @@ class CheckpointsMixin:
         except Exception:  # a stale checkpoint only costs a little context
             LOG.exception("decide checkpoint refresh failed project=%s", project_id)
             return
+        fact_count = len(project.facts)
+        hint_count = len(project.hints)
+        finding_count = len(project.findings)
+        open_step_count = self._project_open_step_count(project)
+        previous = self.decide_checkpoints.get(project_id)
+        idle_attempts = 0
+        if previous is not None and (
+            previous.fact_count,
+            previous.hint_count,
+            previous.finding_count,
+            previous.open_step_count,
+        ) == (
+            fact_count,
+            hint_count,
+            finding_count,
+            open_step_count,
+        ):
+            # Graph changed -> the idle budget starts over; a no-change run keeps
+            # the attempts it already spent so a stuck graph cannot spin forever.
+            idle_attempts = previous.idle_attempts
         checkpoint = DecideCheckpoint(
-            fact_count=len(project.facts),
-            hint_count=len(project.hints),
-            finding_count=len(project.findings),
-            open_step_count=self._project_open_step_count(project),
+            fact_count=fact_count,
+            hint_count=hint_count,
+            finding_count=finding_count,
+            open_step_count=open_step_count,
+            idle_attempts=idle_attempts,
         )
         self.decide_checkpoints[project_id] = checkpoint
         LOG.debug(

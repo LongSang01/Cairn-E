@@ -92,6 +92,9 @@ def run_decide_task(
             goal.id for goal in project.goals if goal.parent is not None and goal.status == "active"
         ]
         step_ids = [str(step["id"]) for step in open_steps]
+        # Only a pending step is abandonable from here: a running step is closed by
+        # its own executor, and abandoning it would throw that result away.
+        pending_step_ids = [str(step["id"]) for step in open_steps if step["status"] == "pending"]
 
         template = load_prompt(config.runtime.prompt_group, "decide.md")
         recall_block, document_block = _consume_recall_plan(client, project_id)
@@ -230,6 +233,7 @@ def run_decide_task(
                 goal_ids=goal_ids,
                 active_sub_goal_ids=active_sub_goal_ids,
                 step_ids=step_ids,
+                pending_step_ids=pending_step_ids,
             )
         except Exception as exc:  # noqa: BLE001 - every parse failure must close the task cleanly
             LOG.warning(
@@ -269,6 +273,16 @@ def run_decide_task(
                 )
                 if not closed.ok:
                     _log_write_failure("goal close", project_id, worker.name, closed)
+            for step in data.get("step_update") or ():
+                updated = client.update_step(
+                    project_id,
+                    step["id"],
+                    priority=step["priority"],
+                    status=step["status"],
+                    note=step["note"],
+                )
+                if not updated.ok:
+                    _log_write_failure("step update", project_id, worker.name, updated)
             response = client.complete(project_id, data["from"], data["description"], worker.name)
             if response.status_code == 403:
                 LOG.info(

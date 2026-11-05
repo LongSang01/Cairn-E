@@ -31,13 +31,15 @@ While work remains — no `complete` key at all (a placeholder like
 }}
 ```
 
-Root goal proven, nothing left to run — this ends the project and every running
-step is cancelled:
+Root goal proven, nothing left to run — this ends the project. Closing the last sub
+goals and abandoning the last open steps in the same payload is the normal wrap-up
+shape:
 
 ```json
 {"accepted": true, "data": {
   "complete": {"from": ["f001", "f002"], "description": "why these facts prove the root goal"},
-  "goals": {"close": [{"id": "g002", "status": "achieved"}]}
+  "goals": {"close": [{"id": "g002", "status": "achieved"}]},
+  "steps": {"update": [{"id": "s003", "status": "abandoned", "note": "covered by f002"}]}
 }}
 ```
 
@@ -46,13 +48,15 @@ If you genuinely cannot make progress: `{"accepted": false, "reason": "..."}`.
 
 ## Rules
 
-- `complete` ends the whole project — the dispatcher cancels every running step and closes the root goal. It is not a "sub goal finished" marker; use `goals.close` for that.
-- `complete` only when the facts already on the graph prove the root goal AND nothing remains to run: every step done or abandoned, every sub goal closed. Cite the proving facts in `from`. Closing the remaining sub goals in the same payload is allowed; combining `complete` with `goals.add`, `steps.add` or `steps.update` is not — those actions are dropped and the project does not end.
+- `complete` ends the whole project and closes the root goal. It is not a "sub goal finished" marker; use `goals.close` for that.
+- `complete` only when the facts already on the graph prove the root goal AND nothing remains to run: every step done or abandoned, every sub goal closed. Cite the proving facts in `from`. Wrap up in ONE payload: `complete` together with `goals.close` and `steps.update` entries whose `status` is `"abandoned"` for the remaining **pending** steps — those closes and abandons are applied first and the project ends atomically. Combining `complete` with `goals.add`, `steps.add`, or a `steps.update` that only changes `priority`/`note` is not allowed — those actions are kept and the completion is dropped.
+- A **running** step belongs to its executor: you cannot abandon it, and it keeps the project from completing. Its executor closes it with a fact in a moment, which wakes you up again — wait (output no actions) instead of abandoning it. Abandon only pending steps whose work a fact already covers.
+- When the snapshot already shows no open step and every sub goal closed, the only valid output is `complete`. Never leave such a graph behind with just closes or abandons: that dead-ends the project.
 - Omit `complete` entirely while the goal is unmet. Never send an empty placeholder like `{"from": [], "description": ""}`.
 - A step must state an action and how it turns known facts into a new fact. Small, concrete, verifiable steps beat broad ones.
 - Priority is 0 (lowest) to 9 (highest). Higher priority runs first.
 - A `steps.update` entry may carry only a `note`: that pins short guidance onto a step the executor has not started yet. Combine it with `priority` or `status` when you also want to reprioritize or abandon.
-- Abandon steps that are exhausted, duplicated, or contradicted by new facts.
+- Abandon pending steps that are exhausted, duplicated, or contradicted by new facts.
 - Add at most {max_steps} steps in one run.
 - Never add facts. Only Execute submits facts.
 

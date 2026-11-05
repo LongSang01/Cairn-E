@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future
 
-from conftest import make_config, make_project, make_step
+from conftest import FakeClient, make_config, make_project, make_step
 
 from cairn.dispatcher.models import DecideCheckpoint, RunningTask
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
@@ -85,6 +85,41 @@ def test_decide_trigger_returns_none_when_graph_is_unchanged() -> None:
     )
 
     assert loop._decide_trigger(project) is None
+
+
+def test_decide_trigger_rewakes_a_terminal_graph_until_the_budget_is_spent() -> None:
+    """Nothing left to run but the project is still active: Decide must still be asked.
+
+    This is the proj_008 dead end: every step closed, every sub goal achieved, and no
+    graph change left to trigger the Decide that declares completion.
+    """
+    loop = _loop()
+    project = make_project()
+    loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
+        fact_count=2, hint_count=1, finding_count=0, open_step_count=0
+    )
+
+    assert loop._decide_trigger(project) == "idle:1"
+
+    loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
+        fact_count=2, hint_count=1, finding_count=0, open_step_count=0, idle_attempts=3
+    )
+    assert loop._decide_trigger(project) is None
+
+
+def test_refresh_decide_checkpoint_keeps_the_idle_budget_only_while_nothing_changed() -> None:
+    loop = _loop()
+    loop.client = FakeClient(make_project())
+    loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
+        fact_count=2, hint_count=1, finding_count=0, open_step_count=0, idle_attempts=2
+    )
+
+    loop._refresh_decide_checkpoint("proj_001")
+    assert loop.decide_checkpoints["proj_001"].idle_attempts == 2
+
+    loop.client = FakeClient(make_project(steps=[make_step()]))
+    loop._refresh_decide_checkpoint("proj_001")
+    assert loop.decide_checkpoints["proj_001"].idle_attempts == 0
 
 
 def test_refresh_runtime_projects_discards_active_and_changed_cleanup_markers() -> None:

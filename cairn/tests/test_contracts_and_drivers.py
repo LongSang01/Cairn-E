@@ -287,6 +287,64 @@ def test_decide_payload_drops_completion_while_steps_stay_open() -> None:
     assert data["goals"]["close"] == [{"id": "g002", "status": "achieved", "note": None}]
 
 
+def test_decide_payload_completes_with_abandoned_pending_steps() -> None:
+    """Abandoning the last *pending* steps as part of the finale closes the graph."""
+    kind, data, _lookups = validate_decide_payload(
+        {
+            "data": {
+                "complete": {"from": ["f001"], "description": "goal met"},
+                "goals": {"close": [{"id": "g002", "status": "achieved"}]},
+                "steps": {
+                    "update": [{"id": "s001", "status": "abandoned", "note": "covered by f001"}]
+                },
+            }
+        },
+        open_steps_empty=False,
+        max_steps=3,
+        fact_ids=FACTS,
+        goal_ids=GOALS,
+        active_sub_goal_ids=ACTIVE_SUB_GOALS,
+        step_ids=STEPS,
+        pending_step_ids=STEPS,
+    )
+
+    assert kind == "complete"
+    assert data is not None
+    assert data["goal_close"] == [{"id": "g002", "status": "achieved", "note": None}]
+    assert data["step_update"] == [
+        {"id": "s001", "priority": None, "status": "abandoned", "note": "covered by f001"}
+    ]
+
+
+def test_decide_payload_keeps_running_step_open_for_its_executor() -> None:
+    """A running step cannot be abandoned, so the completion must not fire.
+
+    proj_008: Decide abandoned the running final verification in the same payload as a
+    completion; the executor's finished result was thrown away and the project never
+    closed. The payload must lose the completion and leave the step to its executor.
+    """
+    kind, data, _lookups = validate_decide_payload(
+        {
+            "data": {
+                "complete": {"from": ["f001"], "description": "goal met"},
+                "goals": {"close": [{"id": "g002", "status": "achieved"}]},
+                "steps": {"update": [{"id": "s001", "status": "abandoned", "note": "duplicate"}]},
+            }
+        },
+        open_steps_empty=False,
+        max_steps=3,
+        fact_ids=FACTS,
+        goal_ids=GOALS,
+        active_sub_goal_ids=ACTIVE_SUB_GOALS,
+        step_ids=STEPS,
+        pending_step_ids=[],
+    )
+
+    assert kind == "actions"
+    assert data is not None
+    assert data["goals"]["close"] == [{"id": "g002", "status": "achieved", "note": None}]
+
+
 def test_decide_payload_rejects_completion_with_open_steps() -> None:
     with pytest.raises(ValueError, match="complete is only allowed"):
         validate_decide_payload(

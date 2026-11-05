@@ -42,8 +42,10 @@
 pending ──claim──▶ running ──conclude──▶ done
    ▲                  │
    └────release───────┘
-pending/running ──Decide abandon──▶ abandoned
+pending ──Decide abandon──▶ abandoned
 ```
+
+`running` 的 Step 由持有它的 worker 收尾（`conclude`），Decide 不能废弃它：中途废弃会丢掉已经跑完的结果（见 `/steps/{id}/update`）。租约过期（`step_timeout`）后 Step 回到 `pending`，此时才可以被废弃。
 
 `kind` 为 `action` 的 Step 是普通动作；`kind` 为 `completion` 的 Step 是完成声明，由 `complete` 接口原子写入。
 
@@ -354,7 +356,7 @@ Decide 专用：调整优先级或废弃。
 {"status": "abandoned", "note": "方向已被事实否定"}
 ```
 
-Step 不会被删除，废弃只改变状态。
+Step 不会被删除，废弃只改变状态。`running` 的 Step 返回 `409`：它归执行它的 worker 所有，必须由该 worker `conclude` 收尾，否则跑完的结果会被丢弃、Step 也拿不到事实。
 
 #### POST /projects/{project_id}/steps/{step_id}/conclude
 
@@ -392,7 +394,7 @@ Execute 的 `submit_fact` / `submit_finding` 与 Step 收尾，原子完成：
 {"from": ["f005"], "description": "已拿到域控", "worker": "decider-a"}
 ```
 
-原子写入：`kind=completion` 的 Step（来源为 `from`）、根 Goal 置为 `achieved`、项目置为 `completed`。要求 `from` 非空且引用真实事实。
+原子写入：`kind=completion` 的 Step（来源为 `from`）、根 Goal 置为 `achieved`、项目置为 `completed`。要求 `from` 非空且引用真实事实；还有任何 `pending` / `running` 的 `action` Step 或未关闭的子 Goal 时返回 `409`，先收尾再完成。
 
 #### POST /projects/{project_id}/reopen
 

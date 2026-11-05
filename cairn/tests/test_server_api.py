@@ -191,6 +191,78 @@ def test_complete_rejects_until_steps_and_sub_goals_are_closed(client: TestClien
     assert response.status_code == 200
 
 
+def test_completion_waits_for_a_running_step_instead_of_dropping_it(client: TestClient) -> None:
+    """The proj_008 finale: the last verification must conclude before the project ends.
+
+    Decide wanted to abandon the running final verification and complete in one payload.
+    The abandon is refused, so the executor lands its fact first and the project completes
+    on the next round with the graph intact.
+    """
+    project_id = _create_project(client)
+    sub_id = client.post(
+        f"/projects/{project_id}/goals", json={"description": "verify", "creator": "decider"}
+    ).json()["id"]
+    for description, worker in (("redundant", None), ("final verification", "executor")):
+        response = client.post(
+            f"/projects/{project_id}/steps",
+            json={
+                "from": ["origin"],
+                "goal": sub_id,
+                "description": description,
+                "creator": worker or "decider",
+                "worker": worker,
+            },
+        )
+        assert response.status_code == 201
+
+    # A running step cannot be abandoned, so the project cannot complete yet.
+    assert (
+        client.post(
+            f"/projects/{project_id}/steps/s002/update",
+            json={"status": "abandoned", "note": "looks duplicated"},
+        ).status_code
+        == 409
+    )
+    assert (
+        client.post(
+            f"/projects/{project_id}/complete",
+            json={"from": ["origin"], "description": "goal met", "worker": "decider"},
+        ).status_code
+        == 409
+    )
+
+    # The executor closes it with the fact it just confirmed; the pending step is abandonable.
+    response = client.post(
+        f"/projects/{project_id}/steps/s002/conclude",
+        json={
+            "worker": "executor",
+            "status": "done",
+            "facts": [{"description": "rdp reachable with nihaoa/nihao123"}],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["step"]["status"] == "done"
+    assert response.json()["facts"][0]["description"] == "rdp reachable with nihaoa/nihao123"
+
+    response = client.post(
+        f"/projects/{project_id}/steps/s001/update",
+        json={"status": "abandoned", "note": "covered by the verification fact"},
+    )
+    assert response.status_code == 200
+    response = client.post(
+        f"/projects/{project_id}/goals/{sub_id}/close",
+        json={"status": "achieved", "worker": "decider"},
+    )
+    assert response.status_code == 200
+
+    response = client.post(
+        f"/projects/{project_id}/complete",
+        json={"from": ["f001"], "description": "goal met", "worker": "decider"},
+    )
+    assert response.status_code == 200
+    assert response.json()["project"]["status"] == "completed"
+
+
 def test_step_update_with_only_a_note_stores_guidance(client: TestClient) -> None:
     project_id = _create_project(client)
     client.post(
@@ -387,6 +459,60 @@ def test_decide_update_step_can_reprioritize_and_abandon(client: TestClient) -> 
         ).status_code
         == 409
     )
+
+
+def test_running_step_cannot_be_abandoned_by_decide(client: TestClient) -> None:
+    """A claimed step belongs to its executor: the mid-run result must not be dropped.
+
+    proj_008: Decide abandoned the final verification while its executor was running,
+    the run finished with exit code 0, its heartbeat hit 409 and the fact was never
+    recorded, so the project could not be completed.
+    """
+    project_id = _create_project(client)
+    response = client.post(
+        f"/projects/{project_id}/steps",
+        json={
+            "from": ["origin"],
+            "description": "verify",
+            "creator": "executor",
+            "worker": "executor",
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["status"] == "running"
+
+    response = client.post(
+        f"/projects/{project_id}/steps/s001/update",
+        json={"status": "abandoned", "note": "duplicated"},
+    )
+    assert response.status_code == 409
+    assert "running" in response.text
+
+    # The owner still closes it with its result, which is what lets the graph move on.
+    response = client.post(
+        f"/projects/{project_id}/steps/s001/conclude",
+        json={"worker": "executor", "status": "done", "facts": [{"description": "verified"}]},
+    )
+    assert response.status_code == 200
+    assert response.json()["step"]["status"] == "done"
+
+    # A stale claim is reclaimed first, so an orphaned running step stays abandonable.
+    client.post(
+        f"/projects/{project_id}/steps",
+        json={"from": ["origin"], "description": "orphan", "creator": "w", "worker": "w"},
+    )
+    with db.get_conn() as conn:
+        conn.execute(
+            "UPDATE steps SET last_heartbeat_at = '2000-01-01T00:00:00Z'"
+            " WHERE id = 's002' AND project_id = ?",
+            (project_id,),
+        )
+    response = client.post(
+        f"/projects/{project_id}/steps/s002/update",
+        json={"status": "abandoned", "note": "lease expired"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "abandoned"
 
 
 def test_expired_step_and_decide_leases_can_be_reclaimed(client: TestClient) -> None:

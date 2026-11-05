@@ -26,3 +26,4 @@ class DecideCheckpoint:
     hint_count: int
     finding_count: int
     open_step_count: int
+    idle_attempts: int = 0

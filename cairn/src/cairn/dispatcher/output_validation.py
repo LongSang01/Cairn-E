@@ -211,11 +211,12 @@ def validate_decide_payload(
     goal_ids: list[str],
     active_sub_goal_ids: list[str],
     step_ids: list[str],
+    pending_step_ids: list[str] | None = None,
 ) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
     """Decide only touches the graph: goals, steps, and the completion declaration.
 
-    ``complete`` ends the whole project (the dispatcher cancels every running
-    step), so it must never silently swallow the actions it arrives with:
+    ``complete`` ends the whole project, so it must never silently swallow the
+    actions it arrives with:
 
     - ``complete`` combined with ``goals.add``, ``steps.add`` or ``steps.update``
       keeps those graph actions and drops the premature completion.
@@ -223,6 +224,13 @@ def validate_decide_payload(
       completes atomically (the closes are carried in ``goal_close``).
     - A bare ``complete`` is refused while steps are open
       (``open_steps_empty`` is false) or ``active_sub_goal_ids`` is non-empty.
+    - Only a ``pending`` step can be closed by the payload. A ``running`` step
+      belongs to its executor, which alone may conclude it; abandoning it is
+      impossible, so it keeps the completion from firing until its result lands
+      and the next Decide sees the closed step.
+
+    ``pending_step_ids`` (defaults to ``step_ids``, i.e. "nothing is running") is the
+    abandonable subset of ``step_ids``.
 
     The third element carries what the run wants looked up next (keyword recall and
     document ids), which the scheduler persists for the following run.
@@ -334,15 +342,29 @@ def validate_decide_payload(
                 )
 
     if complete_payload is not None:
-        queued_work = bool(goal_add or step_add or step_update)
-        open_now = () if open_steps_empty else step_ids
+        # Abandoning a step closes it instead of queuing work: the wrap-up payload
+        # (proj_008 shape) is complete + goals.close + steps.update(abandon). Only a
+        # pending step can be closed this way; a running one keeps its own conclusion.
+        closable = set(step_ids if pending_step_ids is None else pending_step_ids)
+        abandoned_now = {
+            u["id"] for u in step_update if u.get("status") == "abandoned" and u["id"] in closable
+        }
+        queued_work = bool(goal_add or step_add) or any(
+            u["id"] not in abandoned_now for u in step_update
+        )
+        open_now = (
+            () if open_steps_empty else tuple(sid for sid in step_ids if sid not in abandoned_now)
+        )
         closed_now = {entry["id"] for entry in goal_close}
         active_now = [gid for gid in active_sub_goal_ids if gid not in closed_now]
         if not queued_work and not open_now and not active_now:
+            # Finale: this payload leaves nothing open — ends the project atomically.
             if goal_close:
                 complete_payload = {**complete_payload, "goal_close": goal_close}
+            if step_update:
+                complete_payload = {**complete_payload, "step_update": step_update}
             return "complete", complete_payload, lookups
-        if queued_work or goal_close:
+        if goal_add or goal_close or step_add or step_update:
             # Completing cancels every running step: a payload that still queues
             # work keeps its graph actions and drops the premature completion.
             complete_payload = None
