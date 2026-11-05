@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 import time
 
+from cairn.contracts.models import ProjectDetail, Step
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
-from cairn.dispatcher.contracts import parse_json_output, validate_execute_payload
+from cairn.dispatcher.output_validation import parse_json_output, validate_execute_payload
 from cairn.dispatcher.prompting import load_prompt, render_prompt
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.backend import ExecutionBackend
@@ -27,7 +28,6 @@ from cairn.dispatcher.tasks.common import (
     write_step_result,
 )
 from cairn.dispatcher.workers.registry import get_driver
-from cairn.server.models import ProjectDetail, Step
 
 LOG = logging.getLogger(__name__)
 

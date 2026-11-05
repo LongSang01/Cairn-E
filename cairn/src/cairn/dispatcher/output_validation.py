@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from cairn.contracts.models import FINDING_SEVERITIES
 from cairn.dispatcher.output_parser import extract_json_object
-from cairn.server.models import FINDING_SEVERITIES
 
 MAX_PRIORITY = 9
 

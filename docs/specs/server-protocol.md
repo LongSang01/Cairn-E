@@ -185,6 +185,23 @@ Decide 的项目级串行租约。租约过期由 server 自动回收。
 
 所有写接口在项目不处于 `active` 时返回 `403`（hint 写入与 reopen 除外）。引用了不存在的 fact / goal / step 返回 `404`，状态冲突返回 `409`。
 
+`GET /projects` 与 `GET /projects/{id}` 返回 `ETag` 与 `Cache-Control: no-cache`。请求带上 `If-None-Match`（浏览器在轮询时自动携带）且内容未变化时返回 `304`，不传输响应体；图或项目数据发生变化后 tag 随之改变，返回完整的 `200`。
+
+### 健康检查
+
+#### GET /healthz
+
+供进程管理与容器探针使用。数据库不可达时返回 `503`：
+
+```json
+{
+  "status": "ok",
+  "version": "0.2.1",
+  "database": "ok",
+  "schema_version": 1
+}
+```
+
 ### 全局设置
 
 #### GET /settings

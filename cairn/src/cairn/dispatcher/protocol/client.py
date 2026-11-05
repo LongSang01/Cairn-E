@@ -9,7 +9,7 @@ import requests
 from pydantic import TypeAdapter
 from requests.adapters import HTTPAdapter
 
-from cairn.server.models import (
+from cairn.contracts.models import (
     ContextSummary,
     Document,
     DocumentMeta,

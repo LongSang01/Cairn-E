@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+
+import pytest
 
 from cairn.server import db
 
@@ -179,3 +182,58 @@ def test_configure_adds_finding_severity_and_session_usage_columns(tmp_path, mon
     assert finding["severity"] == "info"
     assert tuple(session)[:5] == (0, 0, 0, 0, 0)
     assert session["summary"] is None
+
+
+def test_new_database_records_the_baseline_migration(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "fresh.db"
+    monkeypatch.setattr(db, "_db_path", None)
+    db.configure(path)
+
+    with db.get_conn() as conn:
+        versions = [row["version"] for row in conn.execute("SELECT version FROM schema_migrations")]
+
+    # Re-configuring an already migrated database must not apply it twice.
+    monkeypatch.setattr(db, "_db_path", None)
+    db.configure(path)
+    with db.get_conn() as conn:
+        again = [row["version"] for row in conn.execute("SELECT version FROM schema_migrations")]
+
+    assert versions == [1]
+    assert again == [1]
+
+
+def test_get_conn_reuses_one_connection_per_thread(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(db, "_db_path", None)
+    db.configure(tmp_path / "reuse.db")
+
+    with db.get_conn() as first:
+        pass
+    with db.get_conn() as second:
+        pass
+
+    assert first is second
+
+    from_thread: list[int] = []
+
+    def read() -> None:
+        with db.get_conn() as conn:
+            from_thread.append(id(conn))
+
+    thread = threading.Thread(target=read)
+    thread.start()
+    thread.join()
+
+    assert from_thread and from_thread[0] != id(first)
+
+
+def test_get_conn_refuses_nesting(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(db, "_db_path", None)
+    db.configure(tmp_path / "nested.db")
+
+    with db.get_conn() as outer:
+        outer.execute("CREATE TABLE t (x INTEGER)")
+        with pytest.raises(RuntimeError, match="must not be nested"), db.get_conn():
+            pass
+        outer.execute("INSERT INTO t VALUES (1)")
+    with db.get_conn() as conn:
+        assert [row["x"] for row in conn.execute("SELECT x FROM t")] == [1]

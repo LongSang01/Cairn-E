@@ -7,6 +7,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+from cairn.dispatcher import session as session_module
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.runtime.process import ProcessResult
 from cairn.dispatcher.session import SessionStream, build_messages, redact
@@ -15,6 +16,12 @@ from cairn.server import db
 from cairn.server.app import app
 from cairn.server.routers import sessions as sessions_router
 from cairn.server.services import utcnow_before
+
+
+@pytest.fixture(autouse=True)
+def _no_upload_backoff(monkeypatch) -> None:
+    # Retry behaviour is under test; the wall-clock sleep between attempts is not.
+    monkeypatch.setattr(session_module, "UPLOAD_RETRY_BACKOFF_SECONDS", 0)
 
 
 @pytest.fixture
@@ -768,3 +775,40 @@ def test_session_usage_round_trip_and_project_totals(client: TestClient) -> None
     assert payload["by_phase"]["decide"]["total_tokens"] == 185
     assert payload["by_worker"]["pi-main"]["sessions"] == 2
     assert client.get("/projects/proj_999/usage").status_code == 404
+
+
+class _FlakyAppendClient(_SessionClient):
+    """Fails the first few appends with a transient 503, then succeeds."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.remaining_failures = failures
+
+    def append_session_messages(self, project_id: str, session_id: str, messages: list[dict]) -> ApiResult:
+        self.appended.append(messages)
+        if self.remaining_failures > 0:
+            self.remaining_failures -= 1
+            return ApiResult(503, text="temporarily unavailable")
+        return ApiResult(200, {})
+
+
+def test_finish_retries_transient_append_failures() -> None:
+    client = _FlakyAppendClient(failures=2)
+    stream = SessionStream(
+        client,
+        "proj_001",
+        worker="pi-main",
+        worker_type="pi",
+        phase="execute",
+        step_id="s001",
+        prompt="solve it",
+        flush_interval=10.0,
+    )
+    stream.start()
+    stream.feed('{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}\n')
+
+    stream.finish(status="success", result=ProcessResult(0, "", ""))
+
+    # Two rejected attempts plus the successful one; the tail still lands.
+    assert len(client.appended) == 3
+    assert client.appended[-1][0]["content"] == "done"

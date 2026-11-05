@@ -598,3 +598,53 @@ def test_context_summary_round_trip(client: TestClient) -> None:
     assert client.put(
         "/projects/proj_999/context", json={"summary": "- x", "facts_covered": 1}
     ).status_code == 404
+
+
+def test_healthz_reports_database_and_schema_version(client: TestClient) -> None:
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["database"] == "ok"
+    assert payload["schema_version"] >= 1
+
+
+def test_project_detail_supports_conditional_get(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    first = client.get(f"/projects/{project_id}")
+    assert first.status_code == 200
+    tag = first.headers["etag"]
+    assert tag.startswith('"')
+    assert first.headers["cache-control"] == "no-cache"
+
+    unchanged = client.get(f"/projects/{project_id}", headers={"If-None-Match": tag})
+    assert unchanged.status_code == 304
+    assert unchanged.content == b""
+    assert unchanged.headers["etag"] == tag
+
+    # A weak validator and a wildcard also match the current representation.
+    assert client.get(f"/projects/{project_id}", headers={"If-None-Match": f"W/{tag}"}).status_code == 304
+    assert client.get(f"/projects/{project_id}", headers={"If-None-Match": "*"}).status_code == 304
+
+    # Mutating the graph changes the tag, so the stale copy is no longer reused.
+    client.post(f"/projects/{project_id}/hints", json={"content": "new hint", "creator": "human"})
+    changed = client.get(f"/projects/{project_id}", headers={"If-None-Match": tag})
+    assert changed.status_code == 200
+    assert changed.headers["etag"] != tag
+
+
+def test_project_list_supports_conditional_get(client: TestClient) -> None:
+    _create_project(client)
+
+    first = client.get("/projects")
+    assert first.status_code == 200
+    tag = first.headers["etag"]
+
+    assert client.get("/projects", headers={"If-None-Match": tag}).status_code == 304
+
+    _create_project(client)
+    changed = client.get("/projects", headers={"If-None-Match": tag})
+    assert changed.status_code == 200
+    assert changed.headers["etag"] != tag

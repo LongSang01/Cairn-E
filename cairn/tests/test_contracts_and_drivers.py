@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from cairn.dispatcher.contracts import (
+from cairn.dispatcher.output_validation import (
     parse_json_output,
     validate_decide_payload,
     validate_execute_payload,

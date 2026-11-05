@@ -1,4 +1,6 @@
-from fastapi import APIRouter, HTTPException
+import hashlib
+
+from fastapi import APIRouter, HTTPException, Request, Response
 
 from cairn.server.db import get_conn
 from cairn.server.models import (
@@ -46,9 +48,38 @@ from cairn.server.services import (
 
 router = APIRouter(tags=["projects"])
 
+# `no-cache` still lets a browser reuse the body after a 304: it must revalidate, but
+# the polled project detail (the heaviest GET) is no longer transferred every 5 seconds.
+CACHE_CONTROL = "no-cache"
+
+
+def _etag(payload: ProjectDetail | list[ProjectSummary]) -> str:
+    # Pydantic's own serializer is already what FastAPI sends; hashing it avoids a
+    # second, slower jsonable_encoder pass on every poll.
+    if isinstance(payload, list):
+        raw = "[" + ",".join(item.model_dump_json(by_alias=True) for item in payload) + "]"
+    else:
+        raw = payload.model_dump_json(by_alias=True)
+    return f'"{hashlib.sha256(raw.encode()).hexdigest()}"'
+
+
+def _cache_headers(
+    request: Request, payload: ProjectDetail | list[ProjectSummary]
+) -> tuple[dict[str, str], Response | None]:
+    """Return the headers for a fresh body, or a 304 when the caller's copy is current."""
+    tag = _etag(payload)
+    headers = {"ETag": tag, "Cache-Control": CACHE_CONTROL}
+    offered = {
+        item.strip().removeprefix("W/")
+        for item in request.headers.get("if-none-match", "").split(",")
+    }
+    if tag in offered or "*" in offered:
+        return headers, Response(status_code=304, headers=headers)
+    return headers, None
+
 
 @router.get("/projects", response_model=list[ProjectSummary])
-def list_projects():
+def list_projects(request: Request, response: Response):
     with get_conn() as conn:
         expire_steps(conn)
         expire_decide_leases(conn)
@@ -66,7 +97,7 @@ def list_projects():
             FROM projects p
             ORDER BY p.created_at
         """).fetchall()
-        return [
+        summaries = [
             ProjectSummary(
                 id=row["id"],
                 title=row["title"],
@@ -84,6 +115,12 @@ def list_projects():
             )
             for row in rows
         ]
+
+    headers, not_modified = _cache_headers(request, summaries)
+    if not_modified is not None:
+        return not_modified
+    response.headers.update(headers)
+    return summaries
 
 
 @router.post("/projects", response_model=ProjectDetail, status_code=201)
@@ -148,7 +185,7 @@ def create_project(body: CreateProjectRequest):
 
 
 @router.get("/projects/{project_id}", response_model=ProjectDetail)
-def get_project(project_id: str):
+def get_project(project_id: str, request: Request, response: Response):
     with get_conn() as conn:
         expire_steps(conn, project_id)
         expire_decide_leases(conn, project_id)
@@ -164,7 +201,7 @@ def get_project(project_id: str):
             (project_id,),
         ).fetchall()
 
-        return ProjectDetail(
+        detail = ProjectDetail(
             project=project_meta_from_row(row),
             facts=[Fact(**dict(f)) for f in facts],
             goals=build_goals(conn, project_id),
@@ -173,6 +210,12 @@ def get_project(project_id: str):
             hints=[Hint(**dict(h)) for h in hints],
             sessions=build_sessions(conn, project_id),
         )
+
+    headers, not_modified = _cache_headers(request, detail)
+    if not_modified is not None:
+        return not_modified
+    response.headers.update(headers)
+    return detail
 
 
 @router.delete("/projects/{project_id}", status_code=204)

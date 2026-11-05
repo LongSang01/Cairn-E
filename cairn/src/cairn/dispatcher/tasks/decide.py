@@ -4,9 +4,10 @@ import logging
 import time
 from collections.abc import Callable
 
+from cairn.contracts.models import ContextSummary, ProjectDetail, RecallPlan
 from cairn.dispatcher.config import ContextBudgetConfig, DispatchConfig, WorkerConfig
 from cairn.dispatcher.context import GraphView, prepare_snapshot
-from cairn.dispatcher.contracts import parse_json_output, validate_decide_payload
+from cairn.dispatcher.output_validation import parse_json_output, validate_decide_payload
 from cairn.dispatcher.prompting import (
     format_fact_ids,
     format_open_steps,
@@ -32,7 +33,6 @@ from cairn.dispatcher.tasks.common import (
 )
 from cairn.dispatcher.tasks.summary import SummaryRequest, run_summary_task
 from cairn.dispatcher.workers.registry import get_driver
-from cairn.server.models import ContextSummary, ProjectDetail, RecallPlan
 
 LOG = logging.getLogger(__name__)
 

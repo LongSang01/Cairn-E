@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import time
 
+from cairn.contracts.models import ProjectDetail, Question
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
 from cairn.dispatcher.prompting import load_prompt, render_prompt
 from cairn.dispatcher.protocol.client import CairnClient
@@ -24,7 +25,6 @@ from cairn.dispatcher.tasks.common import (
     write_graph_snapshot_reference,
 )
 from cairn.dispatcher.workers.registry import get_driver
-from cairn.server.models import ProjectDetail, Question
 
 LOG = logging.getLogger(__name__)
 MAX_ANSWER_CHARS = 20_000

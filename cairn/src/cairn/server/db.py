@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Generator
+import threading
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 DEFAULT_DB = Path.home() / ".local" / "share" / "cairn" / "cairn.db"
 
 _db_path: Path | None = None
+_db_generation = 0
+_local = threading.local()
 
 SCHEMA = """\
 CREATE TABLE IF NOT EXISTS settings (
@@ -179,6 +183,11 @@ CREATE TABLE IF NOT EXISTS scoped_counters (
 
 CREATE INDEX IF NOT EXISTS sessions_by_project ON sessions (project_id, created_at);
 CREATE INDEX IF NOT EXISTS findings_by_project ON findings (project_id, created_at);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
 """
 
 # Columns are additive so an existing Cairn 0.x database keeps working: create the new
@@ -194,15 +203,41 @@ _LEGACY_COLUMN_COPIES: tuple[tuple[str, str, str], ...] = (
 
 
 def configure(path: Path) -> None:
-    global _db_path
+    global _db_path, _db_generation
     if _db_path is not None:
         return
     _db_path = path
     _db_path.parent.mkdir(parents=True, exist_ok=True)
+    _db_generation += 1
     with get_conn() as conn:
         conn.executescript(SCHEMA)
-        _ensure_columns(conn)
-        _migrate_legacy_intents(conn)
+        _apply_migrations(conn)
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Run each registered migration once, recording it in `schema_migrations`."""
+    applied = {
+        row["version"] for row in conn.execute("SELECT version FROM schema_migrations")
+    }
+    for version, migrate in _MIGRATIONS:
+        if version in applied:
+            continue
+        migrate(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (version, datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")),
+        )
+
+
+def _migration_001_baseline(conn: sqlite3.Connection) -> None:
+    """Columns and data transforms required by a pre-versioning (Cairn 0.x) database."""
+    _ensure_columns(conn)
+    _migrate_legacy_intents(conn)
+
+
+_MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
+    (1, _migration_001_baseline),
+)
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -363,11 +398,42 @@ def _migrate_intents(conn: sqlite3.Connection) -> None:
 
 @contextmanager
 def get_conn() -> Generator[sqlite3.Connection, None, None]:
+    """A per-thread connection, reused across requests.
+
+    Opening a connection costs a WAL journal-mode round trip on every request, and the
+    server's sync routes already run on a bounded thread pool, so one connection per
+    thread is both simpler and cheaper than a pool.
+
+    The context must not nest: committing happens per context, so an inner block
+    would commit the outer block's partial work. Helpers take the connection as a
+    parameter instead of opening their own.
+    """
+    if getattr(_local, "in_use", False):
+        raise RuntimeError(
+            "get_conn() must not be nested: the inner context would commit the "
+            "outer context's partial work; pass the connection explicitly instead"
+        )
     assert _db_path is not None
-    conn = sqlite3.connect(str(_db_path))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    path = str(_db_path)
+    conn = getattr(_local, "conn", None)
+    if conn is not None and (
+        getattr(_local, "path", None) != path
+        or getattr(_local, "generation", None) != _db_generation
+    ):
+        conn.close()
+        conn = None
+    if conn is None:
+        conn = sqlite3.connect(path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        # Writers are serialised by SQLite; wait instead of failing immediately.
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA foreign_keys=ON")
+        _local.conn = conn
+        _local.path = path
+        _local.generation = _db_generation
+    _local.in_use = True
     try:
         yield conn
         conn.commit()
@@ -375,4 +441,4 @@ def get_conn() -> Generator[sqlite3.Connection, None, None]:
         conn.rollback()
         raise
     finally:
-        conn.close()
+        _local.in_use = False

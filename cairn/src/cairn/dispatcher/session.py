@@ -5,10 +5,10 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any, Self
 
-from cairn.dispatcher.protocol.client import CairnClient
+from cairn.dispatcher.protocol.client import ApiResult, CairnClient
 from cairn.dispatcher.runtime.process import ProcessResult
 from cairn.dispatcher.workers.stream import text_from_content
 from cairn.dispatcher.workers.usage import Usage, usage_payload
@@ -28,6 +28,10 @@ MAX_FALLBACK_CHARS = 20000
 # How often buffered transcript entries are pushed to the server while a worker runs.
 FLUSH_INTERVAL_SECONDS = 1.0
 FLUSH_JOIN_TIMEOUT_SECONDS = 5.0
+# A transient server hiccup must not lose the tail of a transcript. Background flushes
+# retry on the next tick; the end-of-run upload retries inline before giving up.
+UPLOAD_RETRY_ATTEMPTS = 3
+UPLOAD_RETRY_BACKOFF_SECONDS = 0.25
 # A quiet worker (long tool run, no output) still needs to prove it is alive, otherwise
 # the server expires the running session after SESSION_STALE_SECONDS.
 HEARTBEAT_INTERVAL_SECONDS = 5.0
@@ -466,13 +470,11 @@ class SessionStream:
         with self._lock:
             messages = list(self._builder.pending)
         payload = self._create_payload("running", messages)
-        try:
-            response = self._client.create_session(self._project_id, payload)
-        except Exception:
-            LOG.warning(
-                "session create crashed project=%s phase=%s worker=%s", self._project_id, self._phase, self._worker, exc_info=True
-            )
-            response = None
+        response = self._send_with_retry(
+            lambda: self._client.create_session(self._project_id, payload),
+            attempts=UPLOAD_RETRY_ATTEMPTS,
+            label="session create",
+        )
         if response is not None and response.ok and isinstance(response.data, dict):
             session_id = response.data.get("id")
             if isinstance(session_id, str) and session_id:
@@ -518,7 +520,8 @@ class SessionStream:
         if self.session_id is None:
             self._upload_once(status, result, error, duration_ms, native_session, usage)
             return
-        self._flush()
+        # The flusher is stopped now, so this is the last chance to land the tail.
+        self._flush(attempts=UPLOAD_RETRY_ATTEMPTS)
         payload = {
             "status": status,
             "returncode": result.returncode if result is not None else None,
@@ -528,14 +531,12 @@ class SessionStream:
             "native_session": native_session,
             **usage_payload(usage),
         }
-        try:
-            response = self._client.finish_session(self._project_id, self.session_id, payload)
-        except Exception:
-            LOG.warning(
-                "session finish crashed project=%s phase=%s worker=%s", self._project_id, self._phase, self._worker, exc_info=True
-            )
-            return
-        if not response.ok:
+        response = self._send_with_retry(
+            lambda: self._client.finish_session(self._project_id, self.session_id, payload),
+            attempts=UPLOAD_RETRY_ATTEMPTS,
+            label="session finish",
+        )
+        if response is not None and not response.ok:
             LOG.warning(
                 "session finish failed project=%s phase=%s worker=%s status=%s",
                 self._project_id,
@@ -546,6 +547,49 @@ class SessionStream:
 
     # --- uploads -----------------------------------------------------------------
 
+    def _send_with_retry(
+        self,
+        call: Callable[[], ApiResult],
+        *,
+        attempts: int,
+        label: str,
+    ) -> ApiResult | None:
+        """Send one request, retrying network errors and 5xx. 4xx/409 are final.
+
+        Returns None only when every attempt failed transiently, letting the caller
+        requeue the batch instead of dropping it.
+        """
+        delay = UPLOAD_RETRY_BACKOFF_SECONDS
+        for attempt in range(attempts):
+            try:
+                response = call()
+            except Exception:
+                LOG.warning(
+                    "%s crashed project=%s phase=%s worker=%s attempt=%s",
+                    label,
+                    self._project_id,
+                    self._phase,
+                    self._worker,
+                    attempt + 1,
+                    exc_info=True,
+                )
+            else:
+                if response.ok or response.status_code == 409 or response.status_code < 500:
+                    return response
+                LOG.warning(
+                    "%s failed project=%s phase=%s worker=%s status=%s attempt=%s",
+                    label,
+                    self._project_id,
+                    self._phase,
+                    self._worker,
+                    response.status_code,
+                    attempt + 1,
+                )
+            if attempt < attempts - 1:
+                time.sleep(delay)
+                delay = min(delay * 2, 2.0)
+        return None
+
     def _flush_loop(self) -> None:
         while not self._stop.wait(self._flush_interval):
             if self._flush_pending():
@@ -555,8 +599,8 @@ class SessionStream:
             if time.monotonic() - self._last_contact >= self._heartbeat_interval:
                 self._heartbeat()
 
-    def _flush(self) -> None:
-        self._flush_pending()
+    def _flush(self, attempts: int = 1) -> None:
+        self._flush_pending(attempts)
 
     def _heartbeat(self) -> None:
         session_id = self.session_id
@@ -583,7 +627,7 @@ class SessionStream:
                 response.status_code,
             )
 
-    def _flush_pending(self) -> int:
+    def _flush_pending(self, attempts: int = 1) -> int:
         session_id = self.session_id
         if session_id is None:
             return 0
@@ -591,30 +635,20 @@ class SessionStream:
             batch = self._builder.take_pending()
         if not batch:
             return 0
-        try:
-            response = self._client.append_session_messages(self._project_id, session_id, batch)
-        except Exception:
-            LOG.warning(
-                "session append crashed project=%s phase=%s worker=%s", self._project_id, self._phase, self._worker, exc_info=True
-            )
-            self._requeue(batch)
+        response = self._send_with_retry(
+            lambda: self._client.append_session_messages(self._project_id, session_id, batch),
+            attempts=attempts,
+            label="session append",
+        )
+        if response is not None and response.ok:
+            self._last_contact = time.monotonic()
+            return len(batch)
+        if response is not None and response.status_code == 409:
+            # The server closed this session (finished or expired); retrying can never
+            # land, so drop the batch instead of requeueing it forever.
             return 0
-        if not response.ok:
-            LOG.warning(
-                "session append failed project=%s phase=%s worker=%s status=%s messages=%s",
-                self._project_id,
-                self._phase,
-                self._worker,
-                response.status_code,
-                len(batch),
-            )
-            if response.status_code != 409:
-                self._requeue(batch)
-            # 409 = the server closed this session (finished or expired); retrying
-            # can never land, so drop the batch instead of requeueing it forever.
-            return 0
-        self._last_contact = time.monotonic()
-        return len(batch)
+        self._requeue(batch)
+        return 0
 
     def _requeue(self, batch: list[dict[str, Any]]) -> None:
         with self._lock:
@@ -644,14 +678,12 @@ class SessionStream:
             error=redact(error) if error else None,
             **usage_payload(usage),
         )
-        try:
-            response = self._client.create_session(self._project_id, payload)
-        except Exception:
-            LOG.warning(
-                "session upload crashed project=%s phase=%s worker=%s", self._project_id, self._phase, self._worker, exc_info=True
-            )
-            return
-        if not response.ok:
+        response = self._send_with_retry(
+            lambda: self._client.create_session(self._project_id, payload),
+            attempts=UPLOAD_RETRY_ATTEMPTS,
+            label="session upload",
+        )
+        if response is not None and not response.ok:
             LOG.warning(
                 "session upload failed project=%s phase=%s worker=%s status=%s",
                 self._project_id,
