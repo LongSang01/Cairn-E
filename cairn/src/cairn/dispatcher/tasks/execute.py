@@ -229,6 +229,7 @@ def run_execute_task(
                 record("rejected")
                 best_effort_release(client, project_id, step.id, worker.name)
                 return "rejected"
+            assert data is not None
             status = write_step_result(
                 client,
                 project_id,
@@ -464,6 +465,7 @@ def _try_conclude_fallback(
         record("rejected")
         best_effort_release(client, project_id, step.id, worker.name)
         return "rejected"
+    assert data is not None
     status = write_step_result(
         client,
         project_id,

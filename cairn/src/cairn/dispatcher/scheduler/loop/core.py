@@ -15,6 +15,7 @@ import requests
 from cairn.dispatcher.config import DispatchConfig, LocalConfig
 from cairn.dispatcher.models import DecideCheckpoint, RunningTask
 from cairn.dispatcher.protocol.client import CairnClient
+from cairn.dispatcher.runtime.backend import ExecutionBackend
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.local_backend import LocalBackend
 from cairn.dispatcher.runtime.startup_healthcheck import (
@@ -32,7 +33,7 @@ class CoreMixin:
         self.config = DispatchConfig.load(config_path)
         self.client = CairnClient(self.config.server)
         if self.config.runtime.execution == "local":
-            self.container_manager = LocalBackend(self.config.local or LocalConfig())
+            self.container_manager: ExecutionBackend = LocalBackend(self.config.local or LocalConfig())
         else:
             assert self.config.container is not None
             self.container_manager = ContainerManager(self.config.container)

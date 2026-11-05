@@ -189,16 +189,6 @@ def build_graph_view(
         or (bool(old_steps) and summary_steps < len(old_steps))
         or (bool(old_findings) and summary_findings < len(old_findings))
     )
-    group = {
-        "needs_summary": needs_summary,
-        "old_facts": old_facts,
-        "summary_facts": summary_facts,
-        "old_steps": old_steps,
-        "summary_steps": summary_steps,
-        "old_findings": old_findings,
-        "summary_findings": summary_findings,
-    }
-
     for level in (1, 2, 3):
         view = _compose(
             data,
@@ -221,7 +211,13 @@ def build_graph_view(
                 tokens=tokens,
                 budget_tokens=budget_tokens,
                 compacted=True,
-                **group,
+                needs_summary=needs_summary,
+                old_facts=old_facts,
+                summary_facts=summary_facts,
+                old_steps=old_steps,
+                summary_steps=summary_steps,
+                old_findings=old_findings,
+                summary_findings=summary_findings,
             )
 
     view = _compose(
@@ -244,7 +240,13 @@ def build_graph_view(
         budget_tokens=budget_tokens,
         compacted=True,
         truncated=True,
-        **group,
+        needs_summary=needs_summary,
+        old_facts=old_facts,
+        summary_facts=summary_facts,
+        old_steps=old_steps,
+        summary_steps=summary_steps,
+        old_findings=old_findings,
+        summary_findings=summary_findings,
     )
 
 

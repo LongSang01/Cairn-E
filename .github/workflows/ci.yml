@@ -59,3 +59,43 @@ jobs:
       - name: Test
         working-directory: cairn
         run: uv run --frozen python -m pytest -q
+
+  web:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+  typecheck:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: Install dependencies
+        working-directory: cairn
+        run: uv sync --frozen
+
+      - name: Mypy
+        working-directory: cairn
+        run: uv run --frozen mypy src/cairn

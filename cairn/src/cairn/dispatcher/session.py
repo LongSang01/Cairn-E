@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from cairn.dispatcher.protocol.client import ApiResult, CairnClient
 from cairn.dispatcher.runtime.process import ProcessResult
@@ -229,13 +229,17 @@ def _event_messages(event: dict[str, Any]) -> list[dict[str, Any]]:
 
     # claude stream-json: {"type":"assistant","message":{"role":..,"content":[..]}}
     if kind in ("assistant", "user"):
-        message = event.get("message") if isinstance(event.get("message"), dict) else event
+        message = event.get("message")
+        if not isinstance(message, dict):
+            message = event
         role = _normalize_role(message.get("role"), _normalize_role(kind))
         return _blocks_to_messages(role, message.get("content"))
 
     # pi --mode json and the generic event shape used by older workers.
     if kind in ("message", "message_end"):
-        message = event.get("message") if isinstance(event.get("message"), dict) else event
+        message = event.get("message")
+        if not isinstance(message, dict):
+            message = event
         role = _normalize_role(message.get("role"), "assistant")
         return _blocks_to_messages(role, message.get("content"))
 
@@ -450,7 +454,7 @@ class SessionStream:
         self.start()
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    def __exit__(self, exc_type, exc, tb) -> Literal[False]:
         if not self._finished:
             self.finish(status="failed", error=f"task crashed: {exc}" if exc else "session not finalized")
         return False
@@ -537,6 +541,7 @@ class SessionStream:
         if self.session_id is None:
             self._upload_once(status, result, error, duration_ms, native_session, usage)
             return
+        session_id = self.session_id
         # The flusher is stopped now, so this is the last chance to land the tail.
         self._flush(attempts=UPLOAD_RETRY_ATTEMPTS)
         payload = {
@@ -549,7 +554,7 @@ class SessionStream:
             **usage_payload(usage),
         }
         response = self._send_with_retry(
-            lambda: self._client.finish_session(self._project_id, self.session_id, payload),
+            lambda: self._client.finish_session(self._project_id, session_id, payload),
             attempts=UPLOAD_RETRY_ATTEMPTS,
             label="session finish",
         )

@@ -86,7 +86,7 @@ def run_decide_task(
         ]
         fact_ids = [fact.id for fact in project.facts]
         goal_ids = [goal.id for goal in project.goals if goal.status == "active"]
-        step_ids = [step["id"] for step in open_steps]
+        step_ids = [str(step["id"]) for step in open_steps]
 
         template = load_prompt(config.runtime.prompt_group, "decide.md")
         recall_block, document_block = _consume_recall_plan(client, project_id)
@@ -245,6 +245,7 @@ def run_decide_task(
             record("rejected")
             return "rejected"
 
+        assert data is not None
         if kind == "complete":
             response = client.complete(project_id, data["from"], data["description"], worker.name)
             if response.status_code == 403:

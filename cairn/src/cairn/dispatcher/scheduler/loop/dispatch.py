@@ -360,7 +360,11 @@ class DispatchMixin:
         return counts
 
     def _project_running_task_count(self, project_id: str) -> int:
-        return sum(1 for task in self.futures.values() if task.project_id == project_id)
+        count = 0
+        for task in self.futures.values():
+            if task.project_id == project_id:
+                count += 1
+        return count
 
     def _project_running_task_summary(self, project_id: str) -> list[str]:
         summary: list[str] = []
