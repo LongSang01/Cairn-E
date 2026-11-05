@@ -31,7 +31,9 @@ def run_startup_healthchecks(
     parallelism = max(1, min(len(workers), config.runtime.max_workers, 8))
     LOG.info("[*] Startup healthcheck: workers=%s parallelism=%s", len(workers), parallelism)
     with ThreadPoolExecutor(max_workers=parallelism) as executor:
-        future_map = {executor.submit(_check_worker, config, worker): worker.name for worker in workers}
+        future_map = {
+            executor.submit(_check_worker, config, worker): worker.name for worker in workers
+        }
         results: list[StartupHealthcheckResult] = []
         for future in as_completed(future_map):
             worker_name = future_map[future]
@@ -40,7 +42,9 @@ def run_startup_healthchecks(
             except Exception:
                 LOG.exception("startup healthcheck crashed worker=%s", worker_name)
                 results.append(
-                    StartupHealthcheckResult(worker_name, False, None, 0, "startup healthcheck crashed", "-")
+                    StartupHealthcheckResult(
+                        worker_name, False, None, 0, "startup healthcheck crashed", "-"
+                    )
                 )
 
     results.sort(key=lambda result: result.worker_name)
@@ -52,7 +56,10 @@ def format_failure_summary(results: list[StartupHealthcheckResult]) -> str:
     failed = [result for result in results if not result.ok]
     if not failed:
         return "startup healthchecks failed for all workers"
-    details = [f"{result.worker_name}(http={result.status or '-'}, detail={result.detail or '-'})" for result in failed]
+    details = [
+        f"{result.worker_name}(http={result.status or '-'}, detail={result.detail or '-'})"
+        for result in failed
+    ]
     return f"startup healthchecks failed for all workers: {', '.join(details)}"
 
 

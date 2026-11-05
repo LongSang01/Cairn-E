@@ -148,7 +148,9 @@ class QuestionsMixin:
                 )
             except Exception:  # a failed submit must not stop the question pass
                 LOG.exception(
-                    "failed to submit question project=%s question=%s", question.project_id, question.id
+                    "failed to submit question project=%s question=%s",
+                    question.project_id,
+                    question.id,
                 )
                 continue
             self.question_futures[future] = f"{question.project_id}/{question.id}"

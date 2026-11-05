@@ -30,7 +30,9 @@ class DispatchMixin:
             return
         active = [summary for summary in summaries if summary.status == "active"]
         if not active:
-            self._log_changed("dispatch/global", logging.INFO, "skip dispatch because no active projects")
+            self._log_changed(
+                "dispatch/global", logging.INFO, "skip dispatch because no active projects"
+            )
             return
 
         running_projects = self._ordered_projects(
@@ -213,7 +215,9 @@ class DispatchMixin:
                 summary_sink=self.request_summary,
             )
         except Exception:  # keep the loop alive when a submit fails
-            LOG.exception("failed to submit decide task project=%s worker=%s", project.project.id, worker.name)
+            LOG.exception(
+                "failed to submit decide task project=%s worker=%s", project.project.id, worker.name
+            )
             self._best_effort_release_decide(project.project.id, worker.name)
             return False
         self.futures[future] = RunningTask(
@@ -229,7 +233,12 @@ class DispatchMixin:
         )
         self.runtime_project_ids.add(project.project.id)
         self._clear_project_log_state(project.project.id)
-        LOG.info("dispatched decide project=%s worker=%s trigger=%s", project.project.id, worker.name, trigger)
+        LOG.info(
+            "dispatched decide project=%s worker=%s trigger=%s",
+            project.project.id,
+            worker.name,
+            trigger,
+        )
         return True
 
     def _dispatch_execute(self, project: ProjectDetail, export_yaml: str, step: Step) -> bool:
@@ -282,13 +291,25 @@ class DispatchMixin:
                 cancellation := TaskCancellation(),
             )
         except Exception:  # keep the loop alive when a submit fails
-            LOG.exception("failed to submit execute task project=%s step=%s worker=%s", project.project.id, step.id, worker.name)
+            LOG.exception(
+                "failed to submit execute task project=%s step=%s worker=%s",
+                project.project.id,
+                step.id,
+                worker.name,
+            )
             self._best_effort_release(project.project.id, step.id, worker.name)
             return False
-        self.futures[future] = RunningTask(project.project.id, "execute", worker.name, cancellation, step_id=step.id)
+        self.futures[future] = RunningTask(
+            project.project.id, "execute", worker.name, cancellation, step_id=step.id
+        )
         self.runtime_project_ids.add(project.project.id)
         self._clear_project_log_state(project.project.id)
-        LOG.info("dispatched execute project=%s step=%s worker=%s", project.project.id, step.id, worker.name)
+        LOG.info(
+            "dispatched execute project=%s step=%s worker=%s",
+            project.project.id,
+            step.id,
+            worker.name,
+        )
         return True
 
     def _select_worker(self, project_id: str, task_type: str) -> WorkerSelection:
@@ -338,7 +359,10 @@ class DispatchMixin:
             "worker selection project=%s task=%s candidates=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s blocked_task_type=%s chosen=%s",
             project_id,
             task_type,
-            [f"{worker.name}({running_counts.get(worker.name, 0)}/{worker.max_running},p{worker.priority})" for worker in candidates],
+            [
+                f"{worker.name}({running_counts.get(worker.name, 0)}/{worker.max_running},p{worker.priority})"
+                for worker in candidates
+            ],
             blocked_busy,
             blocked_unhealthy,
             blocked_rejected,
@@ -382,7 +406,9 @@ class DispatchMixin:
         return {
             task.step_id
             for task in self.futures.values()
-            if task.project_id == project_id and task.task_type == "execute" and task.step_id is not None
+            if task.project_id == project_id
+            and task.task_type == "execute"
+            and task.step_id is not None
         }
 
     def _running_project_count(self, summaries: list[ProjectSummary]) -> int:

@@ -30,15 +30,15 @@ def _create_project(client: TestClient) -> str:
     )
     assert response.status_code == 201
     payload = response.json()
-    assert payload["facts"] == [
-        {"id": "origin", "description": "starting point", "title": None}
-    ]
+    assert payload["facts"] == [{"id": "origin", "description": "starting point", "title": None}]
     assert payload["goals"][0]["id"] == "g001"
     assert payload["goals"][0]["parent"] is None
     return payload["project"]["id"]
 
 
-def test_project_workflow_creates_goal_step_finding_completes_and_reopens(client: TestClient) -> None:
+def test_project_workflow_creates_goal_step_finding_completes_and_reopens(
+    client: TestClient,
+) -> None:
     project_id = _create_project(client)
 
     response = client.post(
@@ -65,7 +65,9 @@ def test_project_workflow_creates_goal_step_finding_completes_and_reopens(client
     assert response.json()["from"] == ["origin"]
     assert response.json()["priority"] == 5
 
-    response = client.post(f"/projects/{project_id}/steps/s001/heartbeat", json={"worker": "executor"})
+    response = client.post(
+        f"/projects/{project_id}/steps/s001/heartbeat", json={"worker": "executor"}
+    )
     assert response.status_code == 200
     assert response.json()["status"] == "running"
 
@@ -87,7 +89,9 @@ def test_project_workflow_creates_goal_step_finding_completes_and_reopens(client
     assert payload["step"]["status"] == "done"
     assert payload["step"]["to"] == "f001"
 
-    response = client.post(f"/projects/{project_id}/goals/g002/close", json={"status": "achieved", "worker": "decider"})
+    response = client.post(
+        f"/projects/{project_id}/goals/g002/close", json={"status": "achieved", "worker": "decider"}
+    )
     assert response.status_code == 200
     assert response.json()["status"] == "achieved"
 
@@ -187,7 +191,10 @@ def test_titles_documents_and_recall_round_trip(client: TestClient) -> None:
     documents = client.get(f"/projects/{project_id}/documents").json()
     assert [document["title"] for document in documents] == ["nmap"]
     document_id = documents[0]["id"]
-    assert client.get(f"/projects/{project_id}/documents/{document_id}").json()["content"] == "PORT 6379 open"
+    assert (
+        client.get(f"/projects/{project_id}/documents/{document_id}").json()["content"]
+        == "PORT 6379 open"
+    )
 
     # Recall reaches the fact through its title and links the stored evidence.
     recall = client.get(f"/projects/{project_id}/recall", params={"q": "redis"}).json()
@@ -213,11 +220,18 @@ def test_titles_documents_and_recall_round_trip(client: TestClient) -> None:
     assert export["documents"][0]["id"] == document_id
 
 
-def test_stopping_project_releases_claims_and_decide_but_keeps_hints_writable(client: TestClient) -> None:
+def test_stopping_project_releases_claims_and_decide_but_keeps_hints_writable(
+    client: TestClient,
+) -> None:
     project_id = _create_project(client)
     client.post(
         f"/projects/{project_id}/steps",
-        json={"from": ["origin"], "description": "work", "creator": "worker-a", "worker": "worker-a"},
+        json={
+            "from": ["origin"],
+            "description": "work",
+            "creator": "worker-a",
+            "worker": "worker-a",
+        },
     )
     client.post(
         f"/projects/{project_id}/decide/claim",
@@ -231,27 +245,51 @@ def test_stopping_project_releases_claims_and_decide_but_keeps_hints_writable(cl
     detail = client.get(f"/projects/{project_id}").json()
     assert detail["steps"][0]["worker"] is None
     assert detail["steps"][0]["status"] == "pending"
-    assert client.post(
-        f"/projects/{project_id}/hints",
-        json={"content": "manual note", "creator": "human"},
-    ).status_code == 201
-    assert client.post(
-        f"/projects/{project_id}/steps",
-        json={"from": ["origin"], "description": "blocked", "creator": "decider", "worker": None},
-    ).status_code == 403
+    assert (
+        client.post(
+            f"/projects/{project_id}/hints",
+            json={"content": "manual note", "creator": "human"},
+        ).status_code
+        == 201
+    )
+    assert (
+        client.post(
+            f"/projects/{project_id}/steps",
+            json={
+                "from": ["origin"],
+                "description": "blocked",
+                "creator": "decider",
+                "worker": None,
+            },
+        ).status_code
+        == 403
+    )
 
 
-def test_step_creation_rejects_unknown_fact_and_mismatched_initial_worker(client: TestClient) -> None:
+def test_step_creation_rejects_unknown_fact_and_mismatched_initial_worker(
+    client: TestClient,
+) -> None:
     project_id = _create_project(client)
 
-    assert client.post(
-        f"/projects/{project_id}/steps",
-        json={"from": ["f999"], "description": "invalid", "creator": "decider", "worker": None},
-    ).status_code == 404
-    assert client.post(
-        f"/projects/{project_id}/steps",
-        json={"from": ["origin"], "description": "invalid", "creator": "decider", "worker": "executor"},
-    ).status_code == 400
+    assert (
+        client.post(
+            f"/projects/{project_id}/steps",
+            json={"from": ["f999"], "description": "invalid", "creator": "decider", "worker": None},
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/projects/{project_id}/steps",
+            json={
+                "from": ["origin"],
+                "description": "invalid",
+                "creator": "decider",
+                "worker": "executor",
+            },
+        ).status_code
+        == 400
+    )
 
 
 def test_settings_and_export_are_backed_by_the_same_database(client: TestClient) -> None:
@@ -288,14 +326,24 @@ def test_decide_update_step_can_reprioritize_and_abandon(client: TestClient) -> 
     assert response.json()["status"] == "abandoned"
     assert response.json()["note"] == "exhausted"
 
-    assert client.post(f"/projects/{project_id}/steps/s001/heartbeat", json={"worker": "w"}).status_code == 409
+    assert (
+        client.post(
+            f"/projects/{project_id}/steps/s001/heartbeat", json={"worker": "w"}
+        ).status_code
+        == 409
+    )
 
 
 def test_expired_step_and_decide_leases_can_be_reclaimed(client: TestClient) -> None:
     project_id = _create_project(client)
     client.post(
         f"/projects/{project_id}/steps",
-        json={"from": ["origin"], "description": "work", "creator": "worker-a", "worker": "worker-a"},
+        json={
+            "from": ["origin"],
+            "description": "work",
+            "creator": "worker-a",
+            "worker": "worker-a",
+        },
     )
     client.post(
         f"/projects/{project_id}/decide/claim",
@@ -311,7 +359,9 @@ def test_expired_step_and_decide_leases_can_be_reclaimed(client: TestClient) -> 
             (project_id,),
         )
 
-    response = client.post(f"/projects/{project_id}/steps/s001/heartbeat", json={"worker": "worker-b"})
+    response = client.post(
+        f"/projects/{project_id}/steps/s001/heartbeat", json={"worker": "worker-b"}
+    )
     assert response.status_code == 200
     assert response.json()["worker"] == "worker-b"
 
@@ -325,10 +375,13 @@ def test_expired_step_and_decide_leases_can_be_reclaimed(client: TestClient) -> 
 
 def test_live_decide_lease_rejects_competing_worker(client: TestClient) -> None:
     project_id = _create_project(client)
-    assert client.post(
-        f"/projects/{project_id}/decide/claim",
-        json={"worker": "worker-a", "trigger": "initial"},
-    ).status_code == 200
+    assert (
+        client.post(
+            f"/projects/{project_id}/decide/claim",
+            json={"worker": "worker-a", "trigger": "initial"},
+        ).status_code
+        == 200
+    )
 
     response = client.post(
         f"/projects/{project_id}/decide/claim",
@@ -352,10 +405,17 @@ def test_root_goal_cannot_be_closed_directly(client: TestClient) -> None:
 
 def test_project_summary_exposes_fgs_counts(client: TestClient) -> None:
     project_id = _create_project(client)
-    client.post(f"/projects/{project_id}/steps", json={"from": ["origin"], "description": "w", "creator": "d"})
+    client.post(
+        f"/projects/{project_id}/steps",
+        json={"from": ["origin"], "description": "w", "creator": "d"},
+    )
     client.post(
         f"/projects/{project_id}/steps/s001/conclude",
-        json={"worker": "d", "facts": [{"description": "f"}], "findings": [{"kind": "k", "description": "d"}]},
+        json={
+            "worker": "d",
+            "facts": [{"description": "f"}],
+            "findings": [{"kind": "k", "description": "d"}],
+        },
     )
 
     summary = client.get("/projects").json()[0]
@@ -401,7 +461,10 @@ def test_question_can_be_claimed_then_answered_once(client: TestClient) -> None:
     assert question["answer"] is None
     assert question["started_at"] is None
     assert [q["id"] for q in client.get(f"/projects/{project_id}/questions").json()] == ["q001"]
-    assert client.get(f"/projects/{project_id}/questions/q001").json()["content"] == question["content"]
+    assert (
+        client.get(f"/projects/{project_id}/questions/q001").json()["content"]
+        == question["content"]
+    )
     assert client.get(f"/projects/{project_id}/questions/q999").status_code == 404
 
     # An unanswered question has no worker that could report a result yet.
@@ -454,10 +517,13 @@ def test_question_can_be_claimed_then_answered_once(client: TestClient) -> None:
     assert answered["duration_ms"] == 1234
     assert answered["answered_at"] is not None
 
-    assert client.post(
-        f"/projects/{project_id}/questions/q001/answer",
-        json={"status": "answered", "answer": "again"},
-    ).status_code == 409
+    assert (
+        client.post(
+            f"/projects/{project_id}/questions/q001/answer",
+            json={"status": "answered", "answer": "again"},
+        ).status_code
+        == 409
+    )
     assert client.post(f"/projects/{project_id}/questions/q001/cancel").status_code == 409
 
 
@@ -506,7 +572,9 @@ def test_cancel_and_clear_only_touch_settled_questions(client: TestClient) -> No
 def test_question_content_must_not_be_blank(client: TestClient) -> None:
     project_id = _create_project(client)
 
-    assert client.post(f"/projects/{project_id}/questions", json={"content": "   "}).status_code == 422
+    assert (
+        client.post(f"/projects/{project_id}/questions", json={"content": "   "}).status_code == 422
+    )
     assert client.get("/projects/proj_999/questions").status_code == 404
 
 
@@ -595,9 +663,12 @@ def test_context_summary_round_trip(client: TestClient) -> None:
     assert response.json()["step_summary"] == stored["step_summary"]
 
     assert client.get("/projects/proj_999/context").status_code == 404
-    assert client.put(
-        "/projects/proj_999/context", json={"summary": "- x", "facts_covered": 1}
-    ).status_code == 404
+    assert (
+        client.put(
+            "/projects/proj_999/context", json={"summary": "- x", "facts_covered": 1}
+        ).status_code
+        == 404
+    )
 
 
 def test_healthz_reports_database_and_schema_version(client: TestClient) -> None:
@@ -625,7 +696,10 @@ def test_project_detail_supports_conditional_get(client: TestClient) -> None:
     assert unchanged.headers["etag"] == tag
 
     # A weak validator and a wildcard also match the current representation.
-    assert client.get(f"/projects/{project_id}", headers={"If-None-Match": f"W/{tag}"}).status_code == 304
+    assert (
+        client.get(f"/projects/{project_id}", headers={"If-None-Match": f"W/{tag}"}).status_code
+        == 304
+    )
     assert client.get(f"/projects/{project_id}", headers={"If-None-Match": "*"}).status_code == 304
 
     # Mutating the graph changes the tag, so the stale copy is no longer reused.

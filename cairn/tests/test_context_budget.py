@@ -56,7 +56,12 @@ def _graph(*, facts: int = 60, steps: int = 10) -> str:
             for index in range(1, steps + 1)
         ],
         "findings": [
-            {"id": f"d{index:03d}", "kind": "finding", "description": f"finding {index}", "step": "s001"}
+            {
+                "id": f"d{index:03d}",
+                "kind": "finding",
+                "description": f"finding {index}",
+                "step": "s001",
+            }
             for index in range(1, 6)
         ],
     }
@@ -105,7 +110,10 @@ def test_safety_margin_is_clamped_at_both_ends() -> None:
 
     ceiling = resolve_snapshot_budget(
         ContextBudgetConfig(
-            context_window=1_000_000, safety_ratio=0.05, safety_min_tokens=100, safety_max_tokens=3_000
+            context_window=1_000_000,
+            safety_ratio=0.05,
+            safety_min_tokens=100,
+            safety_max_tokens=3_000,
         ),
         _worker(),
     )
@@ -136,7 +144,12 @@ def test_compacted_view_carries_titles_and_document_ids() -> None:
         "project": {"title": "engagement", "status": "active"},
         "facts": [
             {"id": "f001", "title": "old fact", "description": "x" * 40_000, "from_step": None},
-            {"id": "f002", "title": "recent title", "description": "recent body", "doc_ids": ["doc001"]},
+            {
+                "id": "f002",
+                "title": "recent title",
+                "description": "recent body",
+                "doc_ids": ["doc001"],
+            },
             {"id": "f003", "description": "no title here", "from_step": None},
         ],
         "goals": [{"id": "g001", "parent": None, "description": "root", "status": "active"}],
@@ -266,7 +279,10 @@ def test_disabled_budget_keeps_the_graph_verbatim() -> None:
 def test_summarize_prompt_carries_previous_summary_and_ids() -> None:
     prompt = summarize_prompt(
         "- old: ssh open (f001)",
-        [{"id": "f002", "description": "db reachable"}, {"id": "f003", "description": "creds found"}],
+        [
+            {"id": "f002", "description": "db reachable"},
+            {"id": "f003", "description": "creds found"},
+        ],
     )
 
     assert "- old: ssh open (f001)" in prompt
@@ -350,7 +366,12 @@ def test_summarize_prompt_covers_steps_and_findings() -> None:
         "- old: ssh open (f001)",
         [{"id": "f002", "description": "db reachable"}],
         steps=[
-            {"id": "s003", "description": "sqlmap /login", "result": "no injectable params", "status": "done"}
+            {
+                "id": "s003",
+                "description": "sqlmap /login",
+                "result": "no injectable params",
+                "status": "done",
+            }
         ],
         findings=[{"id": "d004", "description": "openssh 8.2"}],
     )

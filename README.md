@@ -134,16 +134,16 @@ Supported worker backends: **Claude Code**, **Codex**, and **Pi**.
 ## Getting Started
 
 **Prerequisites**
- 
+
 - macOS or Linux
 - Python ≥ 3.12
 - Docker (container execution only — not needed for local mode)
 
 
 ### Pull required images
- 
+
 Both setup methods require the worker container image:
- 
+
 ```bash
 docker pull --platform=linux/amd64 ghcr.io/oritera/cairn-worker-container:latest
 ```
@@ -153,32 +153,32 @@ Create your local dispatcher configuration and fill in your LLM endpoints and AP
 ```bash
 cp dispatch.example.yaml dispatch.yaml
 ```
- 
+
 ### Docker Compose (recommended)
- 
+
 Pull the base image used to build Cairn:
- 
+
 ```bash
 docker pull ghcr.io/astral-sh/uv:python3.13-trixie-slim
 ```
- 
+
 ```bash
 docker compose up --build
 ```
- 
+
 This starts `cairn-server` on the internal network only, fronted by `cairn-nginx` on port `8000` with HTTP Basic Auth, plus `cairn-dispatcher` once the server passes its health check. The dispatcher mounts `dispatch.yaml` from the project root and connects to Docker via the host socket. Data is persisted to `./datas/cairn/`.
 
 The nginx front reads `web.auth` from `dispatch.yaml` at startup; without it, the proxy starts with a warning and no authentication. Users store plaintext passwords — the nginx entrypoint hashes them (SHA-512 crypt via the base image's built-in busybox `mkpasswd`, no extra packages) into its `.htpasswd` at container start. Keep `server:` pointing at `http://cairn-server:8000` (internal) in Compose mode. To add or change users, edit `web.auth` and restart:
- 
+
 ### Manual
- 
+
 ```bash
 # Start the server
 uv run --project cairn cairn serve
- 
+
 # Run the dispatcher
 uv run --project cairn cairn dispatch --config dispatch.yaml
- 
+
 # Run startup health checks only
 uv run --project cairn cairn dispatch --config dispatch.yaml --startup-healthcheck-only
 ```

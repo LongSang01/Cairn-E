@@ -162,8 +162,7 @@ def get_project(project_id: str, request: Request, response: Response):
         row = get_project_or_404(conn, project_id)
 
         facts = conn.execute(
-            "SELECT id, title, description, step_id FROM facts"
-            " WHERE project_id = ? ORDER BY rowid",
+            "SELECT id, title, description, step_id FROM facts WHERE project_id = ? ORDER BY rowid",
             (project_id,),
         ).fetchall()
         hints = conn.execute(
@@ -311,7 +310,17 @@ def complete_project(project_id: str, body: CompleteRequest):
                 creator, worker, last_heartbeat_at, created_at, concluded_at, result_fact_id, note
             ) VALUES (?, ?, ?, 'completion', ?, NULL, 0, 'done', ?, ?, ?, ?, ?, NULL, 'completion')
             """,
-            (sid, project_id, root["id"], body.description, body.worker, body.worker, now, now, now),
+            (
+                sid,
+                project_id,
+                root["id"],
+                body.description,
+                body.worker,
+                body.worker,
+                now,
+                now,
+                now,
+            ),
         )
         for fid in body.from_:
             conn.execute(

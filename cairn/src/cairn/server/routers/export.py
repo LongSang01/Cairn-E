@@ -44,7 +44,9 @@ def _load_project_data(conn, project_id: str):
     goals = rows("SELECT * FROM goals WHERE project_id = ? ORDER BY created_at, rowid")
     steps = rows("SELECT * FROM steps WHERE project_id = ? ORDER BY created_at, rowid")
     findings = rows("SELECT * FROM findings WHERE project_id = ? ORDER BY created_at, rowid")
-    hints = rows("SELECT content, creator, created_at FROM hints WHERE project_id = ? ORDER BY created_at")
+    hints = rows(
+        "SELECT content, creator, created_at FROM hints WHERE project_id = ? ORDER BY created_at"
+    )
 
     sources_by_step: dict[str, list[str]] = {}
     for step in steps:
@@ -58,7 +60,9 @@ def _load_project_data(conn, project_id: str):
 
 
 def _export_yaml(conn, project_id: str) -> str:
-    proj, facts, goals, steps, findings, hints, sources_by_step = _load_project_data(conn, project_id)
+    proj, facts, goals, steps, findings, hints, sources_by_step = _load_project_data(
+        conn, project_id
+    )
     docs_by_fact, docs_by_step = doc_ids_by_owner(conn, project_id)
 
     data: dict = {
@@ -153,7 +157,9 @@ def _export_yaml_documents(conn, project_id: str) -> list[dict]:
 
 
 def _export_timeline(conn, project_id: str) -> str:
-    proj, facts, goals, steps, findings, hints, sources_by_step = _load_project_data(conn, project_id)
+    proj, facts, goals, steps, findings, hints, sources_by_step = _load_project_data(
+        conn, project_id
+    )
 
     facts_by_id = {f["id"]: f["description"] for f in facts}
 

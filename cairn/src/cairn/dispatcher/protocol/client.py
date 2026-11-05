@@ -115,7 +115,9 @@ class CairnClient:
 
     def claim_decide(self, project_id: str, worker: str, trigger: str) -> ApiResult:
         return self._request_json(
-            "POST", f"/projects/{project_id}/decide/claim", json={"worker": worker, "trigger": trigger}
+            "POST",
+            f"/projects/{project_id}/decide/claim",
+            json={"worker": worker, "trigger": trigger},
         )
 
     def decide_heartbeat(self, project_id: str, worker: str) -> ApiResult:
@@ -193,7 +195,9 @@ class CairnClient:
             json={"status": status, "worker": worker, "note": note},
         )
 
-    def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
+    def complete(
+        self, project_id: str, from_ids: list[str], description: str, worker: str
+    ) -> ApiResult:
         return self._request_json(
             "POST",
             f"/projects/{project_id}/complete",
@@ -214,16 +218,16 @@ class CairnClient:
             json={"messages": messages},
         )
 
-    def finish_session(self, project_id: str, session_id: str, payload: dict[str, Any]) -> ApiResult:
+    def finish_session(
+        self, project_id: str, session_id: str, payload: dict[str, Any]
+    ) -> ApiResult:
         return self._request_json(
             "PATCH", f"/projects/{project_id}/sessions/{session_id}", json=payload
         )
 
     def session_heartbeat(self, project_id: str, session_id: str) -> ApiResult:
         """Tell the server this session is still running even if stdout is quiet."""
-        return self._request_json(
-            "POST", f"/projects/{project_id}/sessions/{session_id}/heartbeat"
-        )
+        return self._request_json("POST", f"/projects/{project_id}/sessions/{session_id}/heartbeat")
 
     # --- Side questions: read-only snapshots, never written back into the graph ----
 
@@ -360,7 +364,9 @@ class CairnClient:
             json={"queries": queries, "doc_ids": doc_ids},
         )
 
-    def _request_json(self, method: str, path: str, json: dict[str, Any] | None = None) -> ApiResult:
+    def _request_json(
+        self, method: str, path: str, json: dict[str, Any] | None = None
+    ) -> ApiResult:
         try:
             response = self._session().request(
                 method,

@@ -41,13 +41,17 @@ class JsonFormatter(logging.Formatter):
         request_id = correlation_id.get()
         if request_id:
             payload["request_id"] = request_id
-        payload.update({key: value for key, value in record.__dict__.items() if key not in self._RESERVED})
+        payload.update(
+            {key: value for key, value in record.__dict__.items() if key not in self._RESERVED}
+        )
         if record.exc_info and record.exc_info[0] is not None:
             payload["exc"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-def configure_logging(level: str = "INFO", *, bare: bool = False, json_format: bool = False) -> None:
+def configure_logging(
+    level: str = "INFO", *, bare: bool = False, json_format: bool = False
+) -> None:
     handler = logging.StreamHandler()
     if bare:
         handler.setFormatter(logging.Formatter(fmt="%(message)s"))
@@ -60,6 +64,8 @@ def configure_logging(level: str = "INFO", *, bare: bool = False, json_format: b
                 datefmt="%Y-%m-%d %H:%M:%S",
             )
         )
-    logging.basicConfig(level=getattr(logging, level.upper(), logging.INFO), handlers=[handler], force=True)
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO), handlers=[handler], force=True
+    )
     logging.getLogger("requests").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)

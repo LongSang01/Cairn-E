@@ -64,7 +64,9 @@ def run_decide_task(
         container_name = container_manager.ensure_running(project_id)
 
         if task_healthcheck_enabled(config):
-            health = _healthcheck(driver, worker, healthcheck_timeout, project_id, cancellation, lease)
+            health = _healthcheck(
+                driver, worker, healthcheck_timeout, project_id, cancellation, lease
+            )
             if health is not None:
                 return health
 
@@ -169,7 +171,13 @@ def run_decide_task(
 
         cancelled = cancel_reason(result, cancellation)
         if cancelled is not None:
-            LOG.info("decide cancelled project=%s worker=%s reason=%s execute_ms=%s", project_id, worker.name, cancelled, execute_ms)
+            LOG.info(
+                "decide cancelled project=%s worker=%s reason=%s execute_ms=%s",
+                project_id,
+                worker.name,
+                cancelled,
+                execute_ms,
+            )
             record("cancelled", cancelled)
             return "cancelled"
         if lease.failure is not None:
@@ -249,7 +257,11 @@ def run_decide_task(
         if kind == "complete":
             response = client.complete(project_id, data["from"], data["description"], worker.name)
             if response.status_code == 403:
-                LOG.info("project became inactive during decide complete project=%s worker=%s", project_id, worker.name)
+                LOG.info(
+                    "project became inactive during decide complete project=%s worker=%s",
+                    project_id,
+                    worker.name,
+                )
                 record("success")
                 return "success"
             if not response.ok:
@@ -304,7 +316,9 @@ def run_decide_task(
             total_ms,
         )
         if applied["total"] == 0:
-            LOG.warning("decide applied no graph change project=%s worker=%s", project_id, worker.name)
+            LOG.warning(
+                "decide applied no graph change project=%s worker=%s", project_id, worker.name
+            )
             record("failed", "applied no graph change")
             return "failed"
         record("success")
@@ -339,7 +353,12 @@ def _apply_actions(
         )
         if response.ok:
             applied["goals_added"] += 1
-            LOG.info("decide added goal project=%s worker=%s goal=%s", project_id, worker_name, goal["description"])
+            LOG.info(
+                "decide added goal project=%s worker=%s goal=%s",
+                project_id,
+                worker_name,
+                goal["description"],
+            )
         else:
             _log_write_failure("goal add", project_id, worker_name, response)
 
@@ -353,7 +372,13 @@ def _apply_actions(
         )
         if response.ok:
             applied["goals_closed"] += 1
-            LOG.info("decide closed goal project=%s worker=%s goal=%s status=%s", project_id, worker_name, goal["id"], goal["status"])
+            LOG.info(
+                "decide closed goal project=%s worker=%s goal=%s status=%s",
+                project_id,
+                worker_name,
+                goal["id"],
+                goal["status"],
+            )
         else:
             _log_write_failure("goal close", project_id, worker_name, response)
 
@@ -402,7 +427,12 @@ def _apply_actions(
         else:
             _log_write_failure("step update", project_id, worker_name, response)
 
-    applied["total"] = applied["goals_added"] + applied["goals_closed"] + applied["steps_added"] + applied["steps_updated"]
+    applied["total"] = (
+        applied["goals_added"]
+        + applied["goals_closed"]
+        + applied["steps_added"]
+        + applied["steps_updated"]
+    )
     return applied
 
 
@@ -526,8 +556,12 @@ def _summary_request(
     return request or None
 
 
-def _healthcheck(driver, worker: WorkerConfig, timeout: int, project_id: str, cancellation, lease) -> str | None:
-    LOG.info("checking worker health project=%s worker=%s timeout=%ss", project_id, worker.name, timeout)
+def _healthcheck(
+    driver, worker: WorkerConfig, timeout: int, project_id: str, cancellation, lease
+) -> str | None:
+    LOG.info(
+        "checking worker health project=%s worker=%s timeout=%ss", project_id, worker.name, timeout
+    )
     health = driver.check_health(worker, timeout=timeout)
     if cancellation.is_cancelled:
         LOG.info(
@@ -613,7 +647,12 @@ def _render_recall(client: CairnClient, project_id: str, plan: RecallPlan) -> st
                 return "\n".join(lines)
             lines.append(line)
             used += len(line) + 1
-    LOG.info("recall injected project=%s queries=%s hits=%s truncated=false", project_id, plan.queries, len(lines))
+    LOG.info(
+        "recall injected project=%s queries=%s hits=%s truncated=false",
+        project_id,
+        plan.queries,
+        len(lines),
+    )
     return "\n".join(lines) or "(none)"
 
 
@@ -655,7 +694,7 @@ def _slice_document(content: str, offset: int, room: int, document_id: str) -> s
     head = remaining[:head_len]
     if tail_len <= 0:
         return f"{head}\n{marker}"
-    return f"{head}\n{marker}\n{remaining[len(remaining) - tail_len:]}"
+    return f"{head}\n{marker}\n{remaining[len(remaining) - tail_len :]}"
 
 
 def _render_documents(client: CairnClient, project_id: str, plan: RecallPlan) -> str:
@@ -692,8 +731,6 @@ def _render_documents(client: CairnClient, project_id: str, plan: RecallPlan) ->
 
 def _store_lookups(client: CairnClient, project_id: str, lookups: dict) -> None:
     try:
-        client.save_recall_plan(
-            project_id, queries=lookups["recall"], doc_ids=lookups["doc_ids"]
-        )
+        client.save_recall_plan(project_id, queries=lookups["recall"], doc_ids=lookups["doc_ids"])
     except Exception:
         LOG.warning("recall plan write failed project=%s", project_id, exc_info=True)

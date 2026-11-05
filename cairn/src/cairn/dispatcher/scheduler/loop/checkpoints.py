@@ -14,7 +14,9 @@ class CheckpointsMixin:
     def _refresh_runtime_projects(self, summaries: list[ProjectSummary]) -> None:
         active_ids = {summary.id for summary in summaries if summary.status == "active"}
         self.runtime_project_ids.intersection_update(active_ids)
-        inactive_status_by_id = {summary.id: summary.status for summary in summaries if summary.status != "active"}
+        inactive_status_by_id = {
+            summary.id: summary.status for summary in summaries if summary.status != "active"
+        }
         for project_id, status in list(self._inactive_cleanup_done.items()):
             current_status = inactive_status_by_id.get(project_id)
             if current_status != status:

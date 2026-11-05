@@ -17,6 +17,7 @@ _LATIN_TOKEN = re.compile(r"[a-z0-9][a-z0-9_.\-/]{1,}")
 
 _CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
 
+
 def recall_tokens(query: str) -> list[str]:
     """Keyword tokens: latin words plus CJK bigrams, de-duplicated in order."""
     tokens = [token.lower() for token in _LATIN_TOKEN.findall((query or "").lower())]
@@ -31,6 +32,7 @@ def recall_tokens(query: str) -> list[str]:
         unique.setdefault(token, None)
     return list(unique)
 
+
 def _recall_score(tokens: list[str], title: str | None, description: str | None) -> int:
     heading = (title or "").lower()
     body = (description or "").lower()
@@ -41,6 +43,7 @@ def _recall_score(tokens: list[str], title: str | None, description: str | None)
         elif token in body:
             score += 1
     return score
+
 
 def recall(
     conn: sqlite3.Connection, project_id: str, query: str, *, limit: int = 5
@@ -97,11 +100,13 @@ def recall(
 
     return RecallResponse(query=query.strip(), facts=facts[:limit], steps=steps[:limit])
 
+
 def get_recall_plan(conn: sqlite3.Connection, project_id: str) -> RecallPlan:
     row = conn.execute("SELECT recall_plan FROM projects WHERE id = ?", (project_id,)).fetchone()
     if row is None:
         raise HTTPException(404, "Project not found")
     return _parse_recall_plan(row["recall_plan"])
+
 
 def save_recall_plan(conn: sqlite3.Connection, project_id: str, plan: RecallPlan) -> RecallPlan:
     cursor = conn.execute(
@@ -111,6 +116,7 @@ def save_recall_plan(conn: sqlite3.Connection, project_id: str, plan: RecallPlan
     if cursor.rowcount == 0:
         raise HTTPException(404, "Project not found")
     return plan
+
 
 def _parse_recall_plan(raw: str | None) -> RecallPlan:
     if not raw:

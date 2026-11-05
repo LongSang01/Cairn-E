@@ -47,7 +47,9 @@ def run_execute_task(
     project_id = project.project.id
     task_started = time.perf_counter()
     healthcheck_timeout = config.runtime.healthcheck_timeout
-    lease = HeartbeatLease.for_step(client, project_id, step.id, worker.name, config.runtime.interval)
+    lease = HeartbeatLease.for_step(
+        client, project_id, step.id, worker.name, config.runtime.interval
+    )
     lease.start()
     stream: SessionStream | None = None
     try:
@@ -284,7 +286,9 @@ def run_execute_task(
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
     except Exception:
-        LOG.exception("execute task crashed project=%s step=%s worker=%s", project_id, step.id, worker.name)
+        LOG.exception(
+            "execute task crashed project=%s step=%s worker=%s", project_id, step.id, worker.name
+        )
         if stream is not None:
             stream.finish(status="failed", error="task crashed")
         best_effort_release(client, project_id, step.id, worker.name)
@@ -319,7 +323,12 @@ def _try_conclude_fallback(
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
     if lease.failure is not None:
-        LOG.warning("conclude fallback skipped because heartbeat already lost project=%s step=%s worker=%s", project_id, step.id, worker.name)
+        LOG.warning(
+            "conclude fallback skipped because heartbeat already lost project=%s step=%s worker=%s",
+            project_id,
+            step.id,
+            worker.name,
+        )
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
     if cancellation.is_cancelled:
@@ -333,7 +342,9 @@ def _try_conclude_fallback(
         best_effort_release(client, project_id, step.id, worker.name)
         return "cancelled"
 
-    if not project_allows_conclude_fallback(client, project_id, worker_name=worker.name, step_id=step.id):
+    if not project_allows_conclude_fallback(
+        client, project_id, worker_name=worker.name, step_id=step.id
+    ):
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
 
@@ -363,7 +374,9 @@ def _try_conclude_fallback(
         },
     )
     conclude_argv = driver.build_conclude(worker, prompt, session)
-    LOG.info("starting conclude fallback project=%s step=%s worker=%s", project_id, step.id, worker.name)
+    LOG.info(
+        "starting conclude fallback project=%s step=%s worker=%s", project_id, step.id, worker.name
+    )
     stream = start_session(
         client,
         project_id,
@@ -404,6 +417,7 @@ def _try_conclude_fallback(
             native_session=session,
             usage=usage,
         )
+
     if cancelled is not None:
         LOG.info(
             "conclude cancelled project=%s step=%s worker=%s reason=%s conclude_ms=%s",

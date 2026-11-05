@@ -35,6 +35,9 @@ jobs:
       - name: Lint
         run: uv run --project cairn --frozen ruff check .
 
+      - name: Format check
+        run: uv run --project cairn --frozen ruff format --check .
+
   test:
     runs-on: ubuntu-latest
     strategy:

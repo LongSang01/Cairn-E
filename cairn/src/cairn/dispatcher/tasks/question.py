@@ -57,7 +57,9 @@ def run_question_task(
     try:
         current = client.get_question(project_id, question.id)
     except Exception:  # noqa: BLE001 - a vanished question is a normal cancellation
-        LOG.info("question disappeared before start project=%s question=%s", project_id, question.id)
+        LOG.info(
+            "question disappeared before start project=%s question=%s", project_id, question.id
+        )
         return "cancelled"
     if current.status != "running":
         LOG.info(
@@ -199,7 +201,9 @@ def _answer(
         return
     if response.status_code == 409:
         # Cancelled by the human, or the claim moved to another dispatcher: drop it.
-        LOG.info("question was cancelled or reclaimed before its answer landed question=%s", question_id)
+        LOG.info(
+            "question was cancelled or reclaimed before its answer landed question=%s", question_id
+        )
         return
     if not response.ok:
         LOG.warning(

@@ -33,12 +33,16 @@ class CoreMixin:
         self.config = DispatchConfig.load(config_path)
         self.client = CairnClient(self.config.server)
         if self.config.runtime.execution == "local":
-            self.container_manager: ExecutionBackend = LocalBackend(self.config.local or LocalConfig())
+            self.container_manager: ExecutionBackend = LocalBackend(
+                self.config.local or LocalConfig()
+            )
         else:
             assert self.config.container is not None
             self.container_manager = ContainerManager(self.config.container)
         self.executor = ThreadPoolExecutor(max_workers=self.config.runtime.max_workers)
-        self.cleanup_executor = ThreadPoolExecutor(max_workers=max(1, min(8, self.config.runtime.max_workers)))
+        self.cleanup_executor = ThreadPoolExecutor(
+            max_workers=max(1, min(8, self.config.runtime.max_workers))
+        )
         # Side questions get their own pool: they never take a decide/execute slot.
         self.question_executor = ThreadPoolExecutor(max_workers=self.config.runtime.max_questions)
         # Summaries run after the Decide that asked for them, on their own small pool.
@@ -153,7 +157,13 @@ class CoreMixin:
                 LOG.info("[+] %-8s %s (workers: %s)", binary, path, workers)
             else:
                 available.append(binary)
-                LOG.warning("[!] %-8s %s found but `%s --help` failed (workers: %s)", binary, path, binary, workers)
+                LOG.warning(
+                    "[!] %-8s %s found but `%s --help` failed (workers: %s)",
+                    binary,
+                    path,
+                    binary,
+                    workers,
+                )
 
         if not available:
             raise RuntimeError(
@@ -198,7 +208,10 @@ class CoreMixin:
     def _validate_server_settings(self) -> None:
         settings = self.client.get_settings()
         interval = self.config.runtime.interval
-        for name, value in (("step_timeout", settings.step_timeout), ("decide_timeout", settings.decide_timeout)):
+        for name, value in (
+            ("step_timeout", settings.step_timeout),
+            ("decide_timeout", settings.decide_timeout),
+        ):
             if value <= interval:
                 raise RuntimeError(
                     f"server {name}={value}s must be greater than dispatcher interval={interval}s"

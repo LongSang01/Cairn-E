@@ -63,9 +63,7 @@ def get_session(
         row = get_session_or_404(conn, project_id, session_id)
         detail = SessionDetail(
             **session_to_model(row).model_dump(),
-            messages=build_session_messages(
-                conn, project_id, session_id, since_seq=since_seq
-            ),
+            messages=build_session_messages(conn, project_id, session_id, since_seq=since_seq),
         )
     headers, not_modified = cache_headers(request, detail)
     response.headers.update(headers)
@@ -96,9 +94,7 @@ def stream_session(
         get_session_or_404(conn, project_id, session_id)
 
     resume_from = _resume_from(request, since_seq)
-    return sse_response(
-        session_event_stream(project_id, session_id, last_event_id=resume_from)
-    )
+    return sse_response(session_event_stream(project_id, session_id, last_event_id=resume_from))
 
 
 def _resume_from(request: Request, since_seq: int | None) -> int | None:
@@ -158,9 +154,7 @@ async def session_event_stream(
             # replays everything on resume).
             last_change = time.monotonic()
             newest = messages[-1]["seq"] if messages else -1
-            yield sse_event(
-                "snapshot", {"session": session, "messages": messages}, event_id=newest
-            )
+            yield sse_event("snapshot", {"session": session, "messages": messages}, event_id=newest)
             snapshot_sent = True
             sent_seq = newest
         elif messages:
@@ -375,6 +369,14 @@ def _insert_messages(conn, project_id: str, session_id: str, messages, *, start:
         conn.execute(
             "INSERT INTO session_messages (session_id, project_id, seq, role, content, raw, client_msg_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (session_id, project_id, seq, message.role, message.content, message.raw, message.msg_id),
+            (
+                session_id,
+                project_id,
+                seq,
+                message.role,
+                message.content,
+                message.raw,
+                message.msg_id,
+            ),
         )
         seq += 1

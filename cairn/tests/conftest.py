@@ -195,7 +195,11 @@ class FakeClient:
 
     def recall(self, _project_id: str, query: str, *, limit: int = 5) -> RecallResponse:
         self.recalled.append((_project_id, query))
-        hits = [hit for hit in self.recall_hits if query.lower() in (hit.title or hit.description).lower()]
+        hits = [
+            hit
+            for hit in self.recall_hits
+            if query.lower() in (hit.title or hit.description).lower()
+        ]
         return RecallResponse(query=query, facts=hits[:limit], steps=[])
 
     def get_document(self, _project_id: str, document_id: str) -> Document:
@@ -223,9 +227,7 @@ class FakeClient:
         status: str = "done",
         note: str | None = None,
     ) -> ApiResult:
-        normalized = [
-            item if isinstance(item, dict) else {"description": item} for item in facts
-        ]
+        normalized = [item if isinstance(item, dict) else {"description": item} for item in facts]
         self.concluded_details.append(normalized)
         self.concluded.append(
             (project_id, step_id, worker, [item["description"] for item in normalized], findings)
@@ -244,7 +246,9 @@ class FakeClient:
             },
         )
 
-    def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
+    def complete(
+        self, project_id: str, from_ids: list[str], description: str, worker: str
+    ) -> ApiResult:
         self.completed.append((project_id, from_ids, description, worker))
         return ApiResult(200, {})
 

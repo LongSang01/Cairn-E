@@ -89,16 +89,26 @@ def test_session_unknown_ids_return_404(client: TestClient) -> None:
     assert client.get(f"/projects/{project_id}/sessions/x001").status_code == 404
     assert client.get("/projects/proj_999/sessions").status_code == 404
     assert client.post("/projects/proj_999/sessions", json=_session_payload()).status_code == 404
-    assert client.patch(f"/projects/{project_id}/sessions/x001", json={"status": "success"}).status_code == 404
     assert (
-        client.post(f"/projects/{project_id}/sessions/x001/messages", json={"messages": []}).status_code == 404
+        client.patch(
+            f"/projects/{project_id}/sessions/x001", json={"status": "success"}
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/projects/{project_id}/sessions/x001/messages", json={"messages": []}
+        ).status_code
+        == 404
     )
     assert client.post(f"/projects/{project_id}/sessions/x001/heartbeat").status_code == 404
 
 
 def test_live_session_appends_messages_and_finishes(client: TestClient) -> None:
     project_id = _create_project(client)
-    created = client.post(f"/projects/{project_id}/sessions", json=_session_payload(status="running")).json()
+    created = client.post(
+        f"/projects/{project_id}/sessions", json=_session_payload(status="running")
+    ).json()
     assert created["status"] == "running"
     assert created["message_count"] == 2
     session_id = created["id"]
@@ -123,7 +133,12 @@ def test_live_session_appends_messages_and_finishes(client: TestClient) -> None:
 
     finished = client.patch(
         f"/projects/{project_id}/sessions/{session_id}",
-        json={"status": "success", "returncode": 0, "duration_ms": 1200, "native_session": "native-9"},
+        json={
+            "status": "success",
+            "returncode": 0,
+            "duration_ms": 1200,
+            "native_session": "native-9",
+        },
     )
     assert finished.status_code == 200
     assert finished.json()["status"] == "success"
@@ -226,7 +241,12 @@ def test_build_messages_expands_claude_stream_json() -> None:
                         "content": [
                             {"type": "thinking", "thinking": "先看看工作目录"},
                             {"type": "text", "text": "我先列出文件"},
-                            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls -la"}},
+                            {
+                                "type": "tool_use",
+                                "id": "t1",
+                                "name": "Bash",
+                                "input": {"command": "ls -la"},
+                            },
                         ],
                     },
                 }
@@ -237,7 +257,11 @@ def test_build_messages_expands_claude_stream_json() -> None:
                     "message": {
                         "role": "user",
                         "content": [
-                            {"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "a.txt"}]}
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "t1",
+                                "content": [{"type": "text", "text": "a.txt"}],
+                            }
                         ],
                     },
                 }
@@ -251,7 +275,9 @@ def test_build_messages_expands_claude_stream_json() -> None:
                     },
                 }
             ),
-            json.dumps({"type": "result", "subtype": "success", "result": '{"accepted":true,"data":{}}'}),
+            json.dumps(
+                {"type": "result", "subtype": "success", "result": '{"accepted":true,"data":{}}'}
+            ),
         ]
     )
 
@@ -277,7 +303,12 @@ def test_build_messages_expands_codex_json_items() -> None:
         [
             json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
             json.dumps({"type": "turn.started"}),
-            json.dumps({"type": "item.completed", "item": {"type": "reasoning", "text": "need to list files"}}),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "reasoning", "text": "need to list files"},
+                }
+            ),
             json.dumps(
                 {
                     "type": "item.started",
@@ -296,7 +327,12 @@ def test_build_messages_expands_codex_json_items() -> None:
                     },
                 }
             ),
-            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": '{"accepted":true}'}}),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": '{"accepted":true}'},
+                }
+            ),
             json.dumps({"type": "turn.completed", "usage": {"input_tokens": 12}}),
         ]
     )
@@ -318,7 +354,11 @@ def test_build_messages_truncates_long_tool_output() -> None:
     stdout = json.dumps(
         {
             "type": "item.completed",
-            "item": {"type": "command_execution", "command": "cat big", "aggregated_output": "x" * 20000},
+            "item": {
+                "type": "command_execution",
+                "command": "cat big",
+                "aggregated_output": "x" * 20000,
+            },
         }
     )
     messages = build_messages("go", ProcessResult(returncode=0, stdout=stdout, stderr=""))
@@ -344,7 +384,9 @@ class _SessionClient:
             return ApiResult(self.create_status, text="unavailable")
         return ApiResult(201, {"id": "x001"})
 
-    def append_session_messages(self, _project_id: str, _session_id: str, messages: list[dict]) -> ApiResult:
+    def append_session_messages(
+        self, _project_id: str, _session_id: str, messages: list[dict]
+    ) -> ApiResult:
         self.appended.append(messages)
         return ApiResult(200, {})
 
@@ -388,14 +430,20 @@ def test_session_stream_appends_while_the_worker_runs() -> None:
     assert [(m["role"], m["content"]) for m in created["messages"]] == [("user", "solve it")]
     assert created["messages"][0]["msg_id"]
 
-    stream.feed('{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}\n')
+    stream.feed(
+        '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}\n'
+    )
     assert _wait_for(lambda: bool(client.appended))
     assert [message["role"] for message in client.appended[0]] == ["assistant"]
 
-    stream.feed('{"type":"item.completed","item":{"type":"command_execution","command":"ls","aggregated_output":"a.txt"}}\n')
+    stream.feed(
+        '{"type":"item.completed","item":{"type":"command_execution","command":"ls","aggregated_output":"a.txt"}}\n'
+    )
     assert _wait_for(lambda: sum(len(batch) for batch in client.appended) >= 3)
 
-    stream.finish(status="success", result=ProcessResult(0, "", ""), duration_ms=42, native_session="native-1")
+    stream.finish(
+        status="success", result=ProcessResult(0, "", ""), duration_ms=42, native_session="native-1"
+    )
     assert client.finished[0]["status"] == "success"
     assert client.finished[0]["duration_ms"] == 42
     assert client.finished[0]["native_session"] == "native-1"
@@ -418,7 +466,9 @@ def test_session_stream_falls_back_to_a_single_upload() -> None:
     stream.start()
     assert stream.session_id is None
 
-    stream.feed('{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"answer"}]}}\n')
+    stream.feed(
+        '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"answer"}]}}\n'
+    )
     stream.finish(status="success", result=ProcessResult(0, "", ""), duration_ms=7)
 
     assert client.appended == []
@@ -451,7 +501,9 @@ def test_session_stream_retries_a_failed_append() -> None:
         flush_interval=0.02,
     )
     stream.start()
-    stream.feed('{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}\n')
+    stream.feed(
+        '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}\n'
+    )
 
     assert _wait_for(lambda: bool(client.appended))
     assert client.appended[0][0]["content"] == "working"
@@ -491,7 +543,9 @@ def test_session_stream_keeps_raw_output_when_events_are_missing() -> None:
     )
     stream.start()
     stream.feed("plain text only\n")
-    stream.finish(status="failed", result=ProcessResult(1, "plain text only", "boom"), duration_ms=3)
+    stream.finish(
+        status="failed", result=ProcessResult(1, "plain text only", "boom"), duration_ms=3
+    )
 
     assert [message["role"] for message in client.appended[0]] == ["tool", "tool"]
     assert "boom" in client.appended[0][-1]["content"]
@@ -517,9 +571,7 @@ def test_stream_finished_session_snapshot_then_end(client: TestClient) -> None:
     project_id = _create_project(client)
     created = client.post(f"/projects/{project_id}/sessions", json=_session_payload()).json()
 
-    events = _sse_events(
-        client, f"/projects/{project_id}/sessions/{created['id']}/stream"
-    )
+    events = _sse_events(client, f"/projects/{project_id}/sessions/{created['id']}/stream")
 
     assert [name for name, _ in events] == ["snapshot", "end"]
     assert [m["seq"] for m in events[0][1]["messages"]] == [0, 1]
@@ -628,22 +680,16 @@ def test_finished_session_rejects_appends_and_heartbeats_do_not_touch(client: Te
     assert beat.json()["status"] == "success"
 
     with db.get_conn() as conn:
-        row = conn.execute(
-            "SELECT updated_at FROM sessions WHERE id = ?", (session_id,)
-        ).fetchone()
+        row = conn.execute("SELECT updated_at FROM sessions WHERE id = ?", (session_id,)).fetchone()
     assert row["updated_at"] == "2000-01-01T00:00:00Z"
 
 
-def test_stream_empty_running_session_sends_one_snapshot(
-    client: TestClient, monkeypatch
-) -> None:
+def test_stream_empty_running_session_sends_one_snapshot(client: TestClient, monkeypatch) -> None:
     monkeypatch.setattr(sessions_router, "STREAM_POLL_SECONDS", 0.01)
     project_id = _create_project(client)
     session = client.post(
         f"/projects/{project_id}/sessions",
-        json=_session_payload(
-            status="running", returncode=None, duration_ms=None, messages=[]
-        ),
+        json=_session_payload(status="running", returncode=None, duration_ms=None, messages=[]),
     ).json()
 
     async def drive_stream(ticks: int) -> list[str]:
@@ -666,9 +712,7 @@ def test_stream_empty_running_session_sends_one_snapshot(
 
 def test_session_stream_drops_messages_when_server_closed_the_session() -> None:
     class Closed(_SessionClient):
-        def append_session_messages(
-            self, pid: str, sid: str, messages: list[dict]
-        ) -> ApiResult:
+        def append_session_messages(self, pid: str, sid: str, messages: list[dict]) -> ApiResult:
             self.appended.append(messages)
             return ApiResult(409, text="Session is not running")
 
@@ -683,7 +727,9 @@ def test_session_stream_drops_messages_when_server_closed_the_session() -> None:
         flush_interval=0.02,
     )
     stream.start()
-    stream.feed('{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}\n')
+    stream.feed(
+        '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}\n'
+    )
 
     assert _wait_for(lambda: bool(client.appended))
     time.sleep(0.2)  # several flush intervals: a retry loop would show up here
@@ -709,7 +755,9 @@ def test_session_stream_records_usage_on_finish() -> None:
 
     stream.finish(
         status="success",
-        usage=Usage(input_tokens=120, output_tokens=45, cache_read_tokens=30, cache_write_tokens=10),
+        usage=Usage(
+            input_tokens=120, output_tokens=45, cache_read_tokens=30, cache_write_tokens=10
+        ),
     )
 
     assert len(client.finished) == 1
@@ -781,7 +829,9 @@ class _FlakyAppendClient(_SessionClient):
         super().__init__()
         self.remaining_failures = failures
 
-    def append_session_messages(self, project_id: str, session_id: str, messages: list[dict]) -> ApiResult:
+    def append_session_messages(
+        self, project_id: str, session_id: str, messages: list[dict]
+    ) -> ApiResult:
         self.appended.append(messages)
         if self.remaining_failures > 0:
             self.remaining_failures -= 1
@@ -802,7 +852,9 @@ def test_finish_retries_transient_append_failures() -> None:
         flush_interval=10.0,
     )
     stream.start()
-    stream.feed('{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}\n')
+    stream.feed(
+        '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}\n'
+    )
 
     stream.finish(status="success", result=ProcessResult(0, "", ""))
 
@@ -851,9 +903,7 @@ def test_sessions_etag_revalidation(client):
 
     # Stale validators are ignored; a changed body rotates the tag.
     detail = client.get(f"/projects/{pid}/sessions/{sid}")
-    stale = client.get(
-        f"/projects/{pid}/sessions/{sid}", headers={"If-None-Match": '"stale"'}
-    )
+    stale = client.get(f"/projects/{pid}/sessions/{sid}", headers={"If-None-Match": '"stale"'})
     assert stale.status_code == 200
     assert detail.headers["etag"] == stale.headers["etag"]
 
@@ -864,9 +914,12 @@ def test_sessions_etag_revalidation(client):
     assert appended.status_code == 200
     fresh = client.get(f"/projects/{pid}/sessions/{sid}")
     assert fresh.headers["etag"] != detail.headers["etag"]
-    assert client.get(
-        f"/projects/{pid}/sessions/{sid}", headers={"If-None-Match": detail.headers["etag"]}
-    ).status_code == 200
+    assert (
+        client.get(
+            f"/projects/{pid}/sessions/{sid}", headers={"If-None-Match": detail.headers["etag"]}
+        ).status_code
+        == 200
+    )
 
 
 # ------------------------------------------------- 幂等写入(契约 1.0)
@@ -913,7 +966,9 @@ def test_create_session_does_not_resurrect_a_finished_session(client: TestClient
     session_id = created.json()["id"]
 
     # 幻影场景:迟到的 "running" 创建(同 client_key)只合并消息,不复活会话。
-    late_running = _session_payload(status="running", returncode=None, duration_ms=None, messages=[])
+    late_running = _session_payload(
+        status="running", returncode=None, duration_ms=None, messages=[]
+    )
     late_running["client_key"] = "dispatch-002"
     late_running["messages"] = [
         {"role": "user", "content": "solve it", "msg_id": "m0"},
@@ -991,9 +1046,7 @@ def test_stream_resume_skips_snapshot_and_replays_only_newer(client: TestClient)
 
     async def drive_stream() -> list[str]:
         # TestClient 缓冲整个响应,活跃流直接驱动 SSE 生成器。
-        stream = sessions_router.session_event_stream(
-            project_id, created["id"], last_event_id=1
-        )
+        stream = sessions_router.session_event_stream(project_id, created["id"], last_event_id=1)
         chunk = await anext(stream)
         await stream.aclose()
         return [chunk]

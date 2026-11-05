@@ -43,10 +43,20 @@ class ContainerManager:
             LOG.debug("container already running project=%s container=%s", project_id, name)
             return name
         if state is not None:
-            LOG.info("starting existing container project=%s container=%s state=%s", project_id, name, state)
+            LOG.info(
+                "starting existing container project=%s container=%s state=%s",
+                project_id,
+                name,
+                state,
+            )
             self._start_existing(name)
             return name
-        LOG.info("creating container project=%s container=%s image=%s", project_id, name, self._config.image)
+        LOG.info(
+            "creating container project=%s container=%s image=%s",
+            project_id,
+            name,
+            self._config.image,
+        )
         try:
             self._client.containers.run(
                 self._config.image,
@@ -61,12 +71,21 @@ class ContainerManager:
         except APIError as exc:
             if not self._is_name_conflict(exc):
                 raise RuntimeError(f"failed to create container {name}: {exc}") from exc
-        LOG.info("container name conflict, reusing existing container project=%s container=%s", project_id, name)
+        LOG.info(
+            "container name conflict, reusing existing container project=%s container=%s",
+            project_id,
+            name,
+        )
         state = self.inspect_state(name)
         if state == "running":
             return name
         if state is not None:
-            LOG.info("starting conflicted existing container project=%s container=%s state=%s", project_id, name, state)
+            LOG.info(
+                "starting conflicted existing container project=%s container=%s state=%s",
+                project_id,
+                name,
+                state,
+            )
             self._start_existing(name)
             return name
         raise RuntimeError(f"failed to create container {name}")
@@ -97,7 +116,9 @@ class ContainerManager:
             return True
         container = self._require_container(name)
         if self._config.completed_action == "remove":
-            LOG.info("removing completed project container project=%s container=%s", project_id, name)
+            LOG.info(
+                "removing completed project container project=%s container=%s", project_id, name
+            )
             try:
                 container.remove(force=True)
             except NotFound:
@@ -107,7 +128,9 @@ class ContainerManager:
                 return False
             return self.inspect_state(name) is None
         if state == "running":
-            LOG.info("stopping completed project container project=%s container=%s", project_id, name)
+            LOG.info(
+                "stopping completed project container project=%s container=%s", project_id, name
+            )
             try:
                 container.stop(timeout=1)
             except NotFound:

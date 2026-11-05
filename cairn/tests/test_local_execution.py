@@ -242,9 +242,27 @@ def _local_payload() -> dict:
             "execute": {"timeout": 10, "conclude_timeout": 5},
         },
         "workers": [
-            {"name": "local-claude", "type": "claudecode", "task_types": ["execute"], "max_running": 1, "priority": 0},
-            {"name": "local-codex", "type": "codex", "task_types": ["execute"], "max_running": 1, "priority": 1},
-            {"name": "local-pi", "type": "pi", "task_types": ["decide"], "max_running": 1, "priority": 2},
+            {
+                "name": "local-claude",
+                "type": "claudecode",
+                "task_types": ["execute"],
+                "max_running": 1,
+                "priority": 0,
+            },
+            {
+                "name": "local-codex",
+                "type": "codex",
+                "task_types": ["execute"],
+                "max_running": 1,
+                "priority": 1,
+            },
+            {
+                "name": "local-pi",
+                "type": "pi",
+                "task_types": ["decide"],
+                "max_running": 1,
+                "priority": 2,
+            },
         ],
     }
 
@@ -306,7 +324,9 @@ def _bare_loop(config: DispatchConfig) -> loop_module.DispatcherLoop:
 
 def test_local_cli_check_passes_when_cli_present() -> None:
     payload = _local_payload()
-    payload["workers"] = [{"name": "m", "type": "mock", "task_types": ["decide"], "max_running": 1, "priority": 0}]
+    payload["workers"] = [
+        {"name": "m", "type": "mock", "task_types": ["decide"], "max_running": 1, "priority": 0}
+    ]
     config = DispatchConfig.model_validate(payload)
 
     _bare_loop(config)._run_local_binary_check()  # mock -> python3 --help runs; must not raise
@@ -325,7 +345,13 @@ def test_local_cli_check_exits_when_no_cli_installed(monkeypatch) -> None:
 
 def _bare_worker(worker_type: str) -> WorkerConfig:
     return WorkerConfig.model_validate(
-        {"name": worker_type, "type": worker_type, "task_types": ["execute"], "max_running": 1, "priority": 0}
+        {
+            "name": worker_type,
+            "type": worker_type,
+            "task_types": ["execute"],
+            "max_running": 1,
+            "priority": 0,
+        }
     )
 
 
@@ -333,7 +359,14 @@ def test_codex_local_driver_omits_provider_injection() -> None:
     worker = _bare_worker("codex")
     argv = CodexDriver(local=True).build_execute(worker, "PROMPT", None).argv
 
-    assert argv == ["codex", "exec", "--json", "--dangerously-bypass-approvals-and-sandbox", "--", "PROMPT"]
+    assert argv == [
+        "codex",
+        "exec",
+        "--json",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--",
+        "PROMPT",
+    ]
     assert not any("model_providers" in part for part in argv)
     assert "--model" not in argv
 
@@ -385,7 +418,13 @@ def _local_config_for_worker(name: str, worker_type: str) -> DispatchConfig:
                 "execute": {"timeout": 30, "conclude_timeout": 10},
             },
             "workers": [
-                {"name": name, "type": worker_type, "task_types": ["execute"], "max_running": 1, "priority": 0}
+                {
+                    "name": name,
+                    "type": worker_type,
+                    "task_types": ["execute"],
+                    "max_running": 1,
+                    "priority": 0,
+                }
             ],
         }
     )
@@ -407,7 +446,7 @@ def test_execute_runs_real_local_cli_end_to_end(tmp_path: Path, monkeypatch) -> 
         tmp_path,
         monkeypatch,
         "claude",
-        "echo '{\"accepted\":true,\"data\":{\"facts\":[{\"description\":\"local fake fact\"}]}}'",
+        'echo \'{"accepted":true,"data":{"facts":[{"description":"local fake fact"}]}}\'',
     )
     monkeypatch.setattr(common, "GRAPH_SNAPSHOT_ROOT", str(tmp_path / "prompts"))
 
@@ -440,7 +479,7 @@ def test_execute_local_cli_rejection_releases_step(tmp_path: Path, monkeypatch) 
         tmp_path,
         monkeypatch,
         "claude",
-        "echo '{\"accepted\":false,\"reason\":\"policy_refusal\"}'",
+        'echo \'{"accepted":false,"reason":"policy_refusal"}\'',
     )
     monkeypatch.setattr(common, "GRAPH_SNAPSHOT_ROOT", str(tmp_path / "prompts"))
 

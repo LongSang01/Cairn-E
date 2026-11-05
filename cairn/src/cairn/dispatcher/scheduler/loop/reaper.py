@@ -37,7 +37,9 @@ class ReaperMixin:
                 self._clear_project_log_state(task.project_id)
                 if outcome == "unhealthy":
                     retry_after_seconds = UNHEALTHY_RETRY_AFTER_SECONDS
-                    self.worker_unhealthy_until[task.worker_name] = time.time() + retry_after_seconds
+                    self.worker_unhealthy_until[task.worker_name] = (
+                        time.time() + retry_after_seconds
+                    )
                     LOG.info(
                         "worker marked unhealthy worker=%s retry_after=%.0fs",
                         task.worker_name,
@@ -63,17 +65,33 @@ class ReaperMixin:
                     # abandoned steps would leave a checkpoint that never triggers again.
                     self._refresh_decide_checkpoint(task.project_id)
             except Exception:  # a crashed task must not stop the loop
-                LOG.exception("task crashed project=%s task=%s worker=%s", task.project_id, task.task_type, task.worker_name)
+                LOG.exception(
+                    "task crashed project=%s task=%s worker=%s",
+                    task.project_id,
+                    task.task_type,
+                    task.worker_name,
+                )
 
     def _best_effort_release(self, project_id: str, step_id: str, worker_name: str) -> None:
         response = self.client.release_step(project_id, step_id, worker_name)
         if not response.ok and response.status_code not in (403, 409):
-            LOG.warning("release failed project=%s step=%s worker=%s status=%s", project_id, step_id, worker_name, response.status_code)
+            LOG.warning(
+                "release failed project=%s step=%s worker=%s status=%s",
+                project_id,
+                step_id,
+                worker_name,
+                response.status_code,
+            )
 
     def _best_effort_release_decide(self, project_id: str, worker_name: str) -> None:
         response = self.client.release_decide(project_id, worker_name)
         if not response.ok and response.status_code not in (403, 409):
-            LOG.warning("decide release failed project=%s worker=%s status=%s", project_id, worker_name, response.status_code)
+            LOG.warning(
+                "decide release failed project=%s worker=%s status=%s",
+                project_id,
+                worker_name,
+                response.status_code,
+            )
 
     def _cleanup_completed_containers(self, summaries: list[ProjectSummary]) -> None:
         for summary in summaries:
@@ -87,7 +105,9 @@ class ReaperMixin:
             if not self.container_manager.needs_completed_cleanup(summary.id):
                 self._inactive_cleanup_done[summary.id] = summary.status
                 continue
-            future = self.cleanup_executor.submit(self.container_manager.cleanup_completed, summary.id)
+            future = self.cleanup_executor.submit(
+                self.container_manager.cleanup_completed, summary.id
+            )
             self.cleanup_futures[future] = (container_name, summary.id, summary.status)
             self._cleanup_pending.add(container_name)
 
@@ -103,7 +123,9 @@ class ReaperMixin:
             if not self.container_manager.needs_stopped_cleanup(summary.id):
                 self._inactive_cleanup_done[summary.id] = summary.status
                 continue
-            future = self.cleanup_executor.submit(self.container_manager.cleanup_stopped, summary.id)
+            future = self.cleanup_executor.submit(
+                self.container_manager.cleanup_stopped, summary.id
+            )
             self.cleanup_futures[future] = (container_name, summary.id, summary.status)
             self._cleanup_pending.add(container_name)
 

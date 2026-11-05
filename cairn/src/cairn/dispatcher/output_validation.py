@@ -48,7 +48,9 @@ def _fact_entry(value: Any, field: str) -> dict[str, Any]:
             items.append(
                 {
                     "title": _text(document.get("title"), f"{field}.documents[{index}].title"),
-                    "content": _text(document.get("content"), f"{field}.documents[{index}].content"),
+                    "content": _text(
+                        document.get("content"), f"{field}.documents[{index}].content"
+                    ),
                 }
             )
         if items:
@@ -261,7 +263,11 @@ def validate_decide_payload(
                 if status not in ("achieved", "abandoned"):
                     raise ValueError(f"goals.close[{index}].status must be achieved or abandoned")
                 goal_close.append(
-                    {"id": gid, "status": status, "note": _optional_text(item.get("note"), f"goals.close[{index}].note")}
+                    {
+                        "id": gid,
+                        "status": status,
+                        "note": _optional_text(item.get("note"), f"goals.close[{index}].note"),
+                    }
                 )
 
     step_add: list[dict[str, Any]] = []
@@ -308,7 +314,9 @@ def validate_decide_payload(
                 step_update.append(
                     {
                         "id": sid,
-                        "priority": None if priority is None else _priority(priority, f"steps.update[{index}].priority"),
+                        "priority": None
+                        if priority is None
+                        else _priority(priority, f"steps.update[{index}].priority"),
                         "status": status,
                         "note": note,
                     }
@@ -364,7 +372,8 @@ def validate_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, An
                 raise ValueError(f"findings[{index}] must be an object")
             findings.append(
                 {
-                    "kind": _optional_text(item.get("kind"), f"findings[{index}].kind") or "finding",
+                    "kind": _optional_text(item.get("kind"), f"findings[{index}].kind")
+                    or "finding",
                     "description": _text(item.get("description"), f"findings[{index}].description"),
                     "severity": _severity(item.get("severity"), f"findings[{index}].severity"),
                 }

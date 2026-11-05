@@ -22,7 +22,9 @@ def _loop() -> DispatcherLoop:
     loop.worker_rejected_until = {}
     loop._log_state = {}
     loop.project_cursor = 0
-    loop.container_manager = type("Containers", (), {"container_name": lambda _self, project_id: project_id})()
+    loop.container_manager = type(
+        "Containers", (), {"container_name": lambda _self, project_id: project_id}
+    )()
     return loop
 
 
@@ -62,7 +64,14 @@ def test_decide_trigger_detects_new_findings() -> None:
         fact_count=2, hint_count=1, finding_count=0, open_step_count=0
     )
     project.findings.append(
-        Finding(id="d001", kind="flaw", description="found", step="s001", creator="w", created_at="2026-01-01T00:00:00Z")
+        Finding(
+            id="d001",
+            kind="flaw",
+            description="found",
+            step="s001",
+            creator="w",
+            created_at="2026-01-01T00:00:00Z",
+        )
     )
 
     assert loop._decide_trigger(project) == "findings:0->1"
@@ -143,7 +152,9 @@ def test_new_fact_dispatches_decide_before_pending_step() -> None:
     loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
         fact_count=2, hint_count=1, finding_count=0, open_step_count=1
     )
-    loop.container_manager = type("Containers", (), {"container_name": lambda _self, project_id: project_id})()
+    loop.container_manager = type(
+        "Containers", (), {"container_name": lambda _self, project_id: project_id}
+    )()
     loop.client = type(
         "Client",
         (),
@@ -153,7 +164,9 @@ def test_new_fact_dispatches_decide_before_pending_step() -> None:
         },
     )()
     dispatched: list[tuple[str, str]] = []
-    loop._dispatch_decide = lambda _project, _graph, trigger: dispatched.append(("decide", trigger)) or True
+    loop._dispatch_decide = lambda _project, _graph, trigger: (
+        dispatched.append(("decide", trigger)) or True
+    )
     loop._dispatch_execute = lambda *_args: dispatched.append(("execute", "")) or True
 
     assert loop._try_dispatch_project(_summary("proj_001", "active"))
@@ -165,7 +178,9 @@ def test_initial_project_dispatches_decide() -> None:
     loop.config = make_config()
     loop.futures = {}
     project = make_project()
-    loop.container_manager = type("Containers", (), {"container_name": lambda _self, project_id: project_id})()
+    loop.container_manager = type(
+        "Containers", (), {"container_name": lambda _self, project_id: project_id}
+    )()
     loop.client = type(
         "Client",
         (),
@@ -175,7 +190,9 @@ def test_initial_project_dispatches_decide() -> None:
         },
     )()
     dispatched: list[tuple[str, str]] = []
-    loop._dispatch_decide = lambda _project, _graph, trigger: dispatched.append(("decide", trigger)) or True
+    loop._dispatch_decide = lambda _project, _graph, trigger: (
+        dispatched.append(("decide", trigger)) or True
+    )
     loop._dispatch_execute = lambda *_args: dispatched.append(("execute", "")) or True
 
     assert loop._try_dispatch_project(_summary("proj_001", "active"))
@@ -202,7 +219,9 @@ def test_project_with_pending_step_and_unchanged_graph_dispatches_execute_by_pri
     )()
     dispatched: list[tuple[str, str]] = []
     loop._dispatch_decide = lambda *_args: dispatched.append(("decide", "")) or True
-    loop._dispatch_execute = lambda _project, _graph, step: dispatched.append(("execute", step.id)) or True
+    loop._dispatch_execute = lambda _project, _graph, step: (
+        dispatched.append(("execute", step.id)) or True
+    )
 
     assert loop._try_dispatch_project(_summary("proj_001", "active"))
     assert dispatched == [("execute", "s002")]
@@ -247,7 +266,9 @@ def test_select_worker_reports_busy_unhealthy_rejected_and_unsupported_workers(m
     busy = base.workers[0].model_copy(update={"name": "busy", "task_types": ["decide"]})
     unhealthy = base.workers[0].model_copy(update={"name": "unhealthy", "task_types": ["decide"]})
     rejected = base.workers[0].model_copy(update={"name": "rejected", "task_types": ["decide"]})
-    unsupported = base.workers[0].model_copy(update={"name": "unsupported", "task_types": ["execute"]})
+    unsupported = base.workers[0].model_copy(
+        update={"name": "unsupported", "task_types": ["execute"]}
+    )
     loop.config = base.model_copy(update={"workers": [busy, unhealthy, rejected, unsupported]})
     loop.futures = {Future(): RunningTask("proj", "decide", "busy", TaskCancellation())}
     loop.worker_unhealthy_until = {"unhealthy": 110.0}

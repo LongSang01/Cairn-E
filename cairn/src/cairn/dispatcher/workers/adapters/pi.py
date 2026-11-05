@@ -26,12 +26,19 @@ class PiDriver(WorkerDriver):
         model = env["PI_MODEL"]
         api = env["PI_PROVIDER_API"]
         proxies = proxies_from_env(env)
-        headers = {"Authorization": f"Bearer {env['PI_API_KEY']}", "content-type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {env['PI_API_KEY']}",
+            "content-type": "application/json",
+        }
         if "anthropic" in api:
             return http_ping(
                 f"{base}/v1/messages",
                 headers={**headers, "anthropic-version": "2023-06-01"},
-                json_body={"model": model, "max_tokens": 10, "messages": [{"role": "user", "content": "ping"}]},
+                json_body={
+                    "model": model,
+                    "max_tokens": 10,
+                    "messages": [{"role": "user", "content": "ping"}],
+                },
                 timeout=timeout,
                 proxies=proxies,
             )
@@ -39,7 +46,11 @@ class PiDriver(WorkerDriver):
             return http_ping(
                 f"{base}/responses",
                 headers=headers,
-                json_body={"model": model, "input": [{"role": "user", "content": "ping"}], "stream": False},
+                json_body={
+                    "model": model,
+                    "input": [{"role": "user", "content": "ping"}],
+                    "stream": False,
+                },
                 timeout=timeout,
                 proxies=proxies,
             )
@@ -47,7 +58,11 @@ class PiDriver(WorkerDriver):
         return http_ping(
             f"{base}/chat/completions",
             headers=headers,
-            json_body={"model": model, "max_tokens": 10, "messages": [{"role": "user", "content": "ping"}]},
+            json_body={
+                "model": model,
+                "max_tokens": 10,
+                "messages": [{"role": "user", "content": "ping"}],
+            },
             timeout=timeout,
             proxies=proxies,
         )
@@ -180,7 +195,9 @@ class PiDriver(WorkerDriver):
                 turn_usage = add_usage(turn_usage, found)
         return turn_usage
 
-    def _wrap_with_models(self, worker: WorkerConfig, pi_argv: list[str], *, enable_tools: bool = True) -> list[str]:
+    def _wrap_with_models(
+        self, worker: WorkerConfig, pi_argv: list[str], *, enable_tools: bool = True
+    ) -> list[str]:
         script = (
             'agent_dir="$1"\n'
             'models_json="$2"\n'

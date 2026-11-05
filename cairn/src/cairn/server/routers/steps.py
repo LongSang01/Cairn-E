@@ -175,9 +175,7 @@ def conclude(project_id: str, step_id: str, body: ConcludeStepRequest):
                     step_id=step_id,
                     created_at=now,
                 )
-            facts.append(
-                Fact(id=fid, description=submitted.description, title=submitted.title)
-            )
+            facts.append(Fact(id=fid, description=submitted.description, title=submitted.title))
 
         for submitted in body.findings or []:
             did = next_finding_id(conn, project_id)

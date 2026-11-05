@@ -14,6 +14,7 @@ _CONTEXT_COLUMNS = (
     " context_finding_summary, context_finding_summary_facts"
 )
 
+
 def get_context_summary(conn: sqlite3.Connection, project_id: str) -> ContextSummary:
     row = conn.execute(
         f"SELECT {_CONTEXT_COLUMNS} FROM projects WHERE id = ?", (project_id,)
@@ -21,6 +22,7 @@ def get_context_summary(conn: sqlite3.Connection, project_id: str) -> ContextSum
     if row is None:
         raise HTTPException(404, "Project not found")
     return _context_summary_from_row(row)
+
 
 def save_context_summary(
     conn: sqlite3.Connection,
@@ -80,6 +82,7 @@ def save_context_summary(
     )
     return merged
 
+
 def _merge_channel(
     current: str | None, current_covered: int | None, new: str, covered: int
 ) -> tuple[str, int]:
@@ -89,6 +92,7 @@ def _merge_channel(
     if not new or covered < previous_covered:
         return previous_text, previous_covered
     return new, covered
+
 
 def _context_summary_from_row(row: sqlite3.Row) -> ContextSummary:
     return ContextSummary(

@@ -9,7 +9,9 @@ router = APIRouter(tags=["settings"])
 @router.get("/settings", response_model=Settings)
 def get_settings():
     with get_conn() as conn:
-        row = conn.execute("SELECT step_timeout, decide_timeout FROM settings WHERE rowid = 1").fetchone()
+        row = conn.execute(
+            "SELECT step_timeout, decide_timeout FROM settings WHERE rowid = 1"
+        ).fetchone()
         return Settings(step_timeout=row["step_timeout"], decide_timeout=row["decide_timeout"])
 
 

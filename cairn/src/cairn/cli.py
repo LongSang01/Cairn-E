@@ -32,7 +32,12 @@ def main():
     envvar="CAIRN_LOG_FORMAT",
     help="Server log format",
 )
-@click.option("--access-log/--no-access-log", default=True, show_default=True, help="Enable Uvicorn access log")
+@click.option(
+    "--access-log/--no-access-log",
+    default=True,
+    show_default=True,
+    help="Enable Uvicorn access log",
+)
 def serve(
     host: str,
     port: int,
@@ -87,9 +92,7 @@ def dispatch(
     log_format: str,
 ):
     """Run the Cairn dispatcher."""
-    configure_logging(
-        log_level, bare=startup_healthcheck_only, json_format=log_format == "json"
-    )
+    configure_logging(log_level, bare=startup_healthcheck_only, json_format=log_format == "json")
     loop = DispatcherLoop(config_path)
     try:
         if startup_healthcheck_only:

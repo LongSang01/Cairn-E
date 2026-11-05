@@ -53,7 +53,9 @@ def step_session_summary(step: Step, limit: int = 200) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
-def cancel_reason(result: ProcessResult, cancellation: TaskCancellation | None = None) -> str | None:
+def cancel_reason(
+    result: ProcessResult, cancellation: TaskCancellation | None = None
+) -> str | None:
     if result.cancelled:
         return result.cancel_reason or "cancelled"
     if cancellation is not None:
@@ -61,7 +63,9 @@ def cancel_reason(result: ProcessResult, cancellation: TaskCancellation | None =
     return None
 
 
-def communicate_timeout(timeout_seconds: int, grace_seconds: int = PROCESS_COMMUNICATE_GRACE_SECONDS) -> int:
+def communicate_timeout(
+    timeout_seconds: int, grace_seconds: int = PROCESS_COMMUNICATE_GRACE_SECONDS
+) -> int:
     return timeout_seconds + grace_seconds
 
 

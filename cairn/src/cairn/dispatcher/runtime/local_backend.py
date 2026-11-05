@@ -71,7 +71,9 @@ class LocalBackend:
     def cleanup_completed(self, project_id: str) -> bool:
         if self._config.completed_action == "remove":
             project_dir = self._project_dir(project_id)
-            LOG.info("removing completed project workdir project=%s dir=%s", project_id, project_dir)
+            LOG.info(
+                "removing completed project workdir project=%s dir=%s", project_id, project_dir
+            )
             shutil.rmtree(project_dir, ignore_errors=True)
         return True
 

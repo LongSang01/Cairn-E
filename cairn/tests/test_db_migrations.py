@@ -60,19 +60,35 @@ def _legacy_db(path, *, with_intents: bool) -> None:
     with sqlite3.connect(path) as conn:
         conn.execute(LEGACY_PROJECTS)
         conn.execute(LEGACY_FACTS)
-        conn.execute("CREATE TABLE hints (id TEXT, project_id TEXT, content TEXT, creator TEXT, created_at TEXT)")
-        conn.execute("CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0)")
-        conn.execute("CREATE TABLE scoped_counters (project_id TEXT, kind TEXT, value INTEGER, PRIMARY KEY (project_id, kind))")
-        conn.execute("CREATE TABLE settings (intent_timeout INTEGER NOT NULL DEFAULT 20, reason_timeout INTEGER NOT NULL DEFAULT 20)")
-        conn.execute("INSERT INTO settings (rowid, intent_timeout, reason_timeout) VALUES (1, 31, 47)")
+        conn.execute(
+            "CREATE TABLE hints (id TEXT, project_id TEXT, content TEXT, creator TEXT, created_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0)"
+        )
+        conn.execute(
+            "CREATE TABLE scoped_counters (project_id TEXT, kind TEXT, value INTEGER, PRIMARY KEY (project_id, kind))"
+        )
+        conn.execute(
+            "CREATE TABLE settings (intent_timeout INTEGER NOT NULL DEFAULT 20, reason_timeout INTEGER NOT NULL DEFAULT 20)"
+        )
+        conn.execute(
+            "INSERT INTO settings (rowid, intent_timeout, reason_timeout) VALUES (1, 31, 47)"
+        )
         conn.execute("INSERT INTO counters (name, value) VALUES ('project', 1)")
         conn.execute(
             "INSERT INTO projects (id, title, bootstrap_enabled, created_at, reason_worker, reason_trigger, reason_started_at, reason_last_heartbeat_at)"
             " VALUES ('proj_001', 'legacy', 1, '2026-01-01T00:00:00Z', 'w', 'initial', '2026-01-01T00:00:05Z', '2026-01-01T00:00:06Z')"
         )
-        conn.execute("INSERT INTO facts (id, project_id, description) VALUES ('origin', 'proj_001', 'start')")
-        conn.execute("INSERT INTO facts (id, project_id, description) VALUES ('goal', 'proj_001', 'finish')")
-        conn.execute("INSERT INTO facts (id, project_id, description) VALUES ('f001', 'proj_001', 'known')")
+        conn.execute(
+            "INSERT INTO facts (id, project_id, description) VALUES ('origin', 'proj_001', 'start')"
+        )
+        conn.execute(
+            "INSERT INTO facts (id, project_id, description) VALUES ('goal', 'proj_001', 'finish')"
+        )
+        conn.execute(
+            "INSERT INTO facts (id, project_id, description) VALUES ('f001', 'proj_001', 'known')"
+        )
         if with_intents:
             conn.execute(LEGACY_INTENTS)
             conn.execute(LEGACY_INTENT_SOURCES)
@@ -88,11 +104,17 @@ def _legacy_db(path, *, with_intents: bool) -> None:
                 "INSERT INTO intents (id, project_id, description, creator, worker, created_at, to_fact_id)"
                 " VALUES ('i003', 'proj_001', 'pending work', 'reasoner', NULL, '2026-01-01T00:00:04Z', NULL)"
             )
-            conn.execute("INSERT INTO intent_sources (intent_id, project_id, fact_id) VALUES ('i001', 'proj_001', 'origin')")
-            conn.execute("INSERT INTO intent_sources (intent_id, project_id, fact_id) VALUES ('i003', 'proj_001', 'f001')")
+            conn.execute(
+                "INSERT INTO intent_sources (intent_id, project_id, fact_id) VALUES ('i001', 'proj_001', 'origin')"
+            )
+            conn.execute(
+                "INSERT INTO intent_sources (intent_id, project_id, fact_id) VALUES ('i003', 'proj_001', 'f001')"
+            )
 
 
-def test_configure_adds_decide_columns_and_copies_legacy_reason_leases(tmp_path, monkeypatch) -> None:
+def test_configure_adds_decide_columns_and_copies_legacy_reason_leases(
+    tmp_path, monkeypatch
+) -> None:
     path = tmp_path / "legacy.db"
     _legacy_db(path, with_intents=False)
 
@@ -103,7 +125,9 @@ def test_configure_adds_decide_columns_and_copies_legacy_reason_leases(tmp_path,
         row = conn.execute(
             "SELECT decide_worker, decide_trigger, decide_started_at, decide_last_heartbeat_at FROM projects WHERE id = 'proj_001'"
         ).fetchone()
-        settings = conn.execute("SELECT step_timeout, decide_timeout FROM settings WHERE rowid = 1").fetchone()
+        settings = conn.execute(
+            "SELECT step_timeout, decide_timeout FROM settings WHERE rowid = 1"
+        ).fetchone()
 
     assert row["decide_worker"] == "w"
     assert row["decide_trigger"] == "initial"
@@ -113,7 +137,9 @@ def test_configure_adds_decide_columns_and_copies_legacy_reason_leases(tmp_path,
     assert settings["decide_timeout"] == 47
 
 
-def test_configure_promotes_goal_fact_to_goal_node_and_intents_to_steps(tmp_path, monkeypatch) -> None:
+def test_configure_promotes_goal_fact_to_goal_node_and_intents_to_steps(
+    tmp_path, monkeypatch
+) -> None:
     path = tmp_path / "intents.db"
     _legacy_db(path, with_intents=True)
 
@@ -122,7 +148,10 @@ def test_configure_promotes_goal_fact_to_goal_node_and_intents_to_steps(tmp_path
 
     with db.get_conn() as conn:
         goal = conn.execute("SELECT * FROM goals WHERE project_id = 'proj_001'").fetchone()
-        facts = [row["id"] for row in conn.execute("SELECT id FROM facts WHERE project_id = 'proj_001'").fetchall()]
+        facts = [
+            row["id"]
+            for row in conn.execute("SELECT id FROM facts WHERE project_id = 'proj_001'").fetchall()
+        ]
         steps = {
             row["id"]: row
             for row in conn.execute("SELECT * FROM steps WHERE project_id = 'proj_001'").fetchall()

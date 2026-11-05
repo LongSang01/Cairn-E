@@ -6,7 +6,12 @@ from typing import Any
 
 
 def load_prompt(group: str, name: str) -> str:
-    return resources.files("cairn.dispatcher.prompts").joinpath(group).joinpath(name).read_text(encoding="utf-8")
+    return (
+        resources.files("cairn.dispatcher.prompts")
+        .joinpath(group)
+        .joinpath(name)
+        .read_text(encoding="utf-8")
+    )
 
 
 def render_prompt(template: str, replacements: dict[str, str]) -> str:

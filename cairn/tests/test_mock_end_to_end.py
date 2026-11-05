@@ -89,7 +89,9 @@ class InProcessClient:
         )
 
     def claim_decide(self, project_id: str, worker: str, trigger: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/decide/claim", {"worker": worker, "trigger": trigger})
+        return self._post(
+            f"/projects/{project_id}/decide/claim", {"worker": worker, "trigger": trigger}
+        )
 
     def decide_heartbeat(self, project_id: str, worker: str) -> ApiResult:
         return self._post(f"/projects/{project_id}/decide/heartbeat", {"worker": worker})
@@ -97,7 +99,9 @@ class InProcessClient:
     def release_decide(self, project_id: str, worker: str) -> ApiResult:
         return self._post(f"/projects/{project_id}/decide/release", {"worker": worker})
 
-    def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
+    def complete(
+        self, project_id: str, from_ids: list[str], description: str, worker: str
+    ) -> ApiResult:
         return self._post(
             f"/projects/{project_id}/complete",
             {"from": from_ids, "description": description, "worker": worker},
@@ -173,9 +177,15 @@ class InProcessClient:
             f"/projects/{project_id}/sessions/{session_id}/messages", {"messages": messages}
         )
 
-    def finish_session(self, project_id: str, session_id: str, payload: dict[str, Any]) -> ApiResult:
+    def finish_session(
+        self, project_id: str, session_id: str, payload: dict[str, Any]
+    ) -> ApiResult:
         response = self.http.patch(f"/projects/{project_id}/sessions/{session_id}", json=payload)
-        data = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
+        data = (
+            response.json()
+            if response.headers.get("content-type", "").startswith("application/json")
+            else None
+        )
         return ApiResult(response.status_code, data, response.text)
 
     def session_heartbeat(self, project_id: str, session_id: str) -> ApiResult:
@@ -192,7 +202,9 @@ class InProcessClient:
         return Question.model_validate(response.json())
 
     def claim_question(self, project_id: str, question_id: str, worker: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/questions/{question_id}/claim", {"worker": worker})
+        return self._post(
+            f"/projects/{project_id}/questions/{question_id}/claim", {"worker": worker}
+        )
 
     def answer_question(
         self,
@@ -243,7 +255,11 @@ class InProcessClient:
                 "findings_covered": findings_covered,
             },
         )
-        data = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
+        data = (
+            response.json()
+            if response.headers.get("content-type", "").startswith("application/json")
+            else None
+        )
         return ApiResult(response.status_code, data, response.text)
 
     def get_recall_plan(self, project_id: str) -> RecallPlan:
@@ -258,11 +274,17 @@ class InProcessClient:
             f"/projects/{project_id}/recall-plan",
             json={"queries": queries, "doc_ids": doc_ids},
         )
-        data = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
+        data = (
+            response.json()
+            if response.headers.get("content-type", "").startswith("application/json")
+            else None
+        )
         return ApiResult(response.status_code, data, response.text)
 
     def recall(self, project_id: str, query: str, *, limit: int = 5) -> RecallResponse:
-        response = self.http.get(f"/projects/{project_id}/recall", params={"q": query, "limit": limit})
+        response = self.http.get(
+            f"/projects/{project_id}/recall", params={"q": query, "limit": limit}
+        )
         response.raise_for_status()
         return RecallResponse.model_validate(response.json())
 
@@ -273,7 +295,11 @@ class InProcessClient:
 
     def _post(self, path: str, payload: dict[str, Any]) -> ApiResult:
         response = self.http.post(path, json=payload)
-        data = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
+        data = (
+            response.json()
+            if response.headers.get("content-type", "").startswith("application/json")
+            else None
+        )
         return ApiResult(response.status_code, data, response.text)
 
 
@@ -432,7 +458,9 @@ def _config(
     )
 
 
-def _loop(config: DispatchConfig, client: InProcessClient, containers: LocalContainerManager) -> DispatcherLoop:
+def _loop(
+    config: DispatchConfig, client: InProcessClient, containers: LocalContainerManager
+) -> DispatcherLoop:
     loop = DispatcherLoop.__new__(DispatcherLoop)
     loop.config = config
     loop.client = client
@@ -523,17 +551,19 @@ def test_mock_decide_execute_decide_complete_chain(http_client: TestClient) -> N
     project_id = _create_project(http_client)
 
     try:
-        _dispatch_and_wait(loop)   # decide: one step from origin
+        _dispatch_and_wait(loop)  # decide: one step from origin
         project = client.get_project(project_id)
         assert project.project.status == "active"
         assert [(step.id, step.status) for step in project.steps] == [("s001", "pending")]
 
-        _dispatch_and_wait(loop)   # execute: fact + finding
+        _dispatch_and_wait(loop)  # execute: fact + finding
         project = client.get_project(project_id)
         assert [fact.id for fact in project.facts] == ["origin", "f001"]
-        assert [(finding.kind, finding.severity) for finding in project.findings] == [("mock", "medium")]
+        assert [(finding.kind, finding.severity) for finding in project.findings] == [
+            ("mock", "medium")
+        ]
 
-        _dispatch_and_wait(loop)   # decide: facts grew -> complete
+        _dispatch_and_wait(loop)  # decide: facts grew -> complete
         project = client.get_project(project_id)
     finally:
         loop.close()
@@ -576,7 +606,9 @@ def test_mock_execute_only_worker_keeps_project_active(http_client: TestClient) 
     assert not loop.futures
 
 
-def test_task_healthcheck_failure_aborts_decide_and_cools_down_worker(http_client: TestClient) -> None:
+def test_task_healthcheck_failure_aborts_decide_and_cools_down_worker(
+    http_client: TestClient,
+) -> None:
     client = InProcessClient(http_client)
     containers = LocalContainerManager()
     loop = _loop(
@@ -754,7 +786,14 @@ def test_background_summary_runs_off_the_decide_path(http_client: TestClient) ->
         worker="mock-worker",
         facts=[{"id": "f001", "description": "db reachable"}],
         facts_covered=1,
-        steps=[{"id": "s001", "description": "sqlmap /login", "status": "done", "result": "no injection"}],
+        steps=[
+            {
+                "id": "s001",
+                "description": "sqlmap /login",
+                "status": "done",
+                "result": "no injection",
+            }
+        ],
         steps_covered=1,
         findings=[{"id": "d001", "description": "openssh 8.2"}],
         findings_covered=1,

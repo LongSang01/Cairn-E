@@ -76,7 +76,9 @@ def test_container_manager_build_exec_process_wraps_command_with_timeout() -> No
     container = FakeContainer()
     manager._require_container = lambda _name: container
 
-    process = manager.build_exec_process("container", {"A": "B"}, ["agent", "-p", "prompt"], timeout_seconds=300)
+    process = manager.build_exec_process(
+        "container", {"A": "B"}, ["agent", "-p", "prompt"], timeout_seconds=300
+    )
 
     assert process.command == ["timeout", "-k", "5s", "300s", "agent", "-p", "prompt"]
     assert process.env == {"A": "B"}

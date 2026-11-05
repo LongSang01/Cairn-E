@@ -11,6 +11,7 @@ from .leases import best_effort_release
 
 LOG = logging.getLogger(__name__)
 
+
 @dataclass(slots=True)
 class StepWriteResult:
     status: str

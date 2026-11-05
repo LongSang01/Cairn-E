@@ -225,9 +225,7 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     conn.commit()  # finish any implicit transaction so BEGIN IMMEDIATE is legal
     conn.execute("BEGIN IMMEDIATE")
     try:
-        applied = {
-            row["version"] for row in conn.execute("SELECT version FROM schema_migrations")
-        }
+        applied = {row["version"] for row in conn.execute("SELECT version FROM schema_migrations")}
         for version, migrate in _MIGRATIONS:
             if version in applied:
                 continue
@@ -286,7 +284,9 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         if new_column in columns:
             continue
         if table == "settings":
-            conn.execute(f"ALTER TABLE settings ADD COLUMN {new_column} INTEGER NOT NULL DEFAULT 20")
+            conn.execute(
+                f"ALTER TABLE settings ADD COLUMN {new_column} INTEGER NOT NULL DEFAULT 20"
+            )
         else:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {new_column} TEXT")
         if legacy_column in columns:
@@ -376,13 +376,15 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
 
 def _token_tables(conn: sqlite3.Connection) -> set[str]:
     return {
-        row["name"]
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
 
 
 def _migrate_legacy_intents(conn: sqlite3.Connection) -> None:
-    if "intents" in _token_tables(conn) and not conn.execute("SELECT 1 FROM steps LIMIT 1").fetchone():
+    if (
+        "intents" in _token_tables(conn)
+        and not conn.execute("SELECT 1 FROM steps LIMIT 1").fetchone()
+    ):
         _migrate_intents(conn)
 
 

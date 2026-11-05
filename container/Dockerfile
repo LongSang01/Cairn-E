@@ -60,7 +60,7 @@ RUN cd /tmp && \
     sudo rm -rf /tmp/* && \
     sudo apt clean && \
     sudo rm -rf /var/lib/apt/lists/*
-    
+
 RUN pip3 install tccli awscli --break-system-packages && \
     sudo bash -c "$(curl -fsSL https://aliyuncli.alicdn.com/install.sh)"
 

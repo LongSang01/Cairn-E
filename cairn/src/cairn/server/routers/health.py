@@ -17,9 +17,7 @@ def healthz(response: Response):
     try:
         with get_conn() as conn:
             conn.execute("SELECT 1").fetchone()
-            row = conn.execute(
-                "SELECT MAX(version) AS version FROM schema_migrations"
-            ).fetchone()
+            row = conn.execute("SELECT MAX(version) AS version FROM schema_migrations").fetchone()
     except Exception:  # noqa: BLE001 - a probe must answer even when the DB is broken
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return {"status": "error", "database": "unavailable"}

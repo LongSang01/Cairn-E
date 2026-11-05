@@ -18,9 +18,11 @@ def get_step_timeout(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT step_timeout FROM settings WHERE rowid = 1").fetchone()
     return row["step_timeout"]
 
+
 def get_decide_timeout(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT decide_timeout FROM settings WHERE rowid = 1").fetchone()
     return row["decide_timeout"]
+
 
 def project_decide_from_row(row: sqlite3.Row) -> ProjectDecide | None:
     if row["decide_worker"] is None:
@@ -32,6 +34,7 @@ def project_decide_from_row(row: sqlite3.Row) -> ProjectDecide | None:
         last_heartbeat_at=row["decide_last_heartbeat_at"],
     )
 
+
 def project_meta_from_row(row: sqlite3.Row) -> ProjectMeta:
     return ProjectMeta(
         id=row["id"],
@@ -40,6 +43,7 @@ def project_meta_from_row(row: sqlite3.Row) -> ProjectMeta:
         created_at=row["created_at"],
         decide=project_decide_from_row(row),
     )
+
 
 def clear_project_decide(conn: sqlite3.Connection, project_id: str) -> None:
     conn.execute(
@@ -53,6 +57,7 @@ def clear_project_decide(conn: sqlite3.Connection, project_id: str) -> None:
         """,
         (project_id,),
     )
+
 
 def expire_steps(conn: sqlite3.Connection, project_id: str | None = None) -> None:
     timeout = get_step_timeout(conn)
@@ -71,6 +76,7 @@ def expire_steps(conn: sqlite3.Connection, project_id: str | None = None) -> Non
         query = query.replace("WHERE ", "WHERE project_id = ? AND ", 1)
         params = (project_id, now, timeout)
     conn.execute(query, params)
+
 
 def expire_decide_leases(conn: sqlite3.Connection, project_id: str | None = None) -> None:
     timeout = get_decide_timeout(conn)
@@ -91,6 +97,7 @@ def expire_decide_leases(conn: sqlite3.Connection, project_id: str | None = None
         params = (project_id, now, timeout)
     conn.execute(query, params)
 
+
 def expire_stale_sessions(conn: sqlite3.Connection, project_id: str) -> int:
     """Mark sessions whose dispatcher stopped heartbeating as failed.
 
@@ -109,6 +116,7 @@ def expire_stale_sessions(conn: sqlite3.Connection, project_id: str) -> int:
         (utcnow(), project_id, utcnow_before(SESSION_STALE_SECONDS)),
     )
     return cursor.rowcount
+
 
 def expire_questions(conn: sqlite3.Connection, project_id: str | None = None) -> int:
     """Fail questions nobody is going to answer, so the UI stops waiting forever."""

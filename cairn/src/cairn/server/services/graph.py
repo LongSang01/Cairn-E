@@ -18,12 +18,14 @@ def goal_to_model(row: sqlite3.Row) -> Goal:
         closed_at=row["closed_at"],
     )
 
+
 def build_goals(conn: sqlite3.Connection, project_id: str) -> list[Goal]:
     rows = conn.execute(
         "SELECT * FROM goals WHERE project_id = ? ORDER BY created_at, rowid",
         (project_id,),
     ).fetchall()
     return [goal_to_model(row) for row in rows]
+
 
 def _step_from_row(row: sqlite3.Row, source_fact_ids: list[str]) -> Step:
     return Step(
@@ -45,12 +47,14 @@ def _step_from_row(row: sqlite3.Row, source_fact_ids: list[str]) -> Step:
         note=row["note"],
     )
 
+
 def step_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str) -> Step:
     sources = conn.execute(
         "SELECT fact_id FROM step_sources WHERE step_id = ? AND project_id = ? ORDER BY rowid",
         (row["id"], project_id),
     ).fetchall()
     return _step_from_row(row, [source["fact_id"] for source in sources])
+
 
 def build_steps(conn: sqlite3.Connection, project_id: str) -> list[Step]:
     rows = conn.execute(
@@ -70,6 +74,7 @@ def build_steps(conn: sqlite3.Connection, project_id: str) -> list[Step]:
         by_step.setdefault(source["step_id"], []).append(source["fact_id"])
     return [_step_from_row(row, by_step.get(row["id"], [])) for row in rows]
 
+
 def build_findings(conn: sqlite3.Connection, project_id: str) -> list[Finding]:
     rows = conn.execute(
         "SELECT * FROM findings WHERE project_id = ? ORDER BY created_at, rowid",
@@ -88,10 +93,12 @@ def build_findings(conn: sqlite3.Connection, project_id: str) -> list[Finding]:
         for row in rows
     ]
 
+
 def normalize_finding_severity(value: object) -> str:
     """Coerce a stored grade to a known severity; unknown or missing means `info`."""
     severity = str(value or "info").strip().lower()
     return severity if severity in FINDING_SEVERITIES else "info"
+
 
 def build_findings_summary(conn: sqlite3.Connection, project_id: str) -> FindingsSummary:
     """Aggregate findings by severity and kind, newest last."""
@@ -102,7 +109,9 @@ def build_findings_summary(conn: sqlite3.Connection, project_id: str) -> Finding
         by_severity[finding.severity] = by_severity.get(finding.severity, 0) + 1
         by_kind[finding.kind] = by_kind.get(finding.kind, 0) + 1
     ordered_severity = {
-        severity: by_severity[severity] for severity in FINDING_SEVERITIES if severity in by_severity
+        severity: by_severity[severity]
+        for severity in FINDING_SEVERITIES
+        if severity in by_severity
     }
     return FindingsSummary(
         project_id=project_id,

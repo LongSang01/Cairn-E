@@ -21,6 +21,7 @@ def document_to_meta(row: sqlite3.Row) -> DocumentMeta:
         created_at=row["created_at"],
     )
 
+
 def document_to_model(row: sqlite3.Row) -> Document:
     return Document(
         id=row["id"],
@@ -31,6 +32,7 @@ def document_to_model(row: sqlite3.Row) -> Document:
         created_at=row["created_at"],
         content=row["content"] or "",
     )
+
 
 def insert_document(
     conn: sqlite3.Connection,
@@ -61,12 +63,14 @@ def insert_document(
         content=content,
     )
 
+
 def build_documents(conn: sqlite3.Connection, project_id: str) -> list[DocumentMeta]:
     rows = conn.execute(
         "SELECT * FROM documents WHERE project_id = ? ORDER BY created_at, rowid",
         (project_id,),
     ).fetchall()
     return [document_to_meta(row) for row in rows]
+
 
 def doc_ids_by_owner(
     conn: sqlite3.Connection, project_id: str

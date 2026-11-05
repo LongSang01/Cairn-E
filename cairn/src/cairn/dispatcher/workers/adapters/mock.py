@@ -129,7 +129,9 @@ class MockDriver(SeedSessionDriver):
     def check_health(self, worker: WorkerConfig, *, timeout: float) -> HealthResult:
         outcomes = resolve_mock_behavior(worker.name, worker.env)["healthcheck"]["outcomes"]
         ok = random.random() < outcomes.get("ok", 0.0)
-        return HealthResult(ok=ok, status=200 if ok else 503, detail="" if ok else "mock healthcheck fail")
+        return HealthResult(
+            ok=ok, status=200 if ok else 503, detail="" if ok else "mock healthcheck fail"
+        )
 
     def describe_health(self, worker: WorkerConfig) -> str:
         return "mock in-process healthcheck"

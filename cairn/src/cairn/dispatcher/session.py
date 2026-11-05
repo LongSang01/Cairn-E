@@ -139,11 +139,19 @@ def _tool_call_messages(name: Any, tool_input: Any) -> list[dict[str, Any]]:
 def _tool_result_messages(output: Any, exit_code: Any = None) -> list[dict[str, Any]]:
     if isinstance(output, dict) and "content" in output:
         output = output.get("content")
-    text = text_from_content(output).strip() or (_flatten(output).strip() if not isinstance(output, str) else "")
+    text = text_from_content(output).strip() or (
+        _flatten(output).strip() if not isinstance(output, str) else ""
+    )
     if not text:
         return []
-    prefix = f"[exit {exit_code}]\n" if isinstance(exit_code, int) and not isinstance(exit_code, bool) else ""
-    return [{"role": "tool_result", "content": _truncate(redact(prefix + text), MAX_TOOL_OUTPUT_CHARS)}]
+    prefix = (
+        f"[exit {exit_code}]\n"
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool)
+        else ""
+    )
+    return [
+        {"role": "tool_result", "content": _truncate(redact(prefix + text), MAX_TOOL_OUTPUT_CHARS)}
+    ]
 
 
 def _blocks_to_messages(role: str, content: Any) -> list[dict[str, Any]]:
@@ -167,7 +175,12 @@ def _blocks_to_messages(role: str, content: Any) -> list[dict[str, Any]]:
         elif kind in ("thinking", "reasoning"):
             messages.extend(_text_message("thinking", block.get("thinking") or block.get("text")))
         elif kind in ("tool_use", "tool_call", "function_call"):
-            messages.extend(_tool_call_messages(block.get("name") or block.get("tool"), block.get("input", block.get("arguments"))))
+            messages.extend(
+                _tool_call_messages(
+                    block.get("name") or block.get("tool"),
+                    block.get("input", block.get("arguments")),
+                )
+            )
         elif kind in ("tool_result", "tool_output", "function_call_output"):
             payload = block.get("content") if "content" in block else block.get("output")
             messages.extend(_tool_result_messages(payload))
@@ -186,29 +199,50 @@ def _item_messages(item: Any) -> list[dict[str, Any]]:
     if kind in ("reasoning", "thinking"):
         return _text_message("thinking", item.get("text") or item.get("content"))
     if kind in ("agent_message", "assistant_message"):
-        return _blocks_to_messages("assistant", item.get("text") if item.get("text") is not None else item.get("content"))
+        return _blocks_to_messages(
+            "assistant", item.get("text") if item.get("text") is not None else item.get("content")
+        )
     if kind == "user_message":
-        return _blocks_to_messages("user", item.get("text") if item.get("text") is not None else item.get("content"))
+        return _blocks_to_messages(
+            "user", item.get("text") if item.get("text") is not None else item.get("content")
+        )
     if kind in ("tool_use", "function_call"):
-        return _tool_call_messages(item.get("name") or item.get("tool"), item.get("input") if "input" in item else item.get("arguments"))
+        return _tool_call_messages(
+            item.get("name") or item.get("tool"),
+            item.get("input") if "input" in item else item.get("arguments"),
+        )
     if kind in ("tool_result", "tool_output", "function_call_output"):
-        return _tool_result_messages(item.get("content") if "content" in item else item.get("output"))
+        return _tool_result_messages(
+            item.get("content") if "content" in item else item.get("output")
+        )
     if kind == "command_execution":
-        messages = _tool_call_messages(item.get("name") or "bash", {"command": item.get("command") or ""})
+        messages = _tool_call_messages(
+            item.get("name") or "bash", {"command": item.get("command") or ""}
+        )
         messages.extend(
-            _tool_result_messages(item.get("aggregated_output") or item.get("output"), item.get("exit_code"))
+            _tool_result_messages(
+                item.get("aggregated_output") or item.get("output"), item.get("exit_code")
+            )
         )
         return messages
     if kind == "file_change":
         changes = [change for change in (item.get("changes") or []) if isinstance(change, dict)]
         summary = "\n".join(
-            " ".join(part for part in (str(change.get("kind") or "edit"), str(change.get("path") or "")) if part)
+            " ".join(
+                part
+                for part in (str(change.get("kind") or "edit"), str(change.get("path") or ""))
+                if part
+            )
             for change in changes
         )
         return _tool_call_messages("apply_patch", summary or item.get("path") or item.get("text"))
     if kind == "mcp_tool_call":
-        name = ".".join(str(part) for part in (item.get("server"), item.get("tool") or item.get("name")) if part)
-        messages = _tool_call_messages(name or "mcp", item.get("arguments") if "arguments" in item else item.get("input"))
+        name = ".".join(
+            str(part) for part in (item.get("server"), item.get("tool") or item.get("name")) if part
+        )
+        messages = _tool_call_messages(
+            name or "mcp", item.get("arguments") if "arguments" in item else item.get("input")
+        )
         result = item.get("result")
         if isinstance(result, dict) and "content" in result:
             messages.extend(_tool_result_messages(result.get("content")))
@@ -247,12 +281,24 @@ def _event_messages(event: dict[str, Any]) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
         message = event.get("message")
         if isinstance(message, dict):
-            messages.extend(_blocks_to_messages(_normalize_role(message.get("role"), "assistant"), message.get("content")))
+            messages.extend(
+                _blocks_to_messages(
+                    _normalize_role(message.get("role"), "assistant"), message.get("content")
+                )
+            )
         elif "content" in event:
-            messages.extend(_blocks_to_messages(_normalize_role(event.get("role"), "assistant"), event.get("content")))
+            messages.extend(
+                _blocks_to_messages(
+                    _normalize_role(event.get("role"), "assistant"), event.get("content")
+                )
+            )
         for entry in event.get("messages") or []:
             if isinstance(entry, dict):
-                messages.extend(_blocks_to_messages(_normalize_role(entry.get("role"), "assistant"), entry.get("content")))
+                messages.extend(
+                    _blocks_to_messages(
+                        _normalize_role(entry.get("role"), "assistant"), entry.get("content")
+                    )
+                )
         for entry in event.get("toolResults") or []:
             if isinstance(entry, dict):
                 messages.extend(_tool_result_messages(entry.get("result")))
@@ -267,15 +313,22 @@ def _event_messages(event: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
     if kind == "tool_execution_start":
-        return _tool_call_messages(event.get("toolName") or event.get("tool_name"), event.get("args") or event.get("arguments"))
+        return _tool_call_messages(
+            event.get("toolName") or event.get("tool_name"),
+            event.get("args") or event.get("arguments"),
+        )
     if kind == "tool_execution_end":
         result = event.get("result")
-        output = result.get("content") if isinstance(result, dict) and "content" in result else result
+        output = (
+            result.get("content") if isinstance(result, dict) and "content" in result else result
+        )
         return _tool_result_messages(output)
 
     # claude stream-json: {"type":"result","result":"final answer","is_error":false}
     if kind == "result":
-        return _text_message("system" if event.get("is_error") else "assistant", event.get("result"))
+        return _text_message(
+            "system" if event.get("is_error") else "assistant", event.get("result")
+        )
 
     if kind in ("error", "turn.failed"):
         error = event.get("error")
@@ -374,7 +427,9 @@ class TranscriptBuilder:
             return
         self.add(_event_messages(event), replay=event.get("type") in _REPLAY_EVENT_TYPES)
 
-    def finalize(self, result: ProcessResult | None = None, extra_streams: Iterable[str] = ()) -> None:
+    def finalize(
+        self, result: ProcessResult | None = None, extra_streams: Iterable[str] = ()
+    ) -> None:
         if self._buffer.strip():
             self._add_line(self._buffer)
         self._buffer = ""
@@ -456,12 +511,16 @@ class SessionStream:
 
     def __exit__(self, exc_type, exc, tb) -> Literal[False]:
         if not self._finished:
-            self.finish(status="failed", error=f"task crashed: {exc}" if exc else "session not finalized")
+            self.finish(
+                status="failed", error=f"task crashed: {exc}" if exc else "session not finalized"
+            )
         return False
 
     # --- lifecycle ---------------------------------------------------------------
 
-    def _create_payload(self, status: str, messages: list[dict], **fields: object) -> dict[str, object]:
+    def _create_payload(
+        self, status: str, messages: list[dict], **fields: object
+    ) -> dict[str, object]:
         """Fields shared by the live create and the end-of-run one-shot upload."""
         return {
             "worker": self._worker,
@@ -507,9 +566,14 @@ class SessionStream:
                 self._builder.take_pending()
         else:
             LOG.warning(
-                "session live update disabled project=%s phase=%s worker=%s", self._project_id, self._phase, self._worker
+                "session live update disabled project=%s phase=%s worker=%s",
+                self._project_id,
+                self._phase,
+                self._worker,
             )
-        self._flusher = threading.Thread(target=self._flush_loop, name=f"session-{self._phase}", daemon=True)
+        self._flusher = threading.Thread(
+            target=self._flush_loop, name=f"session-{self._phase}", daemon=True
+        )
         self._flusher.start()
 
     def feed(self, chunk: str) -> None:

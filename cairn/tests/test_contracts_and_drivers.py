@@ -155,9 +155,7 @@ def test_decide_payload_caps_recall_queries_and_documents() -> None:
     )
 
     assert lookups["recall"] == ["a", "b", "c"]
-    assert lookups["doc_ids"] == [
-        {"id": f"doc{index:03d}", "from": 0} for index in range(1, 6)
-    ]
+    assert lookups["doc_ids"] == [{"id": f"doc{index:03d}", "from": 0} for index in range(1, 6)]
 
 
 def test_decide_payload_rejects_non_array_recall() -> None:
@@ -259,7 +257,10 @@ def test_decide_payload_closing_a_goal_without_adding_one() -> None:
     )
 
     assert kind == "actions"
-    assert data["goals"] == {"add": [], "close": [{"id": "g002", "status": "achieved", "note": None}]}
+    assert data["goals"] == {
+        "add": [],
+        "close": [{"id": "g002", "status": "achieved", "note": None}],
+    }
 
 
 def test_decide_payload_accepts_note_only_step_update() -> None:
@@ -395,11 +396,25 @@ def test_claudecode_driver_extracts_answer_from_stream_json() -> None:
                     "type": "assistant",
                     "message": {
                         "role": "assistant",
-                        "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}],
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "t1",
+                                "name": "Bash",
+                                "input": {"command": "ls"},
+                            }
+                        ],
                     },
                 }
             ),
-            json.dumps({"type": "result", "subtype": "success", "result": '{"accepted":true}', "is_error": False}),
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "result": '{"accepted":true}',
+                    "is_error": False,
+                }
+            ),
         ]
     )
 
@@ -421,7 +436,7 @@ def test_execute_payload_keeps_fact_title_and_documents() -> None:
                     }
                 ],
                 "status": "done",
-            }
+            },
         }
     )
 
@@ -447,15 +462,25 @@ def test_codex_driver_extracts_thread_and_agent_messages() -> None:
     stdout = "\n".join(
         [
             json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
-            json.dumps({"type": "item.completed", "item": {"type": "reasoning", "text": "thinking"}}),
+            json.dumps(
+                {"type": "item.completed", "item": {"type": "reasoning", "text": "thinking"}}
+            ),
             json.dumps(
                 {
                     "type": "item.completed",
-                    "item": {"type": "command_execution", "command": "ls", "aggregated_output": "a.txt"},
+                    "item": {
+                        "type": "command_execution",
+                        "command": "ls",
+                        "aggregated_output": "a.txt",
+                    },
                 }
             ),
-            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "first"}}),
-            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "second"}}),
+            json.dumps(
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "first"}}
+            ),
+            json.dumps(
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "second"}}
+            ),
         ]
     )
 

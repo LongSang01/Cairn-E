@@ -24,6 +24,7 @@ def question_to_model(row: sqlite3.Row) -> Question:
         duration_ms=row["duration_ms"],
     )
 
+
 def build_questions(conn: sqlite3.Connection, project_id: str) -> list[Question]:
     expire_questions(conn, project_id)
     rows = conn.execute(
@@ -31,6 +32,7 @@ def build_questions(conn: sqlite3.Connection, project_id: str) -> list[Question]
         (project_id,),
     ).fetchall()
     return [question_to_model(row) for row in rows]
+
 
 def list_pending_questions(conn: sqlite3.Connection, limit: int = 5) -> list[Question]:
     """Oldest pending questions across all projects: what the dispatcher should answer."""

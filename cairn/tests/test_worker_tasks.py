@@ -111,7 +111,13 @@ def test_decide_injects_and_clears_the_recall_plan(monkeypatch) -> None:
     )
 
     outcome = decide.run_decide_task(
-        config, client, FakeContainerManager(), project, "graph", config.workers[0], TaskCancellation()
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        config.workers[0],
+        TaskCancellation(),
     )
 
     assert outcome == "success"
@@ -162,7 +168,13 @@ def test_decide_resumes_a_document_from_the_reported_offset(monkeypatch) -> None
     )
 
     outcome = decide.run_decide_task(
-        config, client, FakeContainerManager(), project, "graph", config.workers[0], TaskCancellation()
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        config.workers[0],
+        TaskCancellation(),
     )
 
     assert outcome == "success"
@@ -196,7 +208,13 @@ def test_decide_stores_the_next_lookups_and_step_title(monkeypatch) -> None:
     )
 
     outcome = decide.run_decide_task(
-        config, client, FakeContainerManager(), project, "graph", config.workers[0], TaskCancellation()
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        config.workers[0],
+        TaskCancellation(),
     )
 
     assert outcome == "success"
@@ -237,7 +255,13 @@ def test_decide_applies_goal_add_update_and_complete(monkeypatch) -> None:
     )
 
     outcome = decide.run_decide_task(
-        config, client, FakeContainerManager(), project, "graph", config.workers[0], TaskCancellation()
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        config.workers[0],
+        TaskCancellation(),
     )
 
     assert outcome == "success"
@@ -269,7 +293,13 @@ def test_decide_complete_writes_completion_and_releases(monkeypatch) -> None:
     )
 
     outcome = decide.run_decide_task(
-        config, client, FakeContainerManager(), project, "graph", config.workers[0], TaskCancellation()
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        config.workers[0],
+        TaskCancellation(),
     )
 
     assert outcome == "success"
@@ -300,7 +330,13 @@ def test_decide_complete_treats_inactive_project_as_success(monkeypatch) -> None
     )
 
     outcome = decide.run_decide_task(
-        config, client, FakeContainerManager(), project, "graph", config.workers[0], TaskCancellation()
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        config.workers[0],
+        TaskCancellation(),
     )
 
     assert outcome == "success"
@@ -321,7 +357,13 @@ def test_decide_without_open_steps_must_add_steps(monkeypatch) -> None:
     )
 
     outcome = decide.run_decide_task(
-        config, client, FakeContainerManager(), project, "graph", config.workers[0], TaskCancellation()
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        config.workers[0],
+        TaskCancellation(),
     )
 
     assert outcome == "failed"
@@ -339,7 +381,9 @@ def test_execute_early_plain_text_exit_uses_conclude_fallback(monkeypatch) -> No
     results: Iterator[ProcessResult] = iter(
         [
             ProcessResult(0, "Need inspect files and keep working.", ""),
-            ProcessResult(0, '{"accepted":true,"data":{"facts":[{"description":"confirmed fact"}]}}', ""),
+            ProcessResult(
+                0, '{"accepted":true,"data":{"facts":[{"description":"confirmed fact"}]}}', ""
+            ),
         ]
     )
 
@@ -388,7 +432,14 @@ def test_execute_writes_findings_and_status(monkeypatch) -> None:
     )
 
     outcome = execute.run_execute_task(
-        config, client, FakeContainerManager(), project, "graph", step, config.workers[0], TaskCancellation()
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        step,
+        config.workers[0],
+        TaskCancellation(),
     )
 
     assert outcome == "success"
@@ -402,7 +453,11 @@ def test_execute_writes_findings_and_status(monkeypatch) -> None:
         )
     ]
     # The driver's reported usage rides along with the session finish payload.
-    finished = [payload for _project, _session, payload in client.finished_sessions if payload.get("status") == "success"]
+    finished = [
+        payload
+        for _project, _session, payload in client.finished_sessions
+        if payload.get("status") == "success"
+    ]
     assert finished
     assert finished[-1]["input_tokens"] == 10
     assert finished[-1]["output_tokens"] == 5
@@ -450,7 +505,14 @@ def test_execute_timeout_without_session_releases_claim(monkeypatch) -> None:
     )
 
     outcome = execute.run_execute_task(
-        config, client, FakeContainerManager(), project, "graph", step, config.workers[0], TaskCancellation()
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        step,
+        config.workers[0],
+        TaskCancellation(),
     )
 
     assert outcome == "failed"
@@ -479,7 +541,13 @@ def test_decide_startup_only_mode_skips_task_healthcheck(monkeypatch) -> None:
     )
 
     outcome = decide.run_decide_task(
-        config, client, FakeContainerManager(), project, "graph", config.workers[0], TaskCancellation()
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        config.workers[0],
+        TaskCancellation(),
     )
 
     assert outcome == "success"
@@ -505,7 +573,13 @@ def test_decide_records_model_session(monkeypatch) -> None:
     )
 
     decide.run_decide_task(
-        config, client, FakeContainerManager(), make_project(), "graph", config.workers[0], TaskCancellation()
+        config,
+        client,
+        FakeContainerManager(),
+        make_project(),
+        "graph",
+        config.workers[0],
+        TaskCancellation(),
     )
 
     assert len(client.created_sessions) == 1
@@ -544,7 +618,14 @@ def test_execute_records_session_for_execute_and_conclude(monkeypatch) -> None:
     monkeypatch.setattr(execute, "_run_process", lambda *_args, **_kwargs: next(results))
 
     execute.run_execute_task(
-        config, client, FakeContainerManager(), project, "graph", step, config.workers[0], TaskCancellation()
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        step,
+        config.workers[0],
+        TaskCancellation(),
     )
 
     phases = [payload["phase"] for _pid, payload in client.created_sessions]
@@ -554,7 +635,10 @@ def test_execute_records_session_for_execute_and_conclude(monkeypatch) -> None:
     # Every execute session carries the step text, so the list shows what ran.
     assert {payload["summary"] for _pid, payload in client.created_sessions} == {"investigate"}
 
-    assert [payload["status"] for _pid, _sid, payload in client.finished_sessions] == ["failed", "success"]
+    assert [payload["status"] for _pid, _sid, payload in client.finished_sessions] == [
+        "failed",
+        "success",
+    ]
 
 
 def test_execute_streams_transcript_while_the_worker_runs(monkeypatch) -> None:
@@ -578,7 +662,14 @@ def test_execute_streams_transcript_while_the_worker_runs(monkeypatch) -> None:
     monkeypatch.setattr(execute, "_run_process", fake_run)
 
     execute.run_execute_task(
-        config, client, FakeContainerManager(), project, "graph", step, config.workers[0], TaskCancellation()
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        step,
+        config.workers[0],
+        TaskCancellation(),
     )
 
     created_project, created = client.created_sessions[0]

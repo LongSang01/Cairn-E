@@ -32,4 +32,3 @@ def test_text_file_archive_extracts_below_existing_top_level_directory() -> None
 def test_text_file_archive_rejects_unsafe_paths(path: str) -> None:
     with pytest.raises(ValueError):
         ContainerManager._text_file_archive(path, "content")
-

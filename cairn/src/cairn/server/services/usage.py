@@ -15,6 +15,7 @@ def _accumulate_usage(bucket: UsageBucket, row: sqlite3.Row) -> None:
     bucket.cache_write_tokens += row["cache_write_tokens"]
     bucket.total_tokens += row["total_tokens"]
 
+
 def _settle_usage(bucket: UsageBucket) -> UsageBucket:
     """A client-supplied total can never make a bucket smaller than its parts."""
     measured = (
@@ -25,6 +26,7 @@ def _settle_usage(bucket: UsageBucket) -> UsageBucket:
     )
     bucket.total_tokens = max(bucket.total_tokens, measured)
     return bucket
+
 
 def build_project_usage(conn: sqlite3.Connection, project_id: str) -> ProjectUsage:
     """Sum the measured token usage of every session in the project."""

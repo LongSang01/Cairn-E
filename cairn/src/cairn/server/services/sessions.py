@@ -33,6 +33,7 @@ def session_to_model(row: sqlite3.Row) -> Session:
         message_count=row["message_count"],
     )
 
+
 def build_sessions(conn: sqlite3.Connection, project_id: str) -> list[Session]:
     expire_stale_sessions(conn, project_id)
     rows = conn.execute(
@@ -41,6 +42,7 @@ def build_sessions(conn: sqlite3.Connection, project_id: str) -> list[Session]:
         (project_id,),
     ).fetchall()
     return [session_to_model(row) for row in rows]
+
 
 def build_session_messages(
     conn: sqlite3.Connection,

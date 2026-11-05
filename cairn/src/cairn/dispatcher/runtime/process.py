@@ -114,7 +114,9 @@ class ManagedProcess:
         try:
             details = self._api.exec_inspect(self._exec_id)
         except DockerException as exc:
-            LOG.warning("failed to inspect exec before kill exec_id=%s error=%s", self._exec_id, exc)
+            LOG.warning(
+                "failed to inspect exec before kill exec_id=%s error=%s", self._exec_id, exc
+            )
             return
         if not details.get("Running"):
             return
@@ -201,7 +203,12 @@ class ManagedProcess:
             if exit_code in (None, 0, 1):
                 return
         if last_error is not None:
-            LOG.warning("failed to kill container exec pid=%s container=%s error=%s", pid, self._container.name, last_error)
+            LOG.warning(
+                "failed to kill container exec pid=%s container=%s error=%s",
+                pid,
+                self._container.name,
+                last_error,
+            )
 
     def _emit(self, stdout: str) -> None:
         callback = self.on_stdout
