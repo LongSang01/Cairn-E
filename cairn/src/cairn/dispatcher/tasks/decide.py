@@ -88,6 +88,9 @@ def run_decide_task(
         ]
         fact_ids = [fact.id for fact in project.facts]
         goal_ids = [goal.id for goal in project.goals if goal.status == "active"]
+        active_sub_goal_ids = [
+            goal.id for goal in project.goals if goal.parent is not None and goal.status == "active"
+        ]
         step_ids = [str(step["id"]) for step in open_steps]
 
         template = load_prompt(config.runtime.prompt_group, "decide.md")
@@ -225,6 +228,7 @@ def run_decide_task(
                 max_steps=config.tasks.decide.max_steps,
                 fact_ids=fact_ids,
                 goal_ids=goal_ids,
+                active_sub_goal_ids=active_sub_goal_ids,
                 step_ids=step_ids,
             )
         except Exception as exc:  # noqa: BLE001 - every parse failure must close the task cleanly
@@ -255,6 +259,16 @@ def run_decide_task(
 
         assert data is not None
         if kind == "complete":
+            for goal in data.get("goal_close") or ():
+                closed = client.close_goal(
+                    project_id,
+                    goal["id"],
+                    status=goal["status"],
+                    worker=worker.name,
+                    note=goal["note"],
+                )
+                if not closed.ok:
+                    _log_write_failure("goal close", project_id, worker.name, closed)
             response = client.complete(project_id, data["from"], data["description"], worker.name)
             if response.status_code == 403:
                 LOG.info(

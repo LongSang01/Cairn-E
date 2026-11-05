@@ -17,6 +17,7 @@ from cairn.dispatcher.workers.adapters.pi import PiDriver
 FACTS = ["origin", "f001"]
 GOALS = ["g001", "g002"]
 STEPS = ["s001"]
+ACTIVE_SUB_GOALS = ["g002"]
 
 
 def test_parse_json_output_extracts_object_from_markdown_noise() -> None:
@@ -41,6 +42,7 @@ def test_decide_payload_limits_number_of_steps() -> None:
         max_steps=1,
         fact_ids=FACTS,
         goal_ids=GOALS,
+        active_sub_goal_ids=ACTIVE_SUB_GOALS,
         step_ids=STEPS,
     )
 
@@ -71,6 +73,7 @@ def test_decide_payload_collects_title_recall_and_doc_ids() -> None:
         max_steps=3,
         fact_ids=FACTS,
         goal_ids=GOALS,
+        active_sub_goal_ids=ACTIVE_SUB_GOALS,
         step_ids=STEPS,
     )
 
@@ -92,6 +95,7 @@ def test_decide_payload_accepts_document_resume_offsets() -> None:
         max_steps=3,
         fact_ids=FACTS,
         goal_ids=GOALS,
+        active_sub_goal_ids=ACTIVE_SUB_GOALS,
         step_ids=STEPS,
     )
 
@@ -109,6 +113,7 @@ def test_decide_payload_rejects_a_bare_document_id() -> None:
             max_steps=3,
             fact_ids=FACTS,
             goal_ids=GOALS,
+            active_sub_goal_ids=ACTIVE_SUB_GOALS,
             step_ids=STEPS,
         )
 
@@ -121,6 +126,7 @@ def test_decide_payload_rejects_a_negative_resume_offset() -> None:
             max_steps=3,
             fact_ids=FACTS,
             goal_ids=GOALS,
+            active_sub_goal_ids=ACTIVE_SUB_GOALS,
             step_ids=STEPS,
         )
 
@@ -133,6 +139,7 @@ def test_decide_payload_rejects_a_non_integer_resume_offset() -> None:
             max_steps=3,
             fact_ids=FACTS,
             goal_ids=GOALS,
+            active_sub_goal_ids=ACTIVE_SUB_GOALS,
             step_ids=STEPS,
         )
 
@@ -151,6 +158,7 @@ def test_decide_payload_caps_recall_queries_and_documents() -> None:
         max_steps=3,
         fact_ids=FACTS,
         goal_ids=GOALS,
+        active_sub_goal_ids=ACTIVE_SUB_GOALS,
         step_ids=STEPS,
     )
 
@@ -166,6 +174,7 @@ def test_decide_payload_rejects_non_array_recall() -> None:
             max_steps=3,
             fact_ids=FACTS,
             goal_ids=GOALS,
+            active_sub_goal_ids=ACTIVE_SUB_GOALS,
             step_ids=STEPS,
         )
 
@@ -178,6 +187,7 @@ def test_decide_payload_requires_action_when_no_step_is_open() -> None:
             max_steps=3,
             fact_ids=FACTS,
             goal_ids=GOALS,
+            active_sub_goal_ids=ACTIVE_SUB_GOALS,
             step_ids=STEPS,
         )
 
@@ -190,23 +200,128 @@ def test_decide_payload_rejects_unknown_fact_reference() -> None:
             max_steps=3,
             fact_ids=FACTS,
             goal_ids=GOALS,
+            active_sub_goal_ids=ACTIVE_SUB_GOALS,
             step_ids=STEPS,
         )
 
 
-def test_decide_payload_supports_completion_and_sub_goals() -> None:
+def test_decide_payload_drops_completion_that_queues_work() -> None:
+    """A completion arriving with graph actions keeps the actions and does not end.
+
+    This is the shape that falsely completed proj_008: the model mixed a complete
+    with add/update/close work. All actions must be preserved.
+    """
     kind, data, _lookups = validate_decide_payload(
         {
             "data": {
                 "complete": {"from": ["f001"], "description": "goal met"},
-                "goals": {"add": [{"description": "sub", "parent": "g001"}]},
+                "goals": {
+                    "add": [{"description": "sub", "parent": "g001"}],
+                    "close": [{"id": "g002", "status": "achieved"}],
+                },
+                "steps": {
+                    "add": [{"from": ["f001"], "description": "keep going"}],
+                    "update": [{"id": "s001", "priority": 5}],
+                },
+            }
+        },
+        open_steps_empty=False,
+        max_steps=3,
+        fact_ids=FACTS,
+        goal_ids=GOALS,
+        active_sub_goal_ids=ACTIVE_SUB_GOALS,
+        step_ids=STEPS,
+    )
+
+    assert kind == "actions"
+    assert data is not None
+    assert data["goals"]["add"] == [{"description": "sub", "parent": "g001"}]
+    assert data["goals"]["close"] == [{"id": "g002", "status": "achieved", "note": None}]
+    assert data["steps"]["add"][0]["description"] == "keep going"
+    assert data["steps"]["update"][0]["id"] == "s001"
+
+
+def test_decide_payload_completes_with_final_goal_close() -> None:
+    """Closing the last sub goals and completing in one payload is the atomic finale."""
+    kind, data, _lookups = validate_decide_payload(
+        {
+            "data": {
+                "complete": {"from": ["f001"], "description": "goal met"},
+                "goals": {"close": [{"id": "g002", "status": "achieved"}]},
             }
         },
         open_steps_empty=True,
         max_steps=3,
         fact_ids=FACTS,
         goal_ids=GOALS,
+        active_sub_goal_ids=ACTIVE_SUB_GOALS,
+        step_ids=[],
+    )
+
+    assert kind == "complete"
+    assert data == {
+        "from": ["f001"],
+        "description": "goal met",
+        "goal_close": [{"id": "g002", "status": "achieved", "note": None}],
+    }
+
+
+def test_decide_payload_drops_completion_while_steps_stay_open() -> None:
+    kind, data, _lookups = validate_decide_payload(
+        {
+            "data": {
+                "complete": {"from": ["f001"], "description": "premature"},
+                "goals": {"close": [{"id": "g002", "status": "achieved"}]},
+            }
+        },
+        open_steps_empty=False,
+        max_steps=3,
+        fact_ids=FACTS,
+        goal_ids=GOALS,
+        active_sub_goal_ids=ACTIVE_SUB_GOALS,
         step_ids=STEPS,
+    )
+
+    assert kind == "actions"
+    assert data is not None
+    assert data["goals"]["close"] == [{"id": "g002", "status": "achieved", "note": None}]
+
+
+def test_decide_payload_rejects_completion_with_open_steps() -> None:
+    with pytest.raises(ValueError, match="complete is only allowed"):
+        validate_decide_payload(
+            {"data": {"complete": {"from": ["f001"], "description": "goal met"}}},
+            open_steps_empty=False,
+            max_steps=3,
+            fact_ids=FACTS,
+            goal_ids=GOALS,
+            active_sub_goal_ids=[],
+            step_ids=STEPS,
+        )
+
+
+def test_decide_payload_rejects_completion_with_active_sub_goals() -> None:
+    with pytest.raises(ValueError, match="active sub-goals"):
+        validate_decide_payload(
+            {"data": {"complete": {"from": ["f001"], "description": "goal met"}}},
+            open_steps_empty=True,
+            max_steps=3,
+            fact_ids=FACTS,
+            goal_ids=GOALS,
+            active_sub_goal_ids=ACTIVE_SUB_GOALS,
+            step_ids=[],
+        )
+
+
+def test_decide_payload_accepts_completion_on_a_clean_graph() -> None:
+    kind, data, _lookups = validate_decide_payload(
+        {"data": {"complete": {"from": ["f001"], "description": "goal met"}}},
+        open_steps_empty=True,
+        max_steps=3,
+        fact_ids=FACTS,
+        goal_ids=GOALS,
+        active_sub_goal_ids=[],
+        step_ids=[],
     )
 
     assert kind == "complete"
@@ -253,6 +368,7 @@ def test_decide_payload_closing_a_goal_without_adding_one() -> None:
         max_steps=3,
         fact_ids=FACTS,
         goal_ids=GOALS,
+        active_sub_goal_ids=ACTIVE_SUB_GOALS,
         step_ids=STEPS,
     )
 
@@ -273,6 +389,7 @@ def test_decide_payload_accepts_note_only_step_update() -> None:
         max_steps=3,
         fact_ids=FACTS,
         goal_ids=GOALS,
+        active_sub_goal_ids=ACTIVE_SUB_GOALS,
         step_ids=STEPS,
     )
 
@@ -290,6 +407,7 @@ def test_decide_payload_rejects_empty_step_update() -> None:
             max_steps=3,
             fact_ids=FACTS,
             goal_ids=GOALS,
+            active_sub_goal_ids=ACTIVE_SUB_GOALS,
             step_ids=STEPS,
         )
 
@@ -308,6 +426,7 @@ def test_decide_payload_ignores_empty_complete_placeholder() -> None:
         max_steps=3,
         fact_ids=FACTS,
         goal_ids=GOALS,
+        active_sub_goal_ids=ACTIVE_SUB_GOALS,
         step_ids=STEPS,
     )
 

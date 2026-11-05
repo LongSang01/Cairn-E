@@ -300,6 +300,20 @@ def complete_project(project_id: str, body: CompleteRequest):
         root = get_root_goal_or_404(conn, project_id)
         if root["status"] != "active":
             raise HTTPException(409, f"Root goal is already {root['status']}")
+        open_steps = conn.execute(
+            "SELECT COUNT(*) AS n FROM steps"
+            " WHERE project_id = ? AND kind = 'action' AND status IN ('pending', 'running')",
+            (project_id,),
+        ).fetchone()["n"]
+        if open_steps:
+            raise HTTPException(409, f"{open_steps} step(s) are still open")
+        active_sub_goals = conn.execute(
+            "SELECT COUNT(*) AS n FROM goals"
+            " WHERE project_id = ? AND parent_id IS NOT NULL AND status = 'active'",
+            (project_id,),
+        ).fetchone()["n"]
+        if active_sub_goals:
+            raise HTTPException(409, f"{active_sub_goals} sub-goal(s) are still active")
 
         now = utcnow()
         sid = next_step_id(conn, project_id)

@@ -136,6 +136,61 @@ def test_project_workflow_creates_goal_step_finding_completes_and_reopens(
     assert all(step["kind"] != "completion" for step in detail["steps"])
 
 
+def test_complete_rejects_until_steps_and_sub_goals_are_closed(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    response = client.post(
+        f"/projects/{project_id}/goals",
+        json={"description": "stage one", "creator": "decider"},
+    )
+    assert response.status_code == 201
+    sub_id = response.json()["id"]
+    response = client.post(
+        f"/projects/{project_id}/steps",
+        json={
+            "from": ["origin"],
+            "goal": sub_id,
+            "description": "investigate",
+            "priority": 5,
+            "creator": "decider",
+            "worker": None,
+        },
+    )
+    assert response.status_code == 201
+
+    response = client.post(
+        f"/projects/{project_id}/complete",
+        json={"from": ["origin"], "description": "premature", "worker": "decider"},
+    )
+    assert response.status_code == 409
+    assert "still open" in response.text
+
+    response = client.post(
+        f"/projects/{project_id}/steps/s001/conclude",
+        json={"worker": "executor", "status": "done", "facts": [{"description": "result"}]},
+    )
+    assert response.status_code == 200
+
+    response = client.post(
+        f"/projects/{project_id}/complete",
+        json={"from": ["origin"], "description": "premature", "worker": "decider"},
+    )
+    assert response.status_code == 409
+    assert "sub-goal" in response.text
+
+    response = client.post(
+        f"/projects/{project_id}/goals/{sub_id}/close",
+        json={"status": "achieved", "worker": "decider"},
+    )
+    assert response.status_code == 200
+
+    response = client.post(
+        f"/projects/{project_id}/complete",
+        json={"from": ["origin"], "description": "goal met", "worker": "decider"},
+    )
+    assert response.status_code == 200
+
+
 def test_step_update_with_only_a_note_stores_guidance(client: TestClient) -> None:
     project_id = _create_project(client)
     client.post(

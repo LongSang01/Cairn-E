@@ -209,9 +209,20 @@ def validate_decide_payload(
     max_steps: int,
     fact_ids: list[str],
     goal_ids: list[str],
+    active_sub_goal_ids: list[str],
     step_ids: list[str],
 ) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
     """Decide only touches the graph: goals, steps, and the completion declaration.
+
+    ``complete`` ends the whole project (the dispatcher cancels every running
+    step), so it must never silently swallow the actions it arrives with:
+
+    - ``complete`` combined with ``goals.add``, ``steps.add`` or ``steps.update``
+      keeps those graph actions and drops the premature completion.
+    - ``complete`` combined with only ``goals.close`` applies the closes and
+      completes atomically (the closes are carried in ``goal_close``).
+    - A bare ``complete`` is refused while steps are open
+      (``open_steps_empty`` is false) or ``active_sub_goal_ids`` is non-empty.
 
     The third element carries what the run wants looked up next (keyword recall and
     document ids), which the scheduler persists for the following run.
@@ -323,7 +334,23 @@ def validate_decide_payload(
                 )
 
     if complete_payload is not None:
-        return "complete", complete_payload, lookups
+        queued_work = bool(goal_add or step_add or step_update)
+        open_now = () if open_steps_empty else step_ids
+        closed_now = {entry["id"] for entry in goal_close}
+        active_now = [gid for gid in active_sub_goal_ids if gid not in closed_now]
+        if not queued_work and not open_now and not active_now:
+            if goal_close:
+                complete_payload = {**complete_payload, "goal_close": goal_close}
+            return "complete", complete_payload, lookups
+        if queued_work or goal_close:
+            # Completing cancels every running step: a payload that still queues
+            # work keeps its graph actions and drops the premature completion.
+            complete_payload = None
+        else:
+            raise ValueError(
+                "complete is only allowed when nothing remains to run: "
+                f"open steps {list(open_now) or '-'}; active sub-goals {active_now or '-'}"
+            )
 
     if not (goal_add or goal_close or step_add or step_update):
         if open_steps_empty:

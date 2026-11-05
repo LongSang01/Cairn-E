@@ -15,15 +15,29 @@ Read the graph, then do one of:
 
 ## Output
 
-Return one raw JSON object, nothing else:
+Return one raw JSON object, nothing else. Two shapes exist and they never mix.
+
+While work remains — no `complete` key at all (a placeholder like
+`{"from": [], "description": ""}` is forbidden):
 
 ```json
 {"accepted": true, "data": {
-  "complete": {"from": ["origin"], "description": "why the goal is met"},
+  "recall": ["keyword1", "keyword2"],
+  "doc_ids": [{"id": "doc_001", "pages": [3, 4]}],
   "goals": {"add": [{"description": "sub goal", "parent": "g001"}],
             "close": [{"id": "g002", "status": "achieved"}]},
   "steps": {"add": [{"description": "what to do", "from": ["origin"], "goal": "g001", "priority": 3, "rationale": "which new fact this produces"}],
             "update": [{"id": "s002", "priority": 7}, {"id": "s003", "status": "abandoned", "note": "why"}]}
+}}
+```
+
+Root goal proven, nothing left to run — this ends the project and every running
+step is cancelled:
+
+```json
+{"accepted": true, "data": {
+  "complete": {"from": ["f001", "f002"], "description": "why these facts prove the root goal"},
+  "goals": {"close": [{"id": "g002", "status": "achieved"}]}
 }}
 ```
 
@@ -32,7 +46,8 @@ If you genuinely cannot make progress: `{"accepted": false, "reason": "..."}`.
 
 ## Rules
 
-- `complete` only when the facts already on the graph prove the root goal. Cite them in `from`.
+- `complete` ends the whole project — the dispatcher cancels every running step and closes the root goal. It is not a "sub goal finished" marker; use `goals.close` for that.
+- `complete` only when the facts already on the graph prove the root goal AND nothing remains to run: every step done or abandoned, every sub goal closed. Cite the proving facts in `from`. Closing the remaining sub goals in the same payload is allowed; combining `complete` with `goals.add`, `steps.add` or `steps.update` is not — those actions are dropped and the project does not end.
 - Omit `complete` entirely while the goal is unmet. Never send an empty placeholder like `{"from": [], "description": ""}`.
 - A step must state an action and how it turns known facts into a new fact. Small, concrete, verifiable steps beat broad ones.
 - Priority is 0 (lowest) to 9 (highest). Higher priority runs first.
