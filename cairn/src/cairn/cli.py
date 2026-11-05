@@ -24,10 +24,26 @@ def main():
     help="SQLite database path",
 )
 @click.option("--log-level", default="info", show_default=True, help="Uvicorn log level")
+@click.option(
+    "--log-format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    show_default=True,
+    envvar="CAIRN_LOG_FORMAT",
+    help="Server log format",
+)
 @click.option("--access-log/--no-access-log", default=True, show_default=True, help="Enable Uvicorn access log")
-def serve(host: str, port: int, db_path: str, log_level: str, access_log: bool):
+def serve(
+    host: str,
+    port: int,
+    db_path: str,
+    log_level: str,
+    log_format: str,
+    access_log: bool,
+):
     """Start the Cairn API server."""
     db.configure(Path(db_path))
+    configure_logging(log_level.upper(), json_format=log_format == "json")
     # Imported here so `cairn dispatch` never loads the web stack.
     from cairn.server.app import app
 
@@ -55,9 +71,25 @@ def serve(host: str, port: int, db_path: str, log_level: str, access_log: bool):
     help="Run startup worker healthchecks and exit",
 )
 @click.option("--log-level", default="INFO", show_default=True, help="Log level")
-def dispatch(config_path: Path, once: bool, startup_healthcheck_only: bool, log_level: str):
+@click.option(
+    "--log-format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    show_default=True,
+    envvar="CAIRN_LOG_FORMAT",
+    help="Log format",
+)
+def dispatch(
+    config_path: Path,
+    once: bool,
+    startup_healthcheck_only: bool,
+    log_level: str,
+    log_format: str,
+):
     """Run the Cairn dispatcher."""
-    configure_logging(log_level, bare=startup_healthcheck_only)
+    configure_logging(
+        log_level, bare=startup_healthcheck_only, json_format=log_format == "json"
+    )
     loop = DispatcherLoop(config_path)
     try:
         if startup_healthcheck_only:

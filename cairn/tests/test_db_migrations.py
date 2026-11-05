@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 
 import pytest
 
@@ -237,3 +238,66 @@ def test_get_conn_refuses_nesting(tmp_path, monkeypatch) -> None:
         outer.execute("INSERT INTO t VALUES (1)")
     with db.get_conn() as conn:
         assert [row["x"] for row in conn.execute("SELECT x FROM t")] == [1]
+
+
+def test_apply_migrations_serializes_concurrent_start(tmp_path, monkeypatch) -> None:
+    runs: list[int] = []
+    start_line = threading.Barrier(2)
+
+    def slow_migration(conn: sqlite3.Connection) -> None:
+        runs.append(1)
+        time.sleep(0.2)
+
+    monkeypatch.setattr(db, "_MIGRATIONS", ((1, slow_migration),))
+    path = tmp_path / "mutex.db"
+    ddl = (
+        "CREATE TABLE IF NOT EXISTS schema_migrations "
+        "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
+
+    def apply() -> None:
+        conn = sqlite3.connect(path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(ddl)
+        start_line.wait()
+        try:
+            db._apply_migrations(conn)
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=apply) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(runs) == 1
+    conn = sqlite3.connect(path)
+    assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
+    conn.close()
+
+    again = sqlite3.connect(path, factory=db._InstrumentedConnection)
+    again.row_factory = sqlite3.Row
+    db._apply_migrations(again)
+    again.close()
+    assert len(runs) == 1
+
+
+def test_db_busy_counter_counts_lock_failures(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(db, "_db_path", None)
+    db.configure(tmp_path / "busy.db")
+    before = db.db_busy_total()
+
+    with db.get_conn() as blocker:
+        blocker.execute("BEGIN IMMEDIATE")
+        other = sqlite3.connect(
+            tmp_path / "busy.db", timeout=0.05, factory=db._InstrumentedConnection
+        )
+        other.row_factory = sqlite3.Row
+        with pytest.raises(sqlite3.OperationalError):
+            other.execute("CREATE TABLE t (x INTEGER)")
+        with pytest.raises(sqlite3.OperationalError):
+            other.execute("SELECT * FROM missing_table")
+        other.close()
+
+    assert db.db_busy_total() == before + 1

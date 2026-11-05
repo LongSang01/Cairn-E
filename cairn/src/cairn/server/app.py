@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from cairn import __version__
 from cairn.server import db
+from cairn.server.middleware import RequestIdMiddleware
 from cairn.server.routers import (
     context,
     documents,
@@ -15,6 +16,7 @@ from cairn.server.routers import (
     goals,
     health,
     hints,
+    metrics,
     projects,
     questions,
     recall,
@@ -41,6 +43,7 @@ app = FastAPI(
 )
 
 app.include_router(health.router)
+app.include_router(metrics.router)
 app.include_router(settings.router)
 app.include_router(projects.router)
 app.include_router(hints.router)
@@ -54,6 +57,8 @@ app.include_router(recall.router)
 app.include_router(findings.router)
 app.include_router(usage.router)
 app.include_router(export.router)
+
+app.add_middleware(RequestIdMiddleware)
 
 
 @app.get("/", include_in_schema=False)

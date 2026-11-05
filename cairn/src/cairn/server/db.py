@@ -215,18 +215,31 @@ def configure(path: Path) -> None:
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
-    """Run each registered migration once, recording it in `schema_migrations`."""
-    applied = {
-        row["version"] for row in conn.execute("SELECT version FROM schema_migrations")
-    }
-    for version, migrate in _MIGRATIONS:
-        if version in applied:
-            continue
-        migrate(conn)
-        conn.execute(
-            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-            (version, datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")),
-        )
+    """Run each registered migration once, recording it in `schema_migrations`.
+
+    Check-and-apply runs inside one IMMEDIATE transaction so two processes
+    starting concurrently cannot both apply the same migration: the second one
+    blocks on the write lock and, after acquiring it, re-reads
+    `schema_migrations` and finds the work already recorded.
+    """
+    conn.commit()  # finish any implicit transaction so BEGIN IMMEDIATE is legal
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        applied = {
+            row["version"] for row in conn.execute("SELECT version FROM schema_migrations")
+        }
+        for version, migrate in _MIGRATIONS:
+            if version in applied:
+                continue
+            migrate(conn)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (version, datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -396,6 +409,55 @@ def _migrate_intents(conn: sqlite3.Connection) -> None:
             )
 
 
+_busy_lock = threading.Lock()
+_busy_total = 0
+
+
+def _note_busy() -> None:
+    global _busy_total
+    with _busy_lock:
+        _busy_total += 1
+
+
+def db_busy_total() -> int:
+    """Hard lock failures (busy_timeout exhausted) since process start."""
+    return _busy_total
+
+
+class _InstrumentedConnection(sqlite3.Connection):
+    """Connection that counts hard lock failures.
+
+    `busy_timeout` makes SQLite wait out ordinary contention, so an
+    OperationalError mentioning locked/busy means contention outlasted the
+    timeout. Each occurrence bumps `db_busy_total()` so WAL and busy_timeout
+    tuning can be judged from /metrics instead of guessed.
+    """
+
+    def execute(self, sql, parameters=()):
+        try:
+            return super().execute(sql, parameters)
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc) or "busy" in str(exc):
+                _note_busy()
+            raise
+
+    def executemany(self, sql, parameters):
+        try:
+            return super().executemany(sql, parameters)
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc) or "busy" in str(exc):
+                _note_busy()
+            raise
+
+    def executescript(self, sql):
+        try:
+            return super().executescript(sql)
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc) or "busy" in str(exc):
+                _note_busy()
+            raise
+
+
 @contextmanager
 def get_conn() -> Generator[sqlite3.Connection, None, None]:
     """A per-thread connection, reused across requests.
@@ -423,7 +485,7 @@ def get_conn() -> Generator[sqlite3.Connection, None, None]:
         conn.close()
         conn = None
     if conn is None:
-        conn = sqlite3.connect(path, timeout=5.0)
+        conn = sqlite3.connect(path, timeout=5.0, factory=_InstrumentedConnection)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
