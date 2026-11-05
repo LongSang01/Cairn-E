@@ -214,18 +214,30 @@ export const coreMixins = {
     },
 
     startPolling() {
-      this.pollTimer = setInterval(async () => {
-        if (!this.polling) return;
-        if (this.selectedProjectId && this.view === 'graph') {
-          // A 304-backed poll returns the same snapshot; only rebuild the (expensive)
-          // Cytoscape graph when the payload actually changed.
-          const before = JSON.stringify(this.project);
-          await this.loadProject(this.selectedProjectId);
-          if (JSON.stringify(this.project) === before) return;
-          this.updateGraph();
-        } else {
-          await this.loadProjects();
+      const schedule = () => {
+        this.pollTimer = setTimeout(tick, this.pollDelay);
+      };
+      const tick = async () => {
+        let changed = true;
+        if (this.polling) {
+          if (this.selectedProjectId && this.view === 'graph') {
+            // A 304-backed poll returns the same snapshot; only rebuild the (expensive)
+            // Cytoscape graph when the payload actually changed.
+            const before = JSON.stringify(this.project);
+            await this.loadProject(this.selectedProjectId);
+            changed = JSON.stringify(this.project) !== before;
+            if (changed) this.updateGraph();
+          } else {
+            const before = JSON.stringify(this.projects);
+            await this.loadProjects();
+            changed = JSON.stringify(this.projects) !== before;
+          }
         }
-      }, 5000);
+        // Quiet projects back off toward a 30s cadence; the first change snaps back.
+        this.pollDelay = changed ? 5000 : Math.min(this.pollDelay * 2, 30000);
+        schedule();
+      };
+      this.pollDelay = 5000;
+      schedule();
     },
 };

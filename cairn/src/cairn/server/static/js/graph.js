@@ -352,7 +352,11 @@ export const graphMixins = {
           ex.data('findingSeverity') !== n.data.findingSeverity ||
           ex.data('digestKind') !== n.data.digestKind
         ) {
-          ex.data(n.data); changed = true;
+          // Repaint data in place; only a size change can disturb the layout.
+          const resized =
+            ex.data('width') !== n.data.width || ex.data('height') !== n.data.height;
+          ex.data(n.data);
+          if (resized) changed = true;
         }
       }
       for (const e of edges) {
@@ -360,7 +364,6 @@ export const graphMixins = {
         if (ex.length === 0) {
           const a = this.cy.add(e);
           this.fadeInFreshElement(a);
-          changed = true;
         } else if (ex.data('status') !== e.data.status || ex.data('edgeType') !== e.data.edgeType) {
           ex.data(e.data);
         }

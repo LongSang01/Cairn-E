@@ -8,6 +8,7 @@ export function createState() {
     selectedProjectId: '',
     polling: true,
     pollTimer: null,
+    pollDelay: 5000,
     cy: null,
     sideTab: 'detail',
     openSessionIds: [],

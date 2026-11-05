@@ -43,13 +43,28 @@ def build_sessions(conn: sqlite3.Connection, project_id: str) -> list[Session]:
     return [session_to_model(row) for row in rows]
 
 def build_session_messages(
-    conn: sqlite3.Connection, project_id: str, session_id: str
+    conn: sqlite3.Connection,
+    project_id: str,
+    session_id: str,
+    *,
+    since_seq: int | None = None,
 ) -> list[SessionMessage]:
-    rows = conn.execute(
+    """Full transcript, or only messages newer than `since_seq` (0-based seq)."""
+    query_all = (
         "SELECT seq, role, content, raw FROM session_messages "
-        "WHERE project_id = ? AND session_id = ? ORDER BY seq",
-        (project_id, session_id),
-    ).fetchall()
+        "WHERE project_id = ? AND session_id = ? ORDER BY seq"
+    )
+    query_since = (
+        "SELECT seq, role, content, raw FROM session_messages "
+        "WHERE project_id = ? AND session_id = ? AND seq > ? ORDER BY seq"
+    )
+    params: tuple[object, ...]
+    if since_seq is None:
+        params = (project_id, session_id)
+        rows = conn.execute(query_all, params).fetchall()
+    else:
+        params = (project_id, session_id, since_seq)
+        rows = conn.execute(query_since, params).fetchall()
     return [
         SessionMessage(seq=r["seq"], role=r["role"], content=r["content"], raw=r["raw"])
         for r in rows

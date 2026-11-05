@@ -1,8 +1,7 @@
-import hashlib
-
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from cairn.server.db import get_conn
+from cairn.server.http_cache import cache_headers
 from cairn.server.models import (
     CompleteRequest,
     CompleteResponse,
@@ -48,35 +47,6 @@ from cairn.server.services import (
 
 router = APIRouter(tags=["projects"])
 
-# `no-cache` still lets a browser reuse the body after a 304: it must revalidate, but
-# the polled project detail (the heaviest GET) is no longer transferred every 5 seconds.
-CACHE_CONTROL = "no-cache"
-
-
-def _etag(payload: ProjectDetail | list[ProjectSummary]) -> str:
-    # Pydantic's own serializer is already what FastAPI sends; hashing it avoids a
-    # second, slower jsonable_encoder pass on every poll.
-    if isinstance(payload, list):
-        raw = "[" + ",".join(item.model_dump_json(by_alias=True) for item in payload) + "]"
-    else:
-        raw = payload.model_dump_json(by_alias=True)
-    return f'"{hashlib.sha256(raw.encode()).hexdigest()}"'
-
-
-def _cache_headers(
-    request: Request, payload: ProjectDetail | list[ProjectSummary]
-) -> tuple[dict[str, str], Response | None]:
-    """Return the headers for a fresh body, or a 304 when the caller's copy is current."""
-    tag = _etag(payload)
-    headers = {"ETag": tag, "Cache-Control": CACHE_CONTROL}
-    offered = {
-        item.strip().removeprefix("W/")
-        for item in request.headers.get("if-none-match", "").split(",")
-    }
-    if tag in offered or "*" in offered:
-        return headers, Response(status_code=304, headers=headers)
-    return headers, None
-
 
 @router.get("/projects", response_model=list[ProjectSummary])
 def list_projects(request: Request, response: Response):
@@ -116,7 +86,7 @@ def list_projects(request: Request, response: Response):
             for row in rows
         ]
 
-    headers, not_modified = _cache_headers(request, summaries)
+    headers, not_modified = cache_headers(request, summaries)
     if not_modified is not None:
         return not_modified
     response.headers.update(headers)
@@ -211,7 +181,7 @@ def get_project(project_id: str, request: Request, response: Response):
             sessions=build_sessions(conn, project_id),
         )
 
-    headers, not_modified = _cache_headers(request, detail)
+    headers, not_modified = cache_headers(request, detail)
     if not_modified is not None:
         return not_modified
     response.headers.update(headers)

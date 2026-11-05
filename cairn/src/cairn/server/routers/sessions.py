@@ -2,10 +2,11 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 from cairn.server.db import get_conn
+from cairn.server.http_cache import cache_headers
 from cairn.server.models import (
     AppendSessionMessagesRequest,
     CreateSessionRequest,
@@ -33,22 +34,42 @@ STREAM_IDLE_LIMIT_SECONDS = 300.0
 
 
 @router.get("/projects/{project_id}/sessions", response_model=list[Session])
-def list_sessions(project_id: str):
+def list_sessions(request: Request, response: Response, project_id: str):
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
-        return build_sessions(conn, project_id)
+        sessions = build_sessions(conn, project_id)
+    headers, not_modified = cache_headers(request, sessions)
+    response.headers.update(headers)
+    return not_modified or sessions
 
 
 @router.get("/projects/{project_id}/sessions/{session_id}", response_model=SessionDetail)
-def get_session(project_id: str, session_id: str):
+def get_session(
+    request: Request,
+    response: Response,
+    project_id: str,
+    session_id: str,
+    since_seq: int | None = Query(default=None, ge=0),
+):
+    """One session with its transcript.
+
+    `since_seq` keeps long sessions cheap to re-poll: pass the highest seq already
+    seen and the response carries only newer messages (an empty list when caught up).
+    Omit it for the full transcript.
+    """
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
         expire_stale_sessions(conn, project_id)
         row = get_session_or_404(conn, project_id, session_id)
-        return SessionDetail(
+        detail = SessionDetail(
             **session_to_model(row).model_dump(),
-            messages=build_session_messages(conn, project_id, session_id),
+            messages=build_session_messages(
+                conn, project_id, session_id, since_seq=since_seq
+            ),
         )
+    headers, not_modified = cache_headers(request, detail)
+    response.headers.update(headers)
+    return not_modified or detail
 
 
 @router.get("/projects/{project_id}/sessions/{session_id}/stream")

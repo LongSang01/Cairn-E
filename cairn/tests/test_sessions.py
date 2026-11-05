@@ -812,3 +812,61 @@ def test_finish_retries_transient_append_failures() -> None:
     # Two rejected attempts plus the successful one; the tail still lands.
     assert len(client.appended) == 3
     assert client.appended[-1][0]["content"] == "done"
+
+
+def test_session_messages_incremental_pull(client):
+    pid = _create_project(client)
+    payload = _session_payload(
+        messages=[
+            {"role": "assistant", "content": "step one"},
+            {"role": "assistant", "content": "step two"},
+            {"role": "assistant", "content": "step three"},
+        ]
+    )
+    r = client.post(f"/projects/{pid}/sessions", json=payload)
+    sid = r.json()["id"]
+
+    # Omitted since_seq returns the whole transcript (seq is 0-based).
+    full = client.get(f"/projects/{pid}/sessions/{sid}").json()
+    assert [m["seq"] for m in full["messages"]] == [0, 1, 2]
+
+    # since_seq prunes already-seen messages server-side.
+    tail = client.get(f"/projects/{pid}/sessions/{sid}?since_seq=1").json()
+    assert [(m["seq"], m["content"]) for m in tail["messages"]] == [(2, "step three")]
+
+    # Caught up => empty list, no error.
+    assert client.get(f"/projects/{pid}/sessions/{sid}?since_seq=2").json()["messages"] == []
+
+
+def test_sessions_etag_revalidation(client):
+    pid = _create_project(client)
+    r = client.post(f"/projects/{pid}/sessions", json=_session_payload(status="running"))
+    sid = r.json()["id"]
+
+    for path in (f"/projects/{pid}/sessions", f"/projects/{pid}/sessions/{sid}"):
+        resp = client.get(path)
+        etag = resp.headers["etag"]
+        assert resp.headers["cache-control"] == "no-cache"
+
+        unchanged = client.get(path, headers={"If-None-Match": etag})
+        assert unchanged.status_code == 304
+        assert unchanged.content == b""
+
+    # Stale validators are ignored; a changed body rotates the tag.
+    detail = client.get(f"/projects/{pid}/sessions/{sid}")
+    stale = client.get(
+        f"/projects/{pid}/sessions/{sid}", headers={"If-None-Match": '"stale"'}
+    )
+    assert stale.status_code == 200
+    assert detail.headers["etag"] == stale.headers["etag"]
+
+    appended = client.post(
+        f"/projects/{pid}/sessions/{sid}/messages",
+        json={"messages": [{"role": "assistant", "content": "more"}]},
+    )
+    assert appended.status_code == 200
+    fresh = client.get(f"/projects/{pid}/sessions/{sid}")
+    assert fresh.headers["etag"] != detail.headers["etag"]
+    assert client.get(
+        f"/projects/{pid}/sessions/{sid}", headers={"If-None-Match": detail.headers["etag"]}
+    ).status_code == 200
