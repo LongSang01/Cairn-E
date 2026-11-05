@@ -7,6 +7,9 @@ common_env:
   TSEC_AGENT_TOKEN: "xxx"
 
 runtime:
+  # "container" runs one worker container per project; see dispatch.local.example.yaml
+  # for running the worker CLIs directly on the dispatcher host instead.
+  execution: "container"
   # Scheduler tick interval in seconds.
   interval: 3
   # Global concurrency cap across all workers and all projects.

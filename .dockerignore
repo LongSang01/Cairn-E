@@ -1,0 +1,32 @@
+# Root build context: the cairn-server image only needs cairn/pyproject.toml,
+# cairn/uv.lock and cairn/src. Keeping local state out of the context keeps the
+# image small and the layer cache stable.
+
+.git/
+.github/
+.gitignore
+.dockerignore
+
+# Local runtime state and tooling that the image never runs.
+datas/
+deploy/
+node_modules/
+web-tests/
+docs/
+README/
+README.md
+
+# Caches and virtualenvs: the image syncs its own dependencies.
+**/__pycache__/
+**/*.pyc
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.venv/
+cairn/.ruff_cache/
+cairn/.pytest_cache/
+cairn/.mypy_cache/
+cairn/.venv/
+
+# The worker container image has its own context.
+container/

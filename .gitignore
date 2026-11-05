@@ -5,3 +5,10 @@ __pycache__/
 datas/
 dispatch.yaml
 node_modules/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
