@@ -1,23 +1,53 @@
 # Worker（agent 沙箱）镜像：agent 跑命令的渗透工具箱。
 #
-# 基于共用基础镜像（Debian 运行时 + 系统 Python + uv），这里只加 worker 专属
-# 的内容：工具集、agent CLI、非 root 的 agent 用户。基础镜像来自：
-#   docker build -f Dockerfile.base -t cairn-base:latest .
+# 独立于 cairn-app，直接基于 Debian（不共享基础镜像）：改 worker 工具不会重建
+# app，改 app 依赖也不会重建 worker。基础运行环境（python3/pip/curl/tzdata）就地
+# 安装，只有 worker 需要的东西才装在这里。
 #   docker build -t cairn-worker-container:latest ./container
-# `make worker` 会按顺序做完两步。
-ARG CAIRN_BASE_IMAGE=cairn-base:latest
-FROM --platform=amd64 ${CAIRN_BASE_IMAGE}
+FROM --platform=amd64 debian:trixie-slim
 
 # ---------------------------------------------------------------------------
-# 加速参数（生产可全部用 --build-arg 覆盖；直连环境传空值即可）
-#   --build-arg GH_PROXY=
+# 镜像/加速参数（生产可全部用 --build-arg 覆盖；直连环境传官方源）
 # ---------------------------------------------------------------------------
+ARG APT_MIRROR=http://mirrors.ustc.edu.cn/debian
+ARG APT_SECURITY_MIRROR=http://mirrors.ustc.edu.cn/debian-security
+ARG PIP_INDEX=https://mirrors.ustc.edu.cn/pypi/simple
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 ARG GH_PROXY=https://gh-proxy.com/
 
+# Debian 13 用 deb822 源。先替换 security，否则较短的主仓库前缀会先吃掉它。
+RUN set -eux; \
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources; do \
+        [ -f "$f" ] || continue; \
+        sed -i -E \
+            -e "s#https?://deb\.debian\.org/debian-security#${APT_SECURITY_MIRROR}#g" \
+            -e "s#https?://deb\.debian\.org/debian#${APT_MIRROR}#g" \
+            "$f"; \
+    done
+
+# 基础运行环境。python3/pip 给工具用（pip3 --break-system-packages 装到 /usr/local），
+# 不装 python3-venv（用不上）与 uv（只有 app 需要）。
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl tzdata python3 python3-pip; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
+
+# pip 镜像，供 pip3 安装工具。
+RUN set -eux; \
+    printf '%s\n' \
+      '[global]' \
+      "index-url = ${PIP_INDEX}" \
+      'trusted-host = mirrors.ustc.edu.cn' \
+      > /etc/pip.conf
+
+ENV TZ=Asia/Shanghai
+ENV PIP_INDEX_URL=${PIP_INDEX}
+
 # 一层装完所有 apt 依赖：
 #   通用工具 / 常用渗透工具（详见 AGENTS.md 的工具清单）
-# base 已提供 ca-certificates / curl / python3 / python3-pip / python3-venv，不再重复装。
+# ca-certificates / curl / python3 / python3-pip 已在上方装好，不再重复装。
 # 每类只留一个主力，避免同类工具重复占体积：
 #   端口扫描 nmap + naabu（masscan 的活 naabu 能做，且速率不当容易打爆目标/本机网络）
 #   目录爆破 ffuf（dirb 已淘汰，gobuster 的 dir/vhost/dns 也被 ffuf 覆盖）

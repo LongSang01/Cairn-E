@@ -180,6 +180,11 @@ class ContainerConfig(BaseModel):
     network_mode: str
     completed_action: CompletedAction
     cap_add: list[str] = Field(default_factory=list)
+    # Per-worker resource limits; None = Docker default (unlimited). Bounds one
+    # worker container so a runaway task cannot exhaust the host.
+    mem_limit: str | None = None
+    nano_cpus: int | None = None
+    pids_limit: int | None = None
 
 
 class LocalConfig(BaseModel):

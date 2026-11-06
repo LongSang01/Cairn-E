@@ -65,6 +65,9 @@ class ContainerManager:
                 name=name,
                 network_mode=self._config.network_mode,
                 cap_add=self._config.cap_add or None,
+                mem_limit=self._config.mem_limit,
+                nano_cpus=self._config.nano_cpus,
+                pids_limit=self._config.pids_limit,
             )
             LOG.info("created container project=%s container=%s", project_id, name)
             return name

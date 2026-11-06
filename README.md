@@ -10,10 +10,9 @@
 
 ### Docker Compose (已验证)
 
-系统镜像与 worker 镜像共用同一个基础镜像 `cairn-base`，必须按顺序构建：
+系统镜像（`cairn-app`）与 worker 镜像（`cairn-worker-container`）相互独立、不共享基础镜像，可并行构建：
 
 ```bash
-make base                      # cairn-base:latest
 make worker                    # cairn-worker-container:latest（dispatcher 使用）
 make app                       # cairn-app（server + dispatcher 使用）
 ```
@@ -25,4 +24,4 @@ make all
 docker compose up --build
 ```
 
-只重建系统镜像时 `make app` 即可；`docker compose up --build` 不会自动构建 base。
+只重建系统镜像时 `make app` 即可；只重建 worker 时 `make worker` 即可。

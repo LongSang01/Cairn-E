@@ -1,13 +1,15 @@
 # Cairn application image (API server + dispatcher).
 #
-# Built on top of the shared base image so it shares the Debian runtime, the
-# system Python and the uv binaries with cairn-worker-container.
+# Built directly on astral's official uv image so the Python interpreter (3.13)
+# is pinned and tested against the uv version. It no longer shares a base image
+# with cairn-worker-container: the worker needs Debian's system Python for its
+# tools, while the app needs a pinned interpreter — the two are independent.
 #
-#   docker build -f Dockerfile.base -t cairn-base:latest .
+# To pin the uv version as well, use a tag like:
+#   ghcr.io/astral-sh/uv:0.13.7-python3.13-trixie-slim
+#
 #   docker build -t cairn-app .
-# `make app` does both in order.
-ARG CAIRN_BASE_IMAGE=cairn-base:latest
-FROM --platform=amd64 ${CAIRN_BASE_IMAGE}
+FROM --platform=amd64 ghcr.io/astral-sh/uv:python3.13-trixie-slim
 
 ARG PIP_INDEX=https://mirrors.ustc.edu.cn/pypi/simple
 

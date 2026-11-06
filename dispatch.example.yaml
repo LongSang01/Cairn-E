@@ -74,7 +74,7 @@ tool_guard:
 
 container:
   # Base worker container. The dispatcher execs agent commands inside one container per project.
-  # Built on the shared base: `make worker` (docker build ./container)
+  # Built with `make worker` (docker build ./container); independent of the app image.
   image: "cairn-worker-container:latest"
   network_mode: "host"
   # "stop" keeps finished containers for inspection; "remove" is cleaner but loses post-run state.
@@ -83,6 +83,11 @@ container:
   # cap_add:
   #   - "NET_RAW"
   #   - "NET_ADMIN"
+  # Per-worker resource limits (None = Docker default, unlimited). Bounds one
+  # worker container so a runaway task cannot exhaust the host.
+  # mem_limit: "512m"
+  # nano_cpus: 1000000000   # 1 CPU = 1_000_000_000
+  # pids_limit: 256
 
 
 workers:

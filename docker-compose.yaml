@@ -3,9 +3,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        # Shared base image, built first with `make base`.
-        CAIRN_BASE_IMAGE: cairn-base:latest
     image: cairn-app
     container_name: cairn-server
     # Browser traffic goes through cairn-nginx (Basic Auth); the server is
@@ -51,18 +48,42 @@ services:
       retries: 6
       start_period: 3s
     restart: unless-stopped
+  cairn-socket-proxy:
+    image: ghcr.io/tecnativa/docker-socket-proxy:latest
+    container_name: cairn-socket-proxy
+    environment:
+      # 只开放 dispatcher 需要的接口（容器 + exec 的读写）；build/images/volumes/
+      # networks/system/auth 等危险接口一律关闭，缩小 worker 逃逸后的攻击面。
+      CONTAINERS: 1
+      EXEC: 1
+      POST: 1
+      PUT: 1
+      DELETE: 1
+      IMAGES: 0
+      BUILD: 0
+      NETWORKS: 0
+      VOLUMES: 0
+      SYSTEM: 0
+      AUTH: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    expose:
+      - "2375"
+    restart: unless-stopped
   cairn-dispatcher:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        CAIRN_BASE_IMAGE: cairn-base:latest
     image: cairn-app
     container_name: cairn-dispatcher
+    environment:
+      # 通过受限 socket 代理操作 Docker，不再直挂宿主 /var/run/docker.sock。
+      DOCKER_HOST: tcp://cairn-socket-proxy:2375
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ./dispatch.yaml:/cairn/dispatch.yaml
     depends_on:
+      cairn-socket-proxy:
+        condition: service_started
       cairn-server:
         condition: service_healthy
     restart: unless-stopped
