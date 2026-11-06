@@ -524,7 +524,15 @@ def test_execute_writes_findings_and_status(monkeypatch) -> None:
             "s001",
             "test-worker",
             ["f"],
-            [{"kind": "flaw", "description": "a product", "severity": "info"}],
+            [
+                {
+                    "kind": "flaw",
+                    "description": "a product",
+                    "severity": "info",
+                    "status": "tentative",
+                    "evidence": [],
+                }
+            ],
         )
     ]
     # The driver's reported usage rides along with the session finish payload.
@@ -731,7 +739,7 @@ def test_execute_streams_transcript_while_the_worker_runs(monkeypatch) -> None:
         assert on_stdout is not None
         for line in (
             '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}',
-            '{"type":"item.completed","item":{"type":"command_execution","command":"ls"}}',
+            '{"type":"tool_execution_start","toolName":"bash","args":{"command":"ls"}}',
         ):
             on_stdout(line + "\n")
         return ProcessResult(0, '{"accepted":true,"data":{"facts":[{"description":"f"}]}}', "")

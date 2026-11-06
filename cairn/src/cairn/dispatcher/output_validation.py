@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from cairn.contracts.models import FINDING_SEVERITIES
+from cairn.contracts.models import FINDING_SEVERITIES, FINDING_STATUSES
 from cairn.dispatcher.output_parser import extract_json_object
 
 MAX_PRIORITY = 9
+EVIDENCE_KINDS = ("exchange", "document", "seq")
 
 
 def parse_json_output(stdout: str) -> dict[str, Any]:
@@ -154,6 +155,51 @@ def _severity(value: Any, field: str) -> str:
     if severity not in FINDING_SEVERITIES:
         raise ValueError(f"{field} must be one of: {', '.join(FINDING_SEVERITIES)}")
     return severity
+
+
+def _finding_status(value: Any, field: str) -> str:
+    """`confirmed` promises reproducibility; otherwise the finding is tentative."""
+    if value is None:
+        return "tentative"
+    text = _optional_text(value, field)
+    if text is None:
+        return "tentative"
+    status = text.lower()
+    if status not in FINDING_STATUSES:
+        raise ValueError(f"{field} must be one of: {', '.join(FINDING_STATUSES)}")
+    return status
+
+
+def _evidence_list(value: Any, field: str) -> list[dict[str, str | None]]:
+    """Evidence pointers a worker can produce: a URL, a document id or a seq.
+
+    A bare string is accepted as an exchange URL because that is what the model
+    naturally writes after running `curl`.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be an array")
+    cleaned: list[dict[str, str | None]] = []
+    for index, item in enumerate(value):
+        item_field = f"{field}[{index}]"
+        if isinstance(item, str):
+            cleaned.append({"kind": "exchange", "ref": _text(item, item_field), "digest": None})
+            continue
+        if not isinstance(item, dict):
+            raise ValueError(f"{item_field} must be an object or a string")
+        kind = (_optional_text(item.get("kind"), f"{item_field}.kind") or "exchange").lower()
+        if kind not in EVIDENCE_KINDS:
+            raise ValueError(f"{item_field}.kind must be one of: {', '.join(EVIDENCE_KINDS)}")
+        ref = _text(item.get("ref") or item.get("id"), f"{item_field}.ref")
+        cleaned.append(
+            {
+                "kind": kind,
+                "ref": ref,
+                "digest": _optional_text(item.get("digest"), f"{item_field}.digest"),
+            }
+        )
+    return cleaned
 
 
 def _priority(value: Any, field: str) -> int:
@@ -413,7 +459,7 @@ def validate_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, An
     if singular is not None:
         facts.append(_fact_entry(singular, "fact"))
 
-    findings: list[dict[str, str]] = []
+    findings: list[dict[str, Any]] = []
     raw_findings = data.get("findings")
     if raw_findings is not None:
         if not isinstance(raw_findings, list):
@@ -427,6 +473,10 @@ def validate_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, An
                     or "finding",
                     "description": _text(item.get("description"), f"findings[{index}].description"),
                     "severity": _severity(item.get("severity"), f"findings[{index}].severity"),
+                    "status": _finding_status(item.get("status"), f"findings[{index}].status"),
+                    "evidence": _evidence_list(
+                        item.get("evidence"), f"findings[{index}].evidence"
+                    ),
                 }
             )
 

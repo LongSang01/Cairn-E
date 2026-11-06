@@ -95,7 +95,7 @@ class CairnClient:
         worker: str,
         *,
         facts: list[dict[str, Any]],
-        findings: list[dict[str, str]],
+        findings: list[dict[str, Any]],
         status: str = "done",
         note: str | None = None,
     ) -> ApiResult:

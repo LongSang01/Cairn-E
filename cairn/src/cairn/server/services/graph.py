@@ -4,7 +4,16 @@ from __future__ import annotations
 
 import sqlite3
 
-from cairn.contracts.models import FINDING_SEVERITIES, Finding, FindingsSummary, Goal, Step
+from cairn.contracts.models import (
+    FINDING_SEVERITIES,
+    FINDING_STATUSES,
+    Finding,
+    FindingsSummary,
+    Goal,
+    Step,
+)
+
+from .evidence import build_finding_evidence
 
 
 def goal_to_model(row: sqlite3.Row) -> Goal:
@@ -80,18 +89,27 @@ def build_findings(conn: sqlite3.Connection, project_id: str) -> list[Finding]:
         "SELECT * FROM findings WHERE project_id = ? ORDER BY created_at, rowid",
         (project_id,),
     ).fetchall()
+    evidence = build_finding_evidence(conn, project_id, [row["id"] for row in rows])
     return [
         Finding(
             id=row["id"],
             kind=row["kind"],
             description=row["description"],
             severity=normalize_finding_severity(row["severity"]),
+            status=normalize_finding_status(row["status"]),
+            evidence=evidence.get(row["id"], []),
             step=row["step_id"],
             creator=row["creator"],
             created_at=row["created_at"],
         )
         for row in rows
     ]
+
+
+def normalize_finding_status(value: object) -> str:
+    """Coerce a stored status; anything unrecognised means `tentative`."""
+    status = str(value or "tentative").strip().lower()
+    return status if status in FINDING_STATUSES else "tentative"
 
 
 def normalize_finding_severity(value: object) -> str:

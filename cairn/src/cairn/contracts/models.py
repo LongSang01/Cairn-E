@@ -24,6 +24,12 @@ QuestionStatus = Literal["pending", "running", "answered", "failed", "cancelled"
 FindingSeverity = Literal["critical", "high", "medium", "low", "info"]
 # Derive the ordered tuple from the Literal so the two can never drift apart.
 FINDING_SEVERITIES: tuple[str, ...] = get_args(FindingSeverity)
+# A finding is confirmed only when it carries evidence; otherwise it is a suspicion.
+FindingStatus = Literal["confirmed", "tentative"]
+FINDING_STATUSES: tuple[str, ...] = get_args(FindingStatus)
+# Where a finding's proof lives: a parsed HTTP exchange, an evidence document, or a
+# raw transcript sequence number (last resort, when the parser understood nothing).
+EvidenceKind = Literal["exchange", "document", "seq"]
 
 
 # Storage ceiling for one evidence document (~200 KB). This is a safety rail, not a
@@ -83,13 +89,28 @@ class Step(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class EvidenceRef(BaseModel):
+    """A pointer to frozen proof, so a report survives transcript cleanup."""
+
+    kind: EvidenceKind
+    ref: str
+    digest: str | None = None
+
+
 class Finding(BaseModel):
-    """A structured product of the search, whose definition is task-defined."""
+    """A structured product of the search, whose definition is task-defined.
+
+    ``status`` is ``confirmed`` only when ``evidence`` is non-empty; the server
+    downgrades a submission that claims otherwise, so a report never ships a
+    confirmed finding that cannot be reproduced.
+    """
 
     id: str
     kind: str
     description: str
     severity: FindingSeverity = "info"
+    status: FindingStatus = "tentative"
+    evidence: list[EvidenceRef] = Field(default_factory=list)
     step: str | None = None
     creator: str
     created_at: str

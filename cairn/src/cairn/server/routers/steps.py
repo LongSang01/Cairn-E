@@ -21,7 +21,9 @@ from cairn.server.services import (
     next_fact_id,
     next_finding_id,
     next_step_id,
+    resolve_evidence,
     step_to_model,
+    store_finding_evidence,
     utcnow,
     validate_creator_worker,
     validate_facts_exist,
@@ -194,11 +196,16 @@ def conclude(project_id: str, step_id: str, body: ConcludeStepRequest):
 
         for submitted in body.findings or []:
             did = next_finding_id(conn, project_id)
+            # Only references that resolve to stored bytes count as proof; a
+            # `confirmed` claim without any is downgraded rather than rejected.
+            evidence = resolve_evidence(conn, project_id, submitted.evidence)
+            status = submitted.status if evidence else "tentative"
             conn.execute(
                 """
                 INSERT INTO findings (
-                    id, project_id, step_id, kind, severity, description, creator, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    id, project_id, step_id, kind, severity, status,
+                    description, creator, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     did,
@@ -206,17 +213,21 @@ def conclude(project_id: str, step_id: str, body: ConcludeStepRequest):
                     step_id,
                     submitted.kind,
                     submitted.severity,
+                    status,
                     submitted.description,
                     body.worker,
                     now,
                 ),
             )
+            store_finding_evidence(conn, project_id, did, evidence)
             findings.append(
                 Finding(
                     id=did,
                     kind=submitted.kind,
                     description=submitted.description,
                     severity=submitted.severity,
+                    status=status,
+                    evidence=evidence,
                     step=step_id,
                     creator=body.worker,
                     created_at=now,

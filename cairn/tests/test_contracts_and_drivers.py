@@ -10,8 +10,6 @@ from cairn.dispatcher.output_validation import (
     validate_execute_payload,
 )
 from cairn.dispatcher.runtime.process import ManagedProcess
-from cairn.dispatcher.workers.adapters.claudecode import ClaudeCodeDriver
-from cairn.dispatcher.workers.adapters.codex import CodexDriver
 from cairn.dispatcher.workers.adapters.pi import PiDriver
 
 FACTS = ["origin", "f001"]
@@ -506,7 +504,15 @@ def test_execute_payload_accepts_findings_and_abandon() -> None:
     assert kind == "result"
     assert data == {
         "facts": [],
-        "findings": [{"kind": "flaw", "description": "product", "severity": "info"}],
+        "findings": [
+            {
+                "kind": "flaw",
+                "description": "product",
+                "severity": "info",
+                "status": "tentative",
+                "evidence": [],
+            }
+        ],
         "status": "abandoned",
         "note": None,
     }
@@ -563,43 +569,6 @@ def test_pi_driver_extracts_session_and_last_assistant_text() -> None:
     assert driver.extract_response_text(stdout, "") == '{"accepted":true,"data":{}}'
 
 
-def test_claudecode_driver_extracts_answer_from_stream_json() -> None:
-    driver = ClaudeCodeDriver()
-    stdout = "\n".join(
-        [
-            json.dumps({"type": "system", "subtype": "init", "session_id": "s1"}),
-            json.dumps(
-                {
-                    "type": "assistant",
-                    "message": {
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "tool_use",
-                                "id": "t1",
-                                "name": "Bash",
-                                "input": {"command": "ls"},
-                            }
-                        ],
-                    },
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "result",
-                    "subtype": "success",
-                    "result": '{"accepted":true}',
-                    "is_error": False,
-                }
-            ),
-        ]
-    )
-
-    assert driver.extract_response_text(stdout, "") == '{"accepted":true}'
-    # Plain mode output must keep working: stdout is the answer.
-    assert driver.extract_response_text("plain answer", "") == "plain answer"
-
-
 def test_execute_payload_keeps_fact_title_and_documents() -> None:
     kind, data = validate_execute_payload(
         {
@@ -632,37 +601,6 @@ def test_execute_payload_rejects_overlong_fact_title() -> None:
         validate_execute_payload(
             {"accepted": True, "data": {"facts": [{"description": "x", "title": "t" * 201}]}}
         )
-
-
-def test_codex_driver_extracts_thread_and_agent_messages() -> None:
-    driver = CodexDriver()
-    stdout = "\n".join(
-        [
-            json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
-            json.dumps(
-                {"type": "item.completed", "item": {"type": "reasoning", "text": "thinking"}}
-            ),
-            json.dumps(
-                {
-                    "type": "item.completed",
-                    "item": {
-                        "type": "command_execution",
-                        "command": "ls",
-                        "aggregated_output": "a.txt",
-                    },
-                }
-            ),
-            json.dumps(
-                {"type": "item.completed", "item": {"type": "agent_message", "text": "first"}}
-            ),
-            json.dumps(
-                {"type": "item.completed", "item": {"type": "agent_message", "text": "second"}}
-            ),
-        ]
-    )
-
-    assert driver.extract_session(None, stdout, "") == "thread-1"
-    assert driver.extract_response_text(stdout, "") == "first\nsecond"
 
 
 def test_pi_driver_sums_token_usage_across_turns() -> None:
@@ -720,96 +658,8 @@ def test_pi_driver_prefers_agent_end_totals() -> None:
     assert usage.total_tokens == 17
 
 
-def test_claudecode_driver_reads_result_usage() -> None:
-    stdout = json.dumps(
-        {
-            "type": "result",
-            "subtype": "success",
-            "result": '{"accepted":true}',
-            "usage": {
-                "input_tokens": 100,
-                "output_tokens": 20,
-                "cache_read_input_tokens": 30,
-                "cache_creation_input_tokens": 5,
-            },
-        }
-    )
-
-    usage = ClaudeCodeDriver().extract_usage(stdout, "")
-
-    assert usage is not None
-    assert usage.payload() == {
-        "input_tokens": 100,
-        "output_tokens": 20,
-        "cache_read_tokens": 30,
-        "cache_write_tokens": 5,
-        "total_tokens": 155,
-    }
-
-
-def test_codex_driver_sums_usage_per_completed_turn() -> None:
-    stdout = "\n".join(
-        [
-            json.dumps(
-                {
-                    "type": "turn.completed",
-                    "usage": {"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 20},
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "turn.completed",
-                    "usage": {"input_tokens": 7, "cached_input_tokens": 2, "output_tokens": 3},
-                }
-            ),
-        ]
-    )
-
-    usage = CodexDriver().extract_usage(stdout, "")
-
-    assert usage is not None
-    # OpenAI counts cached tokens inside input; the parts here must stay disjoint.
-    assert usage.payload() == {
-        "input_tokens": 65,
-        "output_tokens": 23,
-        "cache_read_tokens": 42,
-        "cache_write_tokens": 0,
-        "total_tokens": 130,
-    }
-
-
-def test_claudecode_driver_falls_back_to_per_model_usage() -> None:
-    stdout = json.dumps(
-        {
-            "type": "result",
-            "result": '{"accepted":true}',
-            "modelUsage": {
-                "claude-sonnet": {
-                    "inputTokens": 60,
-                    "outputTokens": 10,
-                    "cacheReadInputTokens": 5,
-                    "cacheCreationInputTokens": 2,
-                },
-                "claude-haiku": {"inputTokens": 4, "outputTokens": 1},
-            },
-        }
-    )
-
-    usage = ClaudeCodeDriver().extract_usage(stdout, "")
-
-    assert usage is not None
-    assert usage.payload() == {
-        "input_tokens": 64,
-        "output_tokens": 11,
-        "cache_read_tokens": 5,
-        "cache_write_tokens": 2,
-        "total_tokens": 82,
-    }
-
-
 def test_driver_without_usage_metadata_reports_nothing() -> None:
-    assert ClaudeCodeDriver().extract_usage("plain answer", "") is None
-    assert CodexDriver().extract_usage('{"type":"thread.started"}', "") is None
+    assert PiDriver().extract_usage("plain answer", "") is None
     assert PiDriver().extract_usage('{"type":"session","id":"s"}', "") is None
 
 

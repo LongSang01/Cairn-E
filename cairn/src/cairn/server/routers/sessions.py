@@ -23,6 +23,7 @@ from cairn.server.services import (
     next_session_id,
     next_session_message_seq,
     session_to_model,
+    store_exchanges,
     utcnow,
 )
 from cairn.server.sse import sse_event, sse_response
@@ -379,4 +380,7 @@ def _insert_messages(conn, project_id: str, session_id: str, messages, *, start:
                 message.msg_id,
             ),
         )
+        # Tool output is where HTTP evidence lives; freeze it in its own table so a
+        # later transcript cleanup cannot take a finding's proof with it.
+        store_exchanges(conn, project_id, session_id, seq, message.role, message.content)
         seq += 1

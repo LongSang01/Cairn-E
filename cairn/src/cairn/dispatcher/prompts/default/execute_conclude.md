@@ -10,6 +10,8 @@ Report only what is already confirmed. If nothing is confirmed, abandon the step
 {"accepted": true, "data": {
   "facts": [{"description": "confirmed statement"}],
   "findings": [{"kind": "task-defined kind", "severity": "critical|high|medium|low|info",
+                "status": "confirmed|tentative",
+                "evidence": [{"kind": "exchange", "ref": "http://target/path"}],
                 "description": "product of the search"}],
   "status": "done"
 }}
@@ -17,6 +19,7 @@ Report only what is already confirmed. If nothing is confirmed, abandon the step
 
 - Do not invent results you did not observe.
 - Grade each finding with `severity` = critical, high, medium, low or info, based only on what was confirmed.
+- Mark a finding `confirmed` only with evidence you observed in this run, and cite the request URL in `evidence`. Anything else stays `tentative`.
 - Use `"status": "abandoned"` if the step produced nothing.
 - Output this JSON and stop.
 

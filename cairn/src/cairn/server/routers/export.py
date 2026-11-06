@@ -12,6 +12,7 @@ from cairn.server.services import (
     doc_ids_by_owner,
     expire_decide_leases,
     expire_steps,
+    get_exchange,
     get_project_or_404,
     normalize_finding_severity,
 )
@@ -281,16 +282,122 @@ def _export_findings(conn, project_id: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _code_block(text: str, language: str = "") -> list[str]:
+    return [f"```{language}", text.rstrip() or "(empty)", "```"]
+
+
+def _document_block(conn, project_id: str, document_id: str) -> list[str]:
+    row = conn.execute(
+        "SELECT title, content FROM documents WHERE project_id = ? AND id = ?",
+        (project_id, document_id),
+    ).fetchone()
+    if row is None:
+        return [f"_文档 {document_id} 已不存在_"]
+    return [f"**文档 {document_id} · {row['title']}**", "", *_code_block(row["content"], "text")]
+
+
+def _exchange_block(conn, project_id: str, ref: str) -> list[str]:
+    parts = ref.split(":")
+    if len(parts) != 3:
+        return [f"_证据 {ref} 格式无效_"]
+    session_id, seq_text, idx_text = parts
+    try:
+        row = get_exchange(conn, project_id, session_id, int(seq_text), int(idx_text))
+    except ValueError:
+        row = None
+    if row is None:
+        return [f"_证据 {ref} 已不存在_"]
+    lines = [f"**报文 {ref}**（session {session_id} · seq {seq_text}）", ""]
+    lines.extend(["请求：", *_code_block(row["request"], "http"), "", "响应："])
+    lines.extend(_code_block(row["response"], "http"))
+    return lines
+
+
+def _export_report(conn, project_id: str) -> str:
+    """A paste-ready SRC-style report: one section per finding, proof inlined."""
+    proj = get_project_or_404(conn, project_id)
+    findings = build_findings(conn, project_id)
+    step_titles = {
+        row["id"]: row["description"]
+        for row in conn.execute(
+            "SELECT id, description FROM steps WHERE project_id = ?", (project_id,)
+        ).fetchall()
+    }
+
+    confirmed = [item for item in findings if item.status == "confirmed"]
+    tentative = [item for item in findings if item.status != "confirmed"]
+
+    lines = [f"# {proj['title']} — 漏洞报告", ""]
+    lines.append(f"- 项目 ID：`{project_id}`")
+    lines.append(f"- 生成时间：{format_export_timestamp(datetime.now().isoformat())}")
+    lines.append(f"- 结论：{len(findings)} 条（confirmed {len(confirmed)} / tentative {len(tentative)}）")
+
+    lines.extend(["", "## 严重度分布", ""])
+    if findings:
+        counts: dict[str, int] = {}
+        for item in findings:
+            counts[item.severity] = counts.get(item.severity, 0) + 1
+        for severity in FINDING_SEVERITIES:
+            if severity in counts:
+                lines.append(f"- {_SEVERITY_LABELS[severity]}：{counts[severity]}")
+    else:
+        lines.append("- 无")
+
+    if tentative:
+        lines.extend(
+            [
+                "",
+                "> 标记为 tentative 的条目缺少可复现证据，报告末尾单独列出，未计入已确认结论。",
+            ]
+        )
+
+    for item in confirmed:
+        lines.extend(["", "---", "", f"## {_SEVERITY_LABELS[item.severity]} · {item.id}（{item.kind}）", ""])
+        lines.extend([item.description, ""])
+        if item.step:
+            step_text = step_titles.get(item.step) or "（步骤已不存在）"
+            lines.append(f"- 关联步骤：`{item.step}` — {step_text}")
+        lines.append(f"- 状态：confirmed（证据 {len(item.evidence)} 条）")
+        lines.extend(["", "### 复现", ""])
+        if item.step and step_titles.get(item.step):
+            lines.append(f"1. 执行步骤 `{item.step}`：{step_titles[item.step]}")
+        lines.append("2. 按下列请求重放并比对响应")
+        for ref in item.evidence:
+            lines.append("")
+            if ref.kind == "exchange":
+                lines.extend(_exchange_block(conn, project_id, ref.ref))
+            elif ref.kind == "document":
+                lines.extend(_document_block(conn, project_id, ref.ref))
+            else:
+                lines.append(f"- 原始会话消息 seq {ref.ref}")
+
+    if tentative:
+        lines.extend(["", "---", "", "## 待验证条目（tentative）", ""])
+        for item in tentative:
+            lines.append(f"- {_SEVERITY_LABELS[item.severity]} `{item.id}`（{item.kind}）：{item.description}")
+
+    lines.extend(["", "---", "", "## 证据索引", ""])
+    for item in findings:
+        for ref in item.evidence:
+            lines.append(f"- `{item.id}` → {ref.kind}:{ref.ref}（digest {ref.digest or '-'}）")
+    if not any(item.evidence for item in findings):
+        lines.append("- 无")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
 @router.get("/projects/{project_id}/export")
 def export_project(project_id: str, format: str = "yaml"):
-    if format not in ("yaml", "timeline", "findings"):
-        raise HTTPException(400, "Supported formats: yaml, timeline, findings")
+    if format not in ("yaml", "timeline", "findings", "report"):
+        raise HTTPException(400, "Supported formats: yaml, timeline, findings, report")
 
     with get_conn() as conn:
         if format == "timeline":
             text = _export_timeline(conn, project_id)
         elif format == "findings":
             text = _export_findings(conn, project_id)
+        elif format == "report":
+            return Response(content=_export_report(conn, project_id), media_type="text/markdown")
         else:
             text = _export_yaml(conn, project_id)
 

@@ -13,15 +13,18 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from cairn.contracts.models import (
     FINDING_SEVERITIES,
+    FINDING_STATUSES,
     MAX_DOCUMENT_CHARS,
     ContextSummary,
     Document,
     DocumentMeta,
     DocumentRequest,
+    EvidenceRef,
     Fact,
     Finding,
     FindingSeverity,
     FindingsSummary,
+    FindingStatus,
     Goal,
     GoalStatus,
     Hint,
@@ -381,6 +384,10 @@ class SubmittedFinding(BaseModel):
     kind: str = "finding"
     description: str
     severity: FindingSeverity = "info"
+    # `confirmed` is a promise the report can be reproduced; the server downgrades it
+    # to `tentative` when no evidence reference resolves, instead of rejecting the run.
+    status: FindingStatus = "tentative"
+    evidence: list[EvidenceRef] = Field(default_factory=list)
 
     @field_validator("kind", "description")
     @classmethod
@@ -396,6 +403,16 @@ class SubmittedFinding(BaseModel):
         if isinstance(value, str):
             text = value.strip().lower()
             return text or "info"
+        return value
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def normalize_status(cls, value: object) -> object:
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in FINDING_STATUSES:
+                return text
+            return "tentative"
         return value
 
 

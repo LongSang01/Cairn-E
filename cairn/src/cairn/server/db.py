@@ -88,10 +88,41 @@ CREATE TABLE IF NOT EXISTS findings (
     step_id TEXT,
     kind TEXT NOT NULL,
     severity TEXT NOT NULL DEFAULT 'info',
+    status TEXT NOT NULL DEFAULT 'tentative',
     description TEXT NOT NULL,
     creator TEXT NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (id, project_id)
+);
+
+-- Parsed request/response pairs lifted out of session_messages, so evidence stays
+-- readable after the transcript is truncated or cleaned up.
+CREATE TABLE IF NOT EXISTS http_exchanges (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    idx INTEGER NOT NULL,
+    method TEXT,
+    url TEXT,
+    status INTEGER,
+    request TEXT,
+    response TEXT,
+    digest TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, session_id, seq, idx)
+);
+
+CREATE INDEX IF NOT EXISTS http_exchanges_by_digest ON http_exchanges (digest);
+
+-- What proves a finding: exchange->http_exchanges.digest, document->documents.id,
+-- seq->session_messages.seq. Kept in its own table so one finding can cite many.
+CREATE TABLE IF NOT EXISTS finding_evidence (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    finding_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    digest TEXT,
+    PRIMARY KEY (project_id, finding_id, kind, ref)
 );
 
 CREATE TABLE IF NOT EXISTS documents (
@@ -268,9 +299,21 @@ def _migration_002_idempotency(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_003_finding_evidence(conn: sqlite3.Connection) -> None:
+    """Findings get a confirmed/tentative status plus frozen evidence references.
+
+    Older databases already have the `findings` table without `status`, so only the
+    column needs adding; the two evidence tables come from `SCHEMA` and are created
+    with `IF NOT EXISTS` on every start.
+    """
+    if "status" not in _table_columns(conn, "findings"):
+        conn.execute("ALTER TABLE findings ADD COLUMN status TEXT NOT NULL DEFAULT 'tentative'")
+
+
 _MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (1, _migration_001_baseline),
     (2, _migration_002_idempotency),
+    (3, _migration_003_finding_evidence),
 )
 
 
