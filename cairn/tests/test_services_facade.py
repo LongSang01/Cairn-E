@@ -51,6 +51,7 @@ EXPECTED_EXPORTS = {
     "exchange_evidence_id",
     "expire_steps",
     "find_exchange_by_url",
+    "find_fact_by_content",
     "get_claimable_step_or_404",
     "get_completion_step_or_409",
     "get_context_summary",

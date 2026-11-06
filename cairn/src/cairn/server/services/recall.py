@@ -98,7 +98,58 @@ def recall(
         )
     steps.sort(key=lambda hit: (-hit.score, hit.id))
 
-    return RecallResponse(query=query.strip(), facts=facts[:limit], steps=steps[:limit])
+    documents: list[RecallHit] = []
+    for row in conn.execute(
+        "SELECT id, title, content FROM documents WHERE project_id = ?", (project_id,)
+    ).fetchall():
+        score = _recall_score(tokens, row["title"], row["content"])
+        if score <= 0:
+            continue
+        documents.append(
+            RecallHit(
+                kind="document",
+                id=row["id"],
+                title=row["title"],
+                description=_snippet(row["content"]),
+                score=score,
+                doc_ids=[row["id"]],
+            )
+        )
+    documents.sort(key=lambda hit: (-hit.score, hit.id))
+
+    exchanges: list[RecallHit] = []
+    for row in conn.execute(
+        "SELECT session_id, seq, idx, method, url, status, response FROM http_exchanges"
+        " WHERE project_id = ?",
+        (project_id,),
+    ).fetchall():
+        score = _recall_score(tokens, row["url"], row["response"])
+        if score <= 0:
+            continue
+        exchanges.append(
+            RecallHit(
+                kind="exchange",
+                id=f"{row['session_id']}:{row['seq']}:{row['idx']}",
+                title=" ".join(part for part in (row["method"], row["url"]) if part) or None,
+                description=_snippet(row["response"]),
+                status=str(row["status"]) if row["status"] is not None else None,
+                score=score,
+            )
+        )
+    exchanges.sort(key=lambda hit: (-hit.score, hit.id))
+
+    return RecallResponse(
+        query=query.strip(),
+        facts=facts[:limit],
+        steps=steps[:limit],
+        documents=documents[:limit],
+        exchanges=exchanges[:limit],
+    )
+
+
+def _snippet(text: str | None, size: int = 200) -> str:
+    body = " ".join((text or "").split())
+    return body[:size]
 
 
 def get_recall_plan(conn: sqlite3.Connection, project_id: str) -> RecallPlan:

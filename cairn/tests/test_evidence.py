@@ -250,3 +250,43 @@ def test_unknown_evidence_reference_is_dropped(client: TestClient) -> None:
     finding = response.json()["findings"][0]
     assert finding["status"] == "tentative"
     assert finding["evidence"] == []
+
+
+def test_restating_the_same_fact_does_not_grow_the_graph(client: TestClient) -> None:
+    project_id = _create_project(client)
+    payload = {
+        "worker": "executor",
+        "status": "done",
+        "facts": [{"title": "ssh", "description": "port 22 open"}],
+    }
+
+    first_step = _create_running_step(client, project_id)
+    first = client.post(f"/projects/{project_id}/steps/{first_step}/conclude", json=payload)
+    second_step = _create_running_step(client, project_id)
+    second = client.post(f"/projects/{project_id}/steps/{second_step}/conclude", json=payload)
+
+    assert first.json()["facts"][0]["id"] == second.json()["facts"][0]["id"]
+    # origin fact + the single deduplicated fact
+    assert len(client.get(f"/projects/{project_id}").json()["facts"]) == 2
+
+
+def test_recall_covers_documents_and_exchanges(client: TestClient) -> None:
+    project_id = _create_project(client)
+    step_id = _create_running_step(client, project_id)
+    session_id = _start_session(client, project_id, step_id)
+    _append_tool_output(client, project_id, session_id, RAW_CURL)
+    client.post(
+        f"/projects/{project_id}/steps/{step_id}/conclude",
+        json={
+            "worker": "executor",
+            "status": "done",
+            "facts": [
+                {"description": "the login form leaks its backend", "documents": [{"title": "login form", "content": "PHP/7.4 behind nginx"}]}
+            ],
+        },
+    )
+
+    body = client.get(f"/projects/{project_id}/recall", params={"q": "login"}).json()
+
+    assert any(hit["kind"] == "exchange" for hit in body["exchanges"])
+    assert any(hit["kind"] == "document" for hit in body["documents"])

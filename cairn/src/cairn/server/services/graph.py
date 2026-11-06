@@ -106,6 +106,31 @@ def build_findings(conn: sqlite3.Connection, project_id: str) -> list[Finding]:
     ]
 
 
+def _fact_key(title: str | None, description: str) -> tuple[str, str]:
+    return (
+        " ".join((title or "").split()).strip().lower(),
+        " ".join(description.split()).strip().lower(),
+    )
+
+
+def find_fact_by_content(
+    conn: sqlite3.Connection, project_id: str, title: str | None, description: str
+) -> sqlite3.Row | None:
+    """The same fact restated by another run: same normalized title + description.
+
+    Workers re-derive the same observation constantly (a banner, an open port). Left
+    alone, the graph grows linearly with runs and Decide pays for every duplicate.
+    """
+    target = _fact_key(title, description)
+    for row in conn.execute(
+        "SELECT id, title, description FROM facts WHERE project_id = ? ORDER BY rowid",
+        (project_id,),
+    ).fetchall():
+        if _fact_key(row["title"], row["description"]) == target:
+            return row
+    return None
+
+
 def normalize_finding_status(value: object) -> str:
     """Coerce a stored status; anything unrecognised means `tentative`."""
     status = str(value or "tentative").strip().lower()

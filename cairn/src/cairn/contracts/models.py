@@ -256,7 +256,7 @@ class Document(DocumentMeta):
 class RecallHit(BaseModel):
     """One keyword-recall hit: enough to decide whether to pull the full node."""
 
-    kind: Literal["fact", "step"]
+    kind: Literal["fact", "step", "document", "exchange"]
     id: str
     title: str | None = None
     description: str
@@ -269,6 +269,10 @@ class RecallResponse(BaseModel):
     query: str
     facts: list[RecallHit] = Field(default_factory=list)
     steps: list[RecallHit] = Field(default_factory=list)
+    # Proof is searched too, so a Decide can find "the response that showed the header"
+    # without reading every document or replaying a session.
+    documents: list[RecallHit] = Field(default_factory=list)
+    exchanges: list[RecallHit] = Field(default_factory=list)
 
 
 class DocumentRequest(BaseModel):

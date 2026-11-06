@@ -14,6 +14,7 @@ from cairn.server.models import (
 from cairn.server.services import (
     check_project_active,
     expire_steps,
+    find_fact_by_content,
     get_claimable_step_or_404,
     get_releasable_step_or_404,
     get_step_or_404,
@@ -174,14 +175,20 @@ def conclude(project_id: str, step_id: str, body: ConcludeStepRequest):
         findings: list[Finding] = []
 
         for submitted in body.submitted_facts():
-            fid = next_fact_id(conn, project_id)
-            conn.execute(
-                """
-                INSERT INTO facts (id, project_id, title, description, step_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (fid, project_id, submitted.title, submitted.description, step_id, now),
-            )
+            # Restating a known fact must not grow the graph: reuse the row and only
+            # attach any new documents to it.
+            existing = find_fact_by_content(conn, project_id, submitted.title, submitted.description)
+            if existing is not None:
+                fid = existing["id"]
+            else:
+                fid = next_fact_id(conn, project_id)
+                conn.execute(
+                    """
+                    INSERT INTO facts (id, project_id, title, description, step_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (fid, project_id, submitted.title, submitted.description, step_id, now),
+                )
             for document in submitted.documents:
                 insert_document(
                     conn,
