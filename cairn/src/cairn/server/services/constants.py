@@ -4,7 +4,7 @@ from __future__ import annotations
 
 PROJECT_COLUMNS = (
     "id, title, status, created_at, decide_worker, decide_trigger, "
-    "decide_started_at, decide_last_heartbeat_at"
+    "decide_started_at, decide_last_heartbeat_at, token_budget, blocked_reason"
 )
 
 SESSION_COLUMNS = (

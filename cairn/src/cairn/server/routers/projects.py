@@ -18,6 +18,7 @@ from cairn.server.models import (
     ReopenResponse,
     UpdateProjectStatusRequest,
     UpdateProjectTitleRequest,
+    UpdateTokenBudgetRequest,
 )
 from cairn.server.services import (
     build_findings,
@@ -27,6 +28,7 @@ from cairn.server.services import (
     check_project_active,
     check_project_completed,
     clear_project_decide,
+    enforce_token_budget,
     expire_decide_leases,
     expire_steps,
     get_completion_step_or_409,
@@ -201,6 +203,19 @@ def update_project_title(project_id: str, body: UpdateProjectTitleRequest):
         conn.execute("UPDATE projects SET title = ? WHERE id = ?", (body.title, project_id))
         updated = get_project_or_404(conn, project_id)
         return project_meta_from_row(updated)
+
+
+@router.put("/projects/{project_id}/budget", response_model=ProjectMeta)
+def update_project_budget(project_id: str, body: UpdateTokenBudgetRequest):
+    """Set (or clear) the token budget; the status follows immediately."""
+    with get_conn() as conn:
+        get_project_or_404(conn, project_id)
+        conn.execute(
+            "UPDATE projects SET token_budget = ? WHERE id = ?", (body.token_budget, project_id)
+        )
+        # Lowering it may block right away; raising it may unblock a budget block.
+        enforce_token_budget(conn, project_id)
+        return project_meta_from_row(get_project_or_404(conn, project_id))
 
 
 @router.put("/projects/{project_id}/status", response_model=ProjectMeta)

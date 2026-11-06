@@ -17,6 +17,7 @@ from cairn.server.models import (
 from cairn.server.services import (
     build_session_messages,
     build_sessions,
+    enforce_token_budget,
     expire_stale_sessions,
     get_project_or_404,
     get_session_or_404,
@@ -349,6 +350,9 @@ def _finalize_session(conn, project_id: str, session_id: str, body) -> None:
             project_id,
         ),
     )
+    # Cheap enough to run per write, and it flips the project to `blocked` the moment
+    # the budget is crossed instead of one scheduler tick later.
+    enforce_token_budget(conn, project_id)
 
 
 def _insert_messages(conn, project_id: str, session_id: str, messages, *, start: int) -> None:

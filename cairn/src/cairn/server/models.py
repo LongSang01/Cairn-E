@@ -556,6 +556,19 @@ class UpdateProjectStatusRequest(BaseModel):
     status: Literal["active", "stopped"]
 
 
+class UpdateTokenBudgetRequest(BaseModel):
+    """`null` clears the budget and lets the project run again."""
+
+    token_budget: int | None = None
+
+    @field_validator("token_budget")
+    @classmethod
+    def validate_budget(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise ValueError("token_budget must be positive")
+        return value
+
+
 class UpdateProjectTitleRequest(BaseModel):
     title: str
 

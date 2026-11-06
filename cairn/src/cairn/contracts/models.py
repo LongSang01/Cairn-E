@@ -212,9 +212,13 @@ class ProjectDecide(BaseModel):
 class ProjectMeta(BaseModel):
     id: str
     title: str
-    status: Literal["active", "stopped", "completed"]
+    status: Literal["active", "stopped", "completed", "blocked"]
     created_at: str
     decide: ProjectDecide | None = None
+    # `blocked` is machine-set when measured token usage passes the budget; the reason
+    # explains it in the UI instead of leaving an unexplained stopped project.
+    token_budget: int | None = None
+    blocked_reason: str | None = None
 
 
 class ProjectSummary(ProjectMeta):

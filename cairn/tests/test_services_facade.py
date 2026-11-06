@@ -26,6 +26,7 @@ EXPECTED_EXPORTS = {
     "build_findings_summary",
     "build_goals",
     "build_project_usage",
+    "enforce_token_budget",
     "build_questions",
     "build_session_messages",
     "build_sessions",

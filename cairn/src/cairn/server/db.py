@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS projects (
     decide_worker TEXT,
     decide_trigger TEXT,
     decide_started_at TEXT,
-    decide_last_heartbeat_at TEXT
+    decide_last_heartbeat_at TEXT,
+    token_budget INTEGER,
+    blocked_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS facts (
@@ -416,11 +418,21 @@ def _migration_004_tool_guard(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_005_token_budget(conn: sqlite3.Connection) -> None:
+    """Per-project token budget and the machine reason a project got blocked."""
+    columns = _table_columns(conn, "projects")
+    if "token_budget" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN token_budget INTEGER")
+    if "blocked_reason" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN blocked_reason TEXT")
+
+
 _MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (1, _migration_001_baseline),
     (2, _migration_002_idempotency),
     (3, _migration_003_finding_evidence),
     (4, _migration_004_tool_guard),
+    (5, _migration_005_token_budget),
 )
 
 

@@ -42,6 +42,8 @@ def project_meta_from_row(row: sqlite3.Row) -> ProjectMeta:
         status=row["status"],
         created_at=row["created_at"],
         decide=project_decide_from_row(row),
+        token_budget=row["token_budget"],
+        blocked_reason=row["blocked_reason"],
     )
 
 

@@ -129,6 +129,7 @@ from .tool_guard import (
 )
 from .usage import (
     build_project_usage,
+    enforce_token_budget,
 )
 
 __all__ = [
@@ -158,6 +159,7 @@ __all__ = [
     "doc_ids_by_owner",
     "document_to_meta",
     "document_to_model",
+    "enforce_token_budget",
     "evaluate_tool_rules",
     "exchange_evidence_id",
     "expire_decide_leases",
