@@ -85,7 +85,9 @@ RUN set -eux; cd /tmp; \
     # 装上用完即卸，最终镜像不留编译工具链。
     apt-get update; \
     apt-get install -y --no-install-recommends gcc python3-dev; \
-    pip3 install --break-system-packages --no-cache-dir ./netexec; \
+    # --ignore-installed：Debian 的 typing_extensions 没有 RECORD，pip 想升级时会
+    # 报 uninstall-no-record-file；装到 /usr/local 覆盖即可。
+    pip3 install --break-system-packages --no-cache-dir --ignore-installed ./netexec; \
     apt-get purge -y --auto-remove gcc python3-dev; \
     git clone --depth 1 "${GH_PROXY}https://github.com/cddmp/enum4linux-ng.git" e4l; \
     install -d /opt/enum4linux-ng; \
