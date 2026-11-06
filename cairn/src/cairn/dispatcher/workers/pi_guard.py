@@ -139,10 +139,13 @@ def install(
 
     Both backends accept the same absolute path: the container one writes through
     the docker archive API, the local one writes to the host filesystem.
+
+    Config goes first: pi aborts the whole run when an extension fails to load, so a
+    half-written pair must never leave the extension without its config.
     """
-    backend.write_text_file(container_name, str(extension_path(worker)), EXTENSION_SOURCE)
     backend.write_text_file(
         container_name,
         str(config_path(worker)),
         config_json(project_id=project_id, worker=worker, guard=guard),
     )
+    backend.write_text_file(container_name, str(extension_path(worker)), EXTENSION_SOURCE)
