@@ -43,6 +43,7 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
         "{constraints}",
         "{steers}",
         "{scope}",
+        "{opsec}",
     ),
     "execute_conclude.md": ("{graph_yaml}", "{step_id}", "{step_description}"),
 }

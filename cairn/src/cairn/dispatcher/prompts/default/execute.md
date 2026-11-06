@@ -36,6 +36,8 @@ Return one raw JSON object, nothing else:
 - A `done` step must submit a fact, a finding, or a note. When nothing new was confirmed, report the findings and a note that says what was tried and why it produced no fact; never invent a fact just to close the step.
 - If you cannot do the step at all: `{"accepted": false, "reason": "..."}`.
 
+{opsec}
+
 ## Test scope
 
 {scope}

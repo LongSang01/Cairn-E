@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 from cairn.contracts.models import ProjectDetail, Step
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
-from cairn.dispatcher.constraints import policy_blocks
+from cairn.dispatcher.constraints import opsec_block, policy_blocks
 from cairn.dispatcher.output_validation import parse_json_output, validate_execute_payload
 from cairn.dispatcher.prompting import load_prompt, render_prompt
 from cairn.dispatcher.protocol.client import CairnClient
@@ -133,6 +133,7 @@ def run_execute_task(
         blocks = {
             "step_id": step.id,
             "step_description": step.description,
+            "opsec": opsec_block(),
             **policy_blocks(project),
         }
         graph_yaml = budgeted_graph_yaml(

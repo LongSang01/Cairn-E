@@ -137,3 +137,37 @@ def policy_blocks(project: Any) -> dict[str, str]:
         "steers": render_steers_block(getattr(project, "steers", None)),
         "scope": render_scope_block(getattr(project, "scope", None)),
     }
+
+
+# Operating discipline is static, platform-owned guidance (how to probe within the
+# authorization boundary) rather than runtime data read from the project. It lives in
+# code — not in the editable prompt file — so a custom prompt group cannot silently
+# drop it: ``{opsec}`` is enforced as a required placeholder by
+# ``validate_prompt_resources``. Modeled on ARTEX's ``opsecPromptBlock``.
+OPSEC_BLOCK = """## Operating discipline
+
+- Reuse what the graph already knows before probing again: if a fact or a recorded
+  exchange already answers the question, do not re-run the same request, scan or command.
+- Do not rotate user agents, batch requests, port-sweep, directory-brute-force or run
+  large-scale scans. Stop this direction the moment you hit a rate limit, a CAPTCHA or
+  a WAF.
+- Do not disable TLS verification (`-k`, `--insecure`, `verify=False`) or forge an
+  identity, device or browser fingerprint just to reach the target.
+- A first failure (a filtered payload, a 404, no echo) does not prove the path is dead:
+  try different encodings, methods, parameters or paths until the reasonable options for
+  this direction are exhausted before you conclude.
+- Verify against yourself: before you mark a finding `confirmed`, re-trigger it once
+  through a different path or an independent command. A second, independent observation
+  confirms it; repeating your original evidence does not.
+- Record only increments: submit facts you newly confirmed. A fact that only restates
+  what is already on the graph is not a new result.
+"""
+
+
+def opsec_block() -> str:
+    """Return the static operating-discipline block for the Execute prompt.
+
+    Execute is the only phase that touches the world, so the discipline is injected
+    there (and never into Decide, which only reads and evolves the graph).
+    """
+    return OPSEC_BLOCK
