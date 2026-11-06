@@ -5,6 +5,7 @@ from cairn.server.http_cache import cache_headers
 from cairn.server.models import (
     CompleteRequest,
     CompleteResponse,
+    Constraint,
     CreateProjectRequest,
     DecideClaimRequest,
     Fact,
@@ -16,6 +17,8 @@ from cairn.server.models import (
     ProjectSummary,
     ReopenRequest,
     ReopenResponse,
+    ScopeEntry,
+    Steer,
     UpdateProjectStatusRequest,
     UpdateProjectTitleRequest,
     UpdateTokenBudgetRequest,
@@ -171,6 +174,18 @@ def get_project(project_id: str, request: Request, response: Response):
             "SELECT * FROM hints WHERE project_id = ? ORDER BY created_at",
             (project_id,),
         ).fetchall()
+        constraints = conn.execute(
+            "SELECT * FROM constraints WHERE project_id = ? ORDER BY rowid",
+            (project_id,),
+        ).fetchall()
+        steers = conn.execute(
+            "SELECT * FROM steers WHERE project_id = ? ORDER BY rowid",
+            (project_id,),
+        ).fetchall()
+        scope_entries = conn.execute(
+            "SELECT * FROM project_scope WHERE project_id = ? ORDER BY id",
+            (project_id,),
+        ).fetchall()
 
         detail = ProjectDetail(
             project=project_meta_from_row(row),
@@ -179,6 +194,9 @@ def get_project(project_id: str, request: Request, response: Response):
             steps=build_steps(conn, project_id),
             findings=build_findings(conn, project_id),
             hints=[Hint(**dict(h)) for h in hints],
+            constraints=[Constraint(**dict(c)) for c in constraints],
+            steers=[Steer(**dict(s)) for s in steers],
+            scope=[ScopeEntry(**dict(s)) for s in scope_entries],
             sessions=build_sessions(conn, project_id),
         )
 
@@ -193,6 +211,9 @@ def get_project(project_id: str, request: Request, response: Response):
 def delete_project(project_id: str):
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
+        # SQLite cannot add a FK to an existing column (migration 006 added
+        # tool_rules.project_id by ALTER TABLE), so cascade these by hand.
+        conn.execute("DELETE FROM tool_rules WHERE project_id = ?", (project_id,))
         conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
 
 

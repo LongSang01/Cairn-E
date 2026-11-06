@@ -167,6 +167,10 @@ export const coreMixins = {
       this.selectedNode = null;
       this.selectedFacts = [];
       this.selectedTimelineEntryId = null;
+      this.steerForm = { text: '' };
+      this.scopeForm = { host: '' };
+      this.constraintForm = { text: '', kind: 'deny' };
+      this.showConstraintModal = false;
       await this.loadProject(id);
       this.view = 'graph';
       if (location.hash !== `#/projects/${id}`) location.hash = `/projects/${id}`;

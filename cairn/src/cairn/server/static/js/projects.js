@@ -281,6 +281,7 @@ export const projectsMixins = {
         }
         if (!this.projectCanWriteHints()) {
           this.showHintModal = false;
+          this.showConstraintModal = false;
         }
       }
       if (reload) await this.loadProjects();

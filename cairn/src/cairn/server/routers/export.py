@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
 from cairn.server.db import get_conn
-from cairn.server.models import FINDING_SEVERITIES
+from cairn.server.models import FINDING_SEVERITIES, TERMINAL_STEP_STATUSES
 from cairn.server.services import (
     build_documents,
     build_findings,
@@ -48,6 +48,20 @@ def _load_project_data(conn, project_id: str):
     hints = rows(
         "SELECT content, creator, created_at FROM hints WHERE project_id = ? ORDER BY created_at"
     )
+    # An export is the audit trail: the authorization boundary, the human's
+    # in-flight instructions and the planner's replies must survive a replay.
+    constraints = rows(
+        "SELECT kind, origin, text, created_at FROM constraints"
+        " WHERE project_id = ? ORDER BY rowid"
+    )
+    steers = rows(
+        "SELECT id, text, creator, created_at, answer, answered_at FROM steers"
+        " WHERE project_id = ? ORDER BY rowid"
+    )
+    scope = rows(
+        "SELECT kind, value, source, created_at FROM project_scope"
+        " WHERE project_id = ? ORDER BY id"
+    )
 
     sources_by_step: dict[str, list[str]] = {}
     for step in steps:
@@ -57,13 +71,33 @@ def _load_project_data(conn, project_id: str):
         ).fetchall()
         sources_by_step[step["id"]] = [r["fact_id"] for r in source_rows]
 
-    return proj, facts, goals, steps, findings, hints, sources_by_step
+    return (
+        proj,
+        facts,
+        goals,
+        steps,
+        findings,
+        hints,
+        sources_by_step,
+        constraints,
+        steers,
+        scope,
+    )
 
 
 def _export_yaml(conn, project_id: str) -> str:
-    proj, facts, goals, steps, findings, hints, sources_by_step = _load_project_data(
-        conn, project_id
-    )
+    (
+        proj,
+        facts,
+        goals,
+        steps,
+        findings,
+        hints,
+        sources_by_step,
+        constraints,
+        steers,
+        scope,
+    ) = _load_project_data(conn, project_id)
     docs_by_fact, docs_by_step = doc_ids_by_owner(conn, project_id)
 
     data: dict = {
@@ -81,6 +115,38 @@ def _export_yaml(conn, project_id: str) -> str:
                 "created_at": format_export_timestamp(h["created_at"]),
             }
             for h in hints
+        ]
+    if constraints:
+        data["constraints"] = [
+            {
+                "kind": c["kind"],
+                "origin": c["origin"],
+                "text": c["text"],
+                "created_at": format_export_timestamp(c["created_at"]),
+            }
+            for c in constraints
+        ]
+    if steers:
+        data["steers"] = [
+            {
+                "id": s["id"],
+                "text": s["text"],
+                "creator": s["creator"],
+                "created_at": format_export_timestamp(s["created_at"]),
+                "answer": s["answer"],
+                "answered_at": format_export_timestamp(s["answered_at"]),
+            }
+            for s in steers
+        ]
+    if scope:
+        data["scope"] = [
+            {
+                "kind": e["kind"],
+                "value": e["value"],
+                "source": e["source"],
+                "created_at": format_export_timestamp(e["created_at"]),
+            }
+            for e in scope
         ]
 
     data["facts"] = [
@@ -158,9 +224,18 @@ def _export_yaml_documents(conn, project_id: str) -> list[dict]:
 
 
 def _export_timeline(conn, project_id: str) -> str:
-    proj, facts, goals, steps, findings, hints, sources_by_step = _load_project_data(
-        conn, project_id
-    )
+    (
+        proj,
+        facts,
+        goals,
+        steps,
+        findings,
+        hints,
+        sources_by_step,
+        constraints,
+        steers,
+        scope,
+    ) = _load_project_data(conn, project_id)
 
     facts_by_id = {f["id"]: f["description"] for f in facts}
 
@@ -179,6 +254,28 @@ def _export_timeline(conn, project_id: str) -> str:
         ts = format_export_timestamp(h["created_at"]) or ""
         block = f"[{ts}] HINT by {h['creator']}\n  {h['content']}"
         events.append((h["created_at"] or "", order, block))
+        order += 1
+
+    for c in constraints:
+        ts = format_export_timestamp(c["created_at"]) or ""
+        label = "REQUIRED" if c["kind"] == "allow" else "FORBIDDEN"
+        block = f"[{ts}] CONSTRAINT {label} ({c['origin']})\n  {c['text']}"
+        events.append((c["created_at"] or "", order, block))
+        order += 1
+
+    for s in steers:
+        ts = format_export_timestamp(s["created_at"]) or ""
+        block = f"[{ts}] STEER by {s['creator']}\n  {s['text']}"
+        if s["answer"]:
+            answer_ts = format_export_timestamp(s["answered_at"]) or ""
+            block += f"\n[{answer_ts}] STEER ANSWER {s['id']}\n  {s['answer']}"
+        events.append((s["created_at"] or "", order, block))
+        order += 1
+
+    for e in scope:
+        ts = format_export_timestamp(e["created_at"]) or ""
+        block = f"[{ts}] SCOPE ENTRY {e['kind']}={e['value']} ({e['source']})"
+        events.append((e["created_at"] or "", order, block))
         order += 1
 
     for g in goals:
@@ -210,13 +307,15 @@ def _export_timeline(conn, project_id: str) -> str:
         events.append((s["created_at"] or "", order, block))
         order += 1
 
-        if s["status"] not in ("done", "abandoned"):
+        if s["status"] not in TERMINAL_STEP_STATUSES:
             continue
 
         ts = format_export_timestamp(s["concluded_at"]) or ""
         actor = s["worker"] or s["creator"]
         if s["kind"] == "completion":
             block = f"[{ts}] PROJECT COMPLETED by {actor}\n  via: {s['id']} from {from_str}\n  {s['description']}"
+        elif s["status"] == "cancelled":
+            block = f"[{ts}] STEP CANCELLED {s['id']} by {actor}\n  {s['note'] or ''}"
         elif s["status"] == "abandoned":
             block = f"[{ts}] STEP ABANDONED {s['id']} by {actor}\n  {s['note'] or ''}"
         else:

@@ -36,6 +36,26 @@ Return one raw JSON object, nothing else:
 - A `done` step must submit a fact, a finding, or a note. When nothing new was confirmed, report the findings and a note that says what was tried and why it produced no fact; never invent a fact just to close the step.
 - If you cannot do the step at all: `{"accepted": false, "reason": "..."}`.
 
+## Test scope
+
+{scope}
+
+## Steers
+
+{steers}
+
+Instructions sent by the human while the project runs. They override your step when
+they conflict. If the step cannot be carried out without crossing one, submit nothing
+and close it as `abandoned` with a note naming the instruction.
+
+## Constraints
+
+{constraints}
+
+These rules outrank the step. If the step cannot be carried out without crossing one,
+do not act: submit nothing and close the step as `abandoned` with a note naming the
+rule. Never widen the target or the account set on your own.
+
 ## Graph
 
 ```

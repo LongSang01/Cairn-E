@@ -67,6 +67,35 @@
 - `GET /healthz`:`{"status", "version", "database", "schema_version", "contract_version"}`;数据库不可达时 `503`。
 - `GET /metrics`:Prometheus 文本格式,含 `cairn_schema_version`、`cairn_db_busy_total` 等。
 
+### 2.5 操作约束与 planner kill（契约 1.0 追加，additive-only）
+
+- 资源：`GET/POST /projects/{project_id}/constraints`、`DELETE /projects/{project_id}/constraints/{cid}`。写操作要求项目状态为 `active/stopped/completed`（`blocked` 返回 `403`）；GET 只要求项目存在。
+- 请求体：`{"text": string, "kind": "allow"|"deny", "origin": "human"|"planner"}`，`kind` 默认 `deny`、`origin` 默认 `human`。`origin` 是**调用方声明的来源，HTTP 层无身份校验**；`planner` + `allow` 在请求模型层被拒绝。
+- `ProjectDetail.constraints: Constraint[]`（默认 `[]`）；`Constraint` 字段为 `id / kind / text / origin / created_at`。
+- 约束是**提示级授权**：每轮 Decide 与每次 Execute 从 `ProjectDetail` 重新读取并渲染在目标之前；运行中修改不推送到正在执行的 worker，下一轮自然生效。它不派生 `tool_rules`，平台拦截规则仍由自身配置决定。
+- Decide 只能通过 `constraints.add` 追加 `kind="deny"` 的规则（收紧边界），由 `validate_decide_payload` 强制。
+- 步骤状态新增 `cancelled`：Decide 对 `running` 步骤的终止动作。取消后该步骤为终态，心跳与结论均返回 `409`，worker 进程由租约失败路径终止，未提交的结果不写回。与 `abandoned`（未开始的 pending 步骤）语义不同。
+
+### 2.6 运行中指令、回复与即时注入（契约 1.0 追加）
+
+- `GET/POST /projects/{project_id}/steers`：运行中向 planner 发消息，消息**只追加**；POST 要求项目 `active`。`Steer` 字段为 `id / text / creator / created_at / answer? / answered_at?`。新增 steer 会唤醒一次 Decide（即使图没有变化）；Decide 与 Execute 的 prompt 都带最近 8 条指令。
+- `POST /projects/{project_id}/steers/{sid}/answer`：写入主 agent 的答复，`UPDATE ... WHERE answer IS NULL` 保证**并发幂等**。Decide 输出可用 `steers.reply: [{"id","text"}]` 自行作答；未作答时，平台在本轮 Decide 结束后按实际图变更生成事实性摘要作答。失败、取消、超时、解析失败与输出被拒绝的 run **不作答**；没有新消息但仍有未答复 steer 时，以 `steers:pending:N` 触发有界重试（与 idle/stuck 共用 `MAX_UNPROMPTED_DECIDE_RUNS` 预算；新消息唤醒不消耗该预算）。
+- 无图变更时，带 `steers.reply` 的 payload、或仍有 open steps 的空 payload，都是合法 noop；无 open steps 且无 reply 时拒绝。
+- 正在运行的 worker 通过 `POST /tool-guard/check` 的 `steers` 字段拿到**尚未投递且尚未答复**的指令。投递以 `(steer, worker, session)` 记收据（pi 扩展按 run 注入 `CFG.session_id`），每次 check 最多 3 条；同一组合只投一次，新 run 仍能看到未答复指令。扩展在 `tool_call` 钩子里阻塞这一次调用并把指令交回模型，不杀进程、不丢在途结果。
+- 约束与 steers 只进 prompt，不会自动派生拦截规则；硬拦截仍由人显式配置（与 ARTEX 一致）。
+
+### 2.7 任务级拦截与范围（契约 1.0 追加）
+
+- `GET /projects/{id}/tool-rules` 返回 `{"rules": [...]}`，`POST .../tool-rules`、`DELETE .../tool-rules/{rule_id}` 管理任务级工具规则；只对该项目生效，不能删除平台级规则。删项目时会手工级联删除（该列由 ALTER TABLE 加入，无法建 FK）。
+  - 平台级 `deny/ask` 是硬底线，项目级 `allow` 不能解除。
+  - **只有项目级** `target=host, action=allow` 规则构成可选白名单；平台级 host allow 只是普通放行，不会给所有项目打开闸门。
+  - `target=host` 的 `deny/ask` 规则单独生效；命令无主机（如 `whoami`）不触发范围闸门。
+- `GET /projects/{id}/scope` 返回 `{"entries": [...]}`；`POST .../scope` 请求体 `{"kind": "host"|"ip"|"cidr"|"domain", "value": string}`；`DELETE .../scope/{entry_id}`（`entry_id` 为整数）。`ScopeEntry` 字段为 `id / kind / value / source / created_at`，`source` 目前恒为 `human`。
+- `POST .../scope/check` 请求体 `{"command": string}`（必填），返回 `decision / reason / hosts / out_of_scope / gate`。它是**纯干跑**：只算范围闸门，不写审批/审计，不会返回 `ask`。工具规则的裁决请用 `/tool-guard/check`。
+- `ProjectDetail.scope` 同步给 Decide/Execute 的 prompt。空范围表示闸门关闭；命令中出现范围外主机即 `deny`。主机提取要求 token 起始或 URL scheme，支持域名、IPv4 与**带方括号的 IPv6**（不带方括号的裸 IPv6 不识别），`cat /var/log/app.log` 之类带点文件名不会被误判。范围白名单与项目级 `tool_rules` host allow 同时存在时**两道闸门都要通过**。
+- 范围判定在命令层而非资产表层：Cairn 没有资产库，因此 `curl`/`nmap` 直连未登记主机同样会被拦，比资产层的可见性闸门更严。
+- 四种导出（`yaml` / `timeline` / `findings` / `report`）中的 `yaml` 与 `timeline` 会带上约束、范围、指令及其答复，供复盘审计。
+
 ## 3. SSE 事件流
 
 `GET /projects/{project_id}/sessions/{session_id}/stream`

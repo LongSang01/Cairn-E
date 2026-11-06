@@ -67,6 +67,9 @@ export const replayMixins = {
         steps: [],
         findings: [],
         hints: [],
+        constraints: [],
+        steers: [],
+        scope: [],
       };
     },
 
@@ -285,6 +288,10 @@ export const replayMixins = {
 
         const stepMs = String(this.replay.stepMs || '1100');
         this.stopReplayTimer();
+        this.steerForm = { text: '' };
+        this.scopeForm = { host: '' };
+        this.constraintForm = { text: '', kind: 'deny' };
+        this.showConstraintModal = false;
         this.replay = {
           active: true,
           playing: true,
@@ -349,6 +356,10 @@ export const replayMixins = {
       const projectId = this.selectedProjectId;
       const stepMs = String(this.replay.stepMs || '1100');
       this.stopReplayTimer();
+      this.steerForm = { text: '' };
+      this.scopeForm = { host: '' };
+      this.constraintForm = { text: '', kind: 'deny' };
+      this.showConstraintModal = false;
       this.replay = {
         active: false,
         playing: false,

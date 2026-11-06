@@ -6,6 +6,8 @@ import sqlite3
 
 from fastapi import HTTPException
 
+from cairn.contracts.models import TERMINAL_STEP_STATUSES
+
 from .constants import PROJECT_COLUMNS, SESSION_COLUMNS
 from .leases import expire_steps
 
@@ -77,7 +79,7 @@ def get_claimable_step_or_404(
 ) -> sqlite3.Row:
     expire_steps(conn, project_id)
     row = get_step_or_404(conn, project_id, step_id)
-    if row["status"] in ("done", "abandoned"):
+    if row["status"] in TERMINAL_STEP_STATUSES:
         raise HTTPException(409, f"Step already {row['status']}")
     if row["worker"] is not None and row["worker"] != worker:
         raise HTTPException(409, f"Step is currently claimed by {row['worker']}")
@@ -89,7 +91,7 @@ def get_releasable_step_or_404(
 ) -> sqlite3.Row:
     expire_steps(conn, project_id)
     row = get_step_or_404(conn, project_id, step_id)
-    if row["status"] in ("done", "abandoned"):
+    if row["status"] in TERMINAL_STEP_STATUSES:
         raise HTTPException(409, f"Step already {row['status']}")
     if row["worker"] is None:
         return row

@@ -64,6 +64,7 @@ from .guards import (
     validate_goal_exists,
 )
 from .ids import (
+    next_constraint_id,
     next_document_id,
     next_fact_id,
     next_finding_id,
@@ -73,6 +74,7 @@ from .ids import (
     next_question_id,
     next_session_id,
     next_session_message_seq,
+    next_steer_id,
     next_step_id,
 )
 from .leases import (
@@ -190,6 +192,7 @@ __all__ = [
     "insert_document",
     "list_pending_questions",
     "list_tool_audit",
+    "next_constraint_id",
     "next_document_id",
     "next_fact_id",
     "next_finding_id",
@@ -199,6 +202,7 @@ __all__ = [
     "next_question_id",
     "next_session_id",
     "next_session_message_seq",
+    "next_steer_id",
     "next_step_id",
     "normalize_finding_severity",
     "parse_http_exchanges",

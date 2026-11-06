@@ -87,6 +87,7 @@ export default function (pi) {
         tool: "bash",
         command,
         worker: CFG.worker,
+        session: CFG.session_id,
       });
     } catch (error) {
       if (CFG.fail_action === "deny") {
@@ -95,7 +96,20 @@ export default function (pi) {
       return undefined;
     }
 
-    if (verdict.decision === "deny") return blocked(verdict.reason);
+    // A steer is delivered exactly once, at the next tool call of a worker that
+    // is already running. Blocking this one call hands the instruction back to
+    // the model without killing the run or dropping its in-flight work.
+    const steerLines = Array.isArray(verdict.steers) ? verdict.steers : [];
+    const steerText = steerLines.length
+      ? "【Cairn 用户新指令·优先于当前任务】\\n" +
+        steerLines.map((s) => `- ${s.text}`).join("\\n") +
+        "\\n本次工具调用已暂停，请先落实以上指令，再决定是否重新发起。"
+      : "";
+
+    if (verdict.decision === "deny") {
+      return blocked(steerText ? verdict.reason + "\\n" + steerText : verdict.reason);
+    }
+    if (steerText) return blocked(steerText);
     if (verdict.decision === "ask") return waitForDecision(verdict);
     return undefined;
   });
@@ -115,12 +129,16 @@ def config_path(worker: WorkerConfig) -> PurePosixPath:
     return agent_dir(worker) / CONFIG_FILE
 
 
-def config_json(*, project_id: str, worker: WorkerConfig, guard: ToolGuardConfig) -> str:
+def config_json(
+    *, project_id: str, worker: WorkerConfig, guard: ToolGuardConfig, session_id: str
+) -> str:
+    """One config per worker run. `session_id` scopes the steer delivery receipts."""
     return json.dumps(
         {
             "api_url": guard.api_url.rstrip("/"),
             "project_id": project_id,
             "worker": worker.name,
+            "session_id": session_id,
             "fail_action": guard.fail_action,
         },
         ensure_ascii=False,
@@ -134,6 +152,7 @@ def install(
     worker: WorkerConfig,
     project_id: str,
     guard: ToolGuardConfig,
+    session_id: str,
 ) -> None:
     """Drop the extension + per-task config into the worker's pi agent directory.
 
@@ -146,6 +165,8 @@ def install(
     backend.write_text_file(
         container_name,
         str(config_path(worker)),
-        config_json(project_id=project_id, worker=worker, guard=guard),
+        config_json(
+            project_id=project_id, worker=worker, guard=guard, session_id=session_id
+        ),
     )
     backend.write_text_file(container_name, str(extension_path(worker)), EXTENSION_SOURCE)

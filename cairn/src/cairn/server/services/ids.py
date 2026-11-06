@@ -44,6 +44,14 @@ def next_hint_id(conn: sqlite3.Connection, project_id: str) -> str:
     return _next_scoped_id(conn, "hint", "h", project_id)
 
 
+def next_constraint_id(conn: sqlite3.Connection, project_id: str) -> str:
+    return _next_scoped_id(conn, "constraint", "c", project_id)
+
+
+def next_steer_id(conn: sqlite3.Connection, project_id: str) -> str:
+    return _next_scoped_id(conn, "steer", "st", project_id)
+
+
 def next_finding_id(conn: sqlite3.Connection, project_id: str) -> str:
     return _next_scoped_id(conn, "finding", "d", project_id)
 

@@ -149,6 +149,63 @@ CREATE TABLE IF NOT EXISTS hints (
     PRIMARY KEY (id, project_id)
 );
 
+-- Constraints are the authorization boundary, not another hint: a hint is free
+-- judgement absorbed into the graph, while a constraint outranks the goal and is
+-- rendered first in every Decide/Execute prompt. `origin` records who wrote it
+-- (human via the API, planner via Decide) so the two can never be confused.
+CREATE TABLE IF NOT EXISTS constraints (
+    id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL DEFAULT 'deny' CHECK (kind IN ('allow', 'deny')),
+    text TEXT NOT NULL,
+    origin TEXT NOT NULL DEFAULT 'human',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (id, project_id)
+);
+
+CREATE INDEX IF NOT EXISTS constraints_by_project ON constraints (project_id, kind);
+
+-- In-flight instructions from the human to the planner (ARTEX's /api/chat +
+-- steer_work equivalent). They are append-only: a steer stays in the transcript
+-- so a worker that starts later can still see "stop touching that host".
+CREATE TABLE IF NOT EXISTS steers (
+    id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    text TEXT NOT NULL,
+    creator TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    answer TEXT,
+    answered_at TEXT,
+    PRIMARY KEY (id, project_id)
+);
+
+CREATE INDEX IF NOT EXISTS steers_by_project ON steers (project_id, created_at);
+
+-- Each steer is delivered once per worker session at its next tool call, so a
+-- running executor sees it immediately instead of waiting for its next run.
+CREATE TABLE IF NOT EXISTS steer_deliveries (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    steer_id TEXT NOT NULL,
+    worker TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    delivered_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, steer_id, worker, session_id)
+);
+
+-- Task-level authorization scope: IPs, CIDRs and domains the test may touch.
+-- Empty means "no host gating"; one or more allow entries close the gate.
+CREATE TABLE IF NOT EXISTS project_scope (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('host', 'ip', 'cidr', 'domain')),
+    value TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'human',
+    created_at TEXT NOT NULL,
+    UNIQUE (project_id, kind, value)
+);
+
+CREATE INDEX IF NOT EXISTS project_scope_by_project ON project_scope (project_id);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT NOT NULL,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -231,9 +288,15 @@ CREATE TABLE IF NOT EXISTS tool_rules (
     message TEXT,
     timeout_seconds INTEGER NOT NULL DEFAULT 60,
     timeout_action TEXT NOT NULL DEFAULT 'deny',
-    enabled INTEGER NOT NULL DEFAULT 1
+    enabled INTEGER NOT NULL DEFAULT 1,
+    -- NULL = platform-wide rule; a project id = task-level rule that only this
+    -- project's workers see (ARTEX's task_intercept_rules equivalent).
+    project_id TEXT
 );
 
+-- The project_id index is created by migration 006, not here: on a legacy DB
+-- `tool_rules` already exists without that column, and executescript(SCHEMA)
+-- runs BEFORE the migrations that add it.
 CREATE TABLE IF NOT EXISTS tool_approvals (
     id TEXT NOT NULL,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -427,12 +490,59 @@ def _migration_005_token_budget(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE projects ADD COLUMN blocked_reason TEXT")
 
 
+def _migration_006_project_tool_rules(conn: sqlite3.Connection) -> None:
+    """Let a project own tool rules without cloning the platform-wide rule set."""
+    if "project_id" not in _table_columns(conn, "tool_rules"):
+        conn.execute("ALTER TABLE tool_rules ADD COLUMN project_id TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS tool_rules_by_project ON tool_rules (project_id, enabled)"
+    )
+
+
+def _migration_007_steer_replies_and_scope(conn: sqlite3.Connection) -> None:
+    """Steer answers, per-worker delivery receipts and task-level scope."""
+    columns = _table_columns(conn, "steers")
+    for name, ddl in (("answer", "TEXT"), ("answered_at", "TEXT")):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE steers ADD COLUMN {name} {ddl}")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS steer_deliveries (
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            steer_id TEXT NOT NULL,
+            worker TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            delivered_at TEXT NOT NULL,
+            PRIMARY KEY (project_id, steer_id, worker, session_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS project_scope (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL CHECK (kind IN ('host', 'ip', 'cidr', 'domain')),
+            value TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'human',
+            created_at TEXT NOT NULL,
+            UNIQUE (project_id, kind, value)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS project_scope_by_project ON project_scope (project_id)"
+    )
+
+
 _MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (1, _migration_001_baseline),
     (2, _migration_002_idempotency),
     (3, _migration_003_finding_evidence),
     (4, _migration_004_tool_guard),
     (5, _migration_005_token_budget),
+    (6, _migration_006_project_tool_rules),
+    (7, _migration_007_steer_replies_and_scope),
 )
 
 

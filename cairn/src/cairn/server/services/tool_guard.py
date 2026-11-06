@@ -19,6 +19,9 @@ import sqlite3
 from dataclasses import dataclass
 from uuid import uuid4
 
+from .hosts import host_candidates
+from .scope import host_in_scope, load_scope
+from .steer_delivery import claim_steers
 from .timeutil import utcnow
 
 # Wording matters: an agent that reads a block as "the target defended itself" will
@@ -26,7 +29,6 @@ from .timeutil import utcnow
 BLOCK_PREFIX = "【Cairn 平台管控·非目标防御】"
 DEFAULT_ACTION = "allow"
 ACTIONS = ("allow", "deny", "ask")
-MATCH_TYPES = ("exact", "prefix", "contains", "regex")
 
 
 @dataclass(slots=True)
@@ -59,27 +61,100 @@ def _matches(match_type: str, pattern: str, value: str) -> bool:
     return False
 
 
-def evaluate(conn: sqlite3.Connection, tool: str, command: str) -> GuardDecision:
-    rows = conn.execute(
-        "SELECT * FROM tool_rules WHERE enabled = 1 ORDER BY priority DESC, id ASC"
-    ).fetchall()
-    for row in rows:
-        target = row["target"]
-        if target not in ("tool", "command", "*"):
-            continue
-        value = command if target == "command" else tool
-        if not _matches(row["match_type"], row["pattern"], value):
-            continue
-        action = row["action"] if row["action"] in ACTIONS else DEFAULT_ACTION
-        message = row["message"] or f"命中规则 {row['match_type']}:{row['pattern']}"
-        return GuardDecision(
-            action=action,
-            reason=f"{BLOCK_PREFIX}此调用被平台拦截。原因：{message}",
-            rule_id=row["id"],
-            source="rule",
-            timeout_seconds=int(row["timeout_seconds"] or 60),
-            timeout_action=row["timeout_action"] or "deny",
+def _row_matches(row, tool: str, command: str) -> bool:
+    target = row["target"]
+    if target == "host":
+        return any(
+            _matches(row["match_type"], row["pattern"], host)
+            for host in host_candidates(command)
         )
+    if target not in ("tool", "command", "*"):
+        return False
+    value = command if target == "command" else tool
+    return _matches(row["match_type"], row["pattern"], value)
+
+
+def _decision_from(row) -> GuardDecision:
+    action = row["action"] if row["action"] in ACTIONS else DEFAULT_ACTION
+    message = row["message"] or f"命中规则 {row['match_type']}:{row['pattern']}"
+    return GuardDecision(
+        action=action,
+        reason=f"{BLOCK_PREFIX}此调用被平台拦截。原因：{message}",
+        rule_id=row["id"],
+        source="rule",
+        timeout_seconds=int(row["timeout_seconds"] or 60),
+        timeout_action=row["timeout_action"] or "deny",
+    )
+
+
+def evaluate(
+    conn: sqlite3.Connection, tool: str, command: str, project_id: str | None = None
+) -> GuardDecision:
+    """Global (platform-owned) rules plus this project's task-level rules.
+
+    Precedence mirrors ARTEX's asset gate: a platform-wide deny/ask is a floor a
+    project rule can never lift; project rules otherwise win over global allows;
+    and `target=host, action=allow` rules form an optional allowlist — a command
+    naming a host outside it is denied. With no allowlist nothing is gated, so
+    adding one rule cannot accidentally block the whole task.
+    """
+    rows = conn.execute(
+        "SELECT * FROM tool_rules WHERE enabled = 1 "
+        "AND (project_id IS NULL OR project_id = ?) "
+        "ORDER BY priority DESC, id ASC",
+        (project_id,),
+    ).fetchall()
+    global_hard = [
+        row for row in rows
+        if row["project_id"] is None and row["action"] in ("deny", "ask")
+    ]
+    project_rules = [row for row in rows if row["project_id"] is not None]
+    global_soft = [
+        row for row in rows
+        if row["project_id"] is None and row["action"] not in ("deny", "ask")
+    ]
+
+    # 1. Platform-wide prohibitions cannot be overridden by a project allow.
+    for row in global_hard:
+        if _row_matches(row, tool, command):
+            return _decision_from(row)
+
+    # 2. Optional host allowlists: task-level `project_scope` and tool rules with
+    #    target=host, action=allow. Both gates must pass when both are configured.
+    #    Explicit host deny/ask rules are handled in steps 1/3.
+    # Only project rules open an allowlist. A platform-wide `host/allow` rule is
+    # an ordinary permission, not a gate: letting it open the gate here would
+    # deny unlisted hosts in every project on the platform.
+    allow_hosts = [
+        row for row in project_rules
+        if row["target"] == "host" and row["action"] == "allow"
+    ]
+    scope = load_scope(conn, project_id) if project_id else []
+    if allow_hosts or scope:
+        for host in host_candidates(command):
+            rule_ok = not allow_hosts or any(
+                _matches(row["match_type"], row["pattern"], host) for row in allow_hosts
+            )
+            scope_ok = not scope or host_in_scope(host, scope)
+            if not rule_ok or not scope_ok:
+                return GuardDecision(
+                    action="deny",
+                    reason=f"{BLOCK_PREFIX}此调用被平台拦截。原因：目标 {host} 不在本次测试范围",
+                    rule_id=None,
+                    source="scope",
+                )
+
+    # 3. Project rules win over platform-wide allow rules.
+    for row in project_rules:
+        if row["target"] == "host" and row["action"] == "allow":
+            continue  # a whitelist entry is not a verdict on its own
+        if _row_matches(row, tool, command):
+            return _decision_from(row)
+
+    for row in global_soft:
+        if _row_matches(row, tool, command):
+            return _decision_from(row)
+
     return GuardDecision(action=DEFAULT_ACTION, reason=None, rule_id=None, source="default")
 
 
@@ -131,8 +206,17 @@ def check(
     session_id: str | None = None,
     actor: str | None = None,
 ) -> dict[str, object]:
-    """Evaluate one command; `ask` parks it in the approval queue."""
-    decision = evaluate(conn, tool, command)
+    """Evaluate one command; `ask` parks it in the approval queue.
+
+    The response may also carry undelivered steers. The pi extension blocks that
+    one tool call and returns them to the model, which is how a message reaches
+    a worker that is already running rather than only the next Decide round.
+    """
+    decision = evaluate(conn, tool, command, project_id=project_id)
+    pending_steers = claim_steers(
+        conn, project_id=project_id, worker=worker, session_id=session_id
+    )
+    extra = {"steers": pending_steers} if pending_steers else {}
     if decision.action == "allow":
         _audit(
             conn,
@@ -146,7 +230,7 @@ def check(
             rule_id=decision.rule_id,
             actor=actor,
         )
-        return {"decision": "allow"}
+        return {"decision": "allow", **extra}
 
     if decision.action == "deny":
         _audit(
@@ -161,7 +245,7 @@ def check(
             rule_id=decision.rule_id,
             actor=actor,
         )
-        return {"decision": "deny", "reason": decision.reason}
+        return {"decision": "deny", "reason": decision.reason, **extra}
 
     approval_id = f"appr_{uuid4().hex[:12]}"
     now = utcnow()
@@ -191,6 +275,7 @@ def check(
         "reason": decision.reason,
         "timeout_seconds": decision.timeout_seconds,
         "timeout_action": decision.timeout_action,
+        **extra,
     }
 
 

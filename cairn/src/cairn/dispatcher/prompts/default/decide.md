@@ -23,11 +23,13 @@ While work remains — no `complete` key at all (a placeholder like
 ```json
 {"accepted": true, "data": {
   "recall": ["keyword1", "keyword2"],
-  "doc_ids": [{"id": "doc_001", "pages": [3, 4]}],
+  "doc_ids": [{"id": "doc_001", "from": 0}],
   "goals": {"add": [{"description": "sub goal", "parent": "g001"}],
             "close": [{"id": "g002", "status": "achieved"}]},
   "steps": {"add": [{"description": "what to do", "from": ["origin"], "goal": "g001", "priority": 3, "rationale": "which new fact this produces"}],
-            "update": [{"id": "s002", "priority": 7}, {"id": "s003", "status": "abandoned", "note": "why"}]}
+            "update": [{"id": "s002", "priority": 7}, {"id": "s003", "status": "abandoned", "note": "why"}, {"id": "s004", "status": "cancelled", "note": "crossed a constraint"}]},
+  "constraints": {"add": [{"kind": "deny", "text": "never touch payment.example.com"}]},
+  "steers": {"reply": [{"id": "st001", "text": "已停止对 10.0.0.9 的探测，改为只读收集。"}]}
 }}
 ```
 
@@ -50,16 +52,42 @@ If you genuinely cannot make progress: `{"accepted": false, "reason": "..."}`.
 
 - `complete` ends the whole project and closes the root goal. It is not a "sub goal finished" marker; use `goals.close` for that.
 - `complete` only when the facts already on the graph prove the root goal AND nothing remains to run: every step done or abandoned, every sub goal closed. Cite the proving facts in `from`. Wrap up in ONE payload: `complete` together with `goals.close` and `steps.update` entries whose `status` is `"abandoned"` for the remaining **pending** steps — those closes and abandons are applied first and the project ends atomically. Combining `complete` with `goals.add`, `steps.add`, or a `steps.update` that only changes `priority`/`note` is not allowed — those actions are kept and the completion is dropped.
-- A **running** step belongs to its executor: you cannot abandon it, and it keeps the project from completing. Its executor closes it with a fact in a moment, which wakes you up again — wait (output no actions) instead of abandoning it. Abandon only pending steps whose work a fact already covers.
+- A **running** step belongs to its executor: you cannot *abandon* it, and it keeps the project from completing. Normally wait (output no actions) — its executor closes it with a fact in a moment and wakes you up again. But when the run must stop (it crossed a constraint, is attacking an out-of-scope target, or is clearly spinning), you **can cancel** it with `{"id": "s003", "status": "cancelled", "note": "why"}`. Cancelling kills the executor and discards whatever it had not submitted; it is not a way to collect its result. Abandon only pending steps whose work a fact already covers.
 - When the snapshot already shows no open step and every sub goal closed, the only valid output is `complete`. Never leave such a graph behind with just closes or abandons: that dead-ends the project.
 - Omit `complete` entirely while the goal is unmet. Never send an empty placeholder like `{"from": [], "description": ""}`.
 - A step must state an action and how it turns known facts into a new fact. Small, concrete, verifiable steps beat broad ones.
 - Priority is 0 (lowest) to 9 (highest). Higher priority runs first.
 - A `steps.update` entry may carry only a `note`: that pins short guidance onto a step the executor has not started yet. Combine it with `priority` or `status` when you also want to reprioritize or abandon.
+- `steers.reply` answers an unanswered message in `## Steers`: one short sentence saying what you actually did. If you omit it, the platform replies with a factual summary of this round's graph changes instead. A reply alone is a valid payload. Never claim a command was run or a step cancelled unless that action is in this same payload.
+- `constraints.add` records a rule the search just learned it must not cross (a new out-of-scope host, a forbidden operation). Only `kind: "deny"` is allowed: you may tighten the boundary but never widen it — allow rules come from a human. A payload containing only `constraints.add` is a valid response. Constraints are read fresh on every run, so an added rule is in force from the next Decide onward; it is not pushed into a worker that is already running.
 - Abandon pending steps that are exhausted, duplicated, or contradicted by new facts.
 - A step whose `failures.count` is already 2 or more has burned that many runs without landing a fact. Do not resend the same plan: change the approach, split it into smaller verifiable steps, or abandon it with a note describing what was tried.
 - Add at most {max_steps} steps in one run.
 - Never add facts. Only Execute submits facts.
+
+## Test scope
+
+{scope}
+
+## Steers
+
+{steers}
+
+These are messages the human sent while the project was running. They override your
+own plan for this round. Act on the latest one through the graph: `constraints.add`
+for a new prohibition, a `note` on a pending step for guidance to its executor,
+`status: "cancelled"` for a running step that must stop now, and new or abandoned
+steps to change direction. The instructions stay in the transcript on purpose —
+do not re-do an action a later steer forbids.
+
+## Constraints
+
+{constraints}
+
+These rules outrank the goal. A step that would cross one is not a candidate: record
+the reason on a step note and pick a direction that stays inside the boundary. A new
+target, host, port or account that the constraints do not cover is out of scope — note
+it and move on instead of widening the task yourself.
 
 ## Graph
 

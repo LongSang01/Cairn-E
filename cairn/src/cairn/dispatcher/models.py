@@ -52,6 +52,9 @@ class DecideCheckpoint:
     hint_count: int
     finding_count: int
     open_step_count: int
+    # Append-only human instructions: a new steer must wake Decide immediately,
+    # even when the graph itself did not change.
+    steer_count: int = 0
     # Decide runs the graph itself did not ask for (terminal graph, or one whose
     # remaining steps burned their Execute attempts). Bounded so a dead end stalls
     # instead of spending tokens forever.

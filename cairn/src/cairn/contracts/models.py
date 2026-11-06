@@ -12,7 +12,11 @@ from typing import Literal, get_args
 from pydantic import BaseModel, Field
 
 GoalStatus = Literal["active", "achieved", "abandoned"]
-StepStatus = Literal["pending", "running", "done", "abandoned"]
+# `cancelled` is a planner kill: the running executor is stopped and its result
+# is deliberately discarded, unlike `abandoned` (a pending step never started).
+StepStatus = Literal["pending", "running", "done", "abandoned", "cancelled"]
+# Closed forever: no lease renewal, no conclusion, no re-claim can revive them.
+TERMINAL_STEP_STATUSES: tuple[str, ...] = ("done", "abandoned", "cancelled")
 # Transcript roles: `tool` is the raw-output fallback, `tool_call`/`tool_result`
 # are the individual tool invocations, `thinking` is model reasoning.
 SessionRole = Literal["system", "user", "assistant", "thinking", "tool", "tool_call", "tool_result"]
@@ -232,6 +236,43 @@ class ProjectSummary(ProjectMeta):
     hint_count: int
 
 
+class Constraint(BaseModel):
+    """One rule the search must obey, ahead of its own goal.
+
+    ``kind`` is ``allow`` (explicit authorization) or ``deny`` (prohibition).
+    ``origin`` is ``human`` when entered through the API and ``planner`` when
+    Decide derived it from the task; nothing enforces a constraint at the tool
+    level, they are prompt-level authorization, same as ARTEX's task constraints.
+    """
+
+    id: str
+    kind: Literal["allow", "deny"]
+    text: str
+    origin: str
+    created_at: str
+
+
+class Steer(BaseModel):
+    """One message a human sent while the project was running, plus the planner's reply."""
+
+    id: str
+    text: str
+    creator: str
+    created_at: str
+    answer: str | None = None
+    answered_at: str | None = None
+
+
+class ScopeEntry(BaseModel):
+    """One authorized target. IPs/CIDRs are matched with ``ipaddress``, domains by suffix."""
+
+    id: int
+    kind: Literal["host", "ip", "cidr", "domain"]
+    value: str
+    source: str
+    created_at: str
+
+
 class ProjectDetail(BaseModel):
     project: ProjectMeta
     facts: list[Fact]
@@ -239,6 +280,9 @@ class ProjectDetail(BaseModel):
     steps: list[Step]
     findings: list[Finding]
     hints: list[Hint]
+    constraints: list[Constraint] = Field(default_factory=list)
+    steers: list[Steer] = Field(default_factory=list)
+    scope: list[ScopeEntry] = Field(default_factory=list)
     sessions: list[Session] = Field(default_factory=list)
 
 

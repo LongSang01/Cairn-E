@@ -258,6 +258,7 @@ def validate_decide_payload(
     active_sub_goal_ids: list[str],
     step_ids: list[str],
     pending_step_ids: list[str] | None = None,
+    running_step_ids: list[str] | None = None,
 ) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
     """Decide only touches the graph: goals, steps, and the completion declaration.
 
@@ -289,9 +290,20 @@ def validate_decide_payload(
     if data is None:  # pragma: no cover - a wrapped payload always carries an object
         raise ValueError("data must be an object")
 
+    steer_replies: list[dict[str, str]] = []
+    for index, item in enumerate(_section(data, "steers", "reply")):
+        if not isinstance(item, dict):
+            raise ValueError(f"steers.reply[{index}] must be an object")
+        steer_replies.append(
+            {
+                "id": _text(item.get("id"), f"steers.reply[{index}].id"),
+                "text": _text(item.get("text"), f"steers.reply[{index}].text"),
+            }
+        )
     lookups = {
         "recall": _string_list(data.get("recall"), "recall", 3, 200),
         "doc_ids": _document_requests(data.get("doc_ids"), "doc_ids", 5),
+        "steer_replies": steer_replies,
     }
 
     complete_payload = _complete_block(data.get("complete"), fact_ids)
@@ -370,8 +382,17 @@ def validate_decide_payload(
                 if sid not in step_ids:
                     raise ValueError(f"steps.update[{index}] references unknown step: {sid}")
                 status = item.get("status")
-                if status is not None and status != "abandoned":
-                    raise ValueError(f"steps.update[{index}].status only supports abandoned")
+                if status not in (None, "abandoned", "cancelled"):
+                    raise ValueError(
+                        f"steps.update[{index}].status only supports abandoned or cancelled"
+                    )
+                if status == "cancelled" and sid not in set(running_step_ids or ()):
+                    # A planner kill only makes sense for a worker that is running.
+                    # Anything else is a no-op that would silently drop a pending
+                    # step without ever having started it.
+                    raise ValueError(
+                        f"steps.update[{index}] can only cancel a running step: {sid}"
+                    )
                 priority = item.get("priority")
                 note = _optional_text(item.get("note"), f"steps.update[{index}].note")
                 if priority is None and status is None and note is None:
@@ -388,22 +409,38 @@ def validate_decide_payload(
                     }
                 )
 
+    constraint_add: list[dict[str, Any]] = []
+    for index, item in enumerate(_section(data, "constraints", "add")):
+        if not isinstance(item, dict):
+            raise ValueError(f"constraints.add[{index}] must be an object")
+        text = _text(item.get("text"), f"constraints.add[{index}].text")
+        kind = item.get("kind", "deny")
+        if kind == "allow":
+            # A model must never widen its own authorization: only a human may add
+            # an allow rule. Tightening (deny) is always within its remit.
+            raise ValueError(
+                f"constraints.add[{index}].kind must be deny; only a human may allow"
+            )
+        if kind != "deny":
+            raise ValueError(f"constraints.add[{index}].kind must be deny")
+        constraint_add.append({"kind": kind, "text": text})
+
     if complete_payload is not None:
         # Abandoning a step closes it instead of queuing work: the wrap-up payload
         # (proj_008 shape) is complete + goals.close + steps.update(abandon). Only a
         # pending step can be closed this way; a running one keeps its own conclusion.
         closable = set(step_ids if pending_step_ids is None else pending_step_ids)
-        abandoned_now = {
+        closed_step_ids = {
             u["id"] for u in step_update if u.get("status") == "abandoned" and u["id"] in closable
-        }
-        queued_work = bool(goal_add or step_add) or any(
-            u["id"] not in abandoned_now for u in step_update
+        } | {u["id"] for u in step_update if u.get("status") == "cancelled"}
+        queued_work = bool(goal_add or step_add or constraint_add) or any(
+            u["id"] not in closed_step_ids for u in step_update
         )
         open_now = (
-            () if open_steps_empty else tuple(sid for sid in step_ids if sid not in abandoned_now)
+            () if open_steps_empty else tuple(sid for sid in step_ids if sid not in closed_step_ids)
         )
-        closed_now = {entry["id"] for entry in goal_close}
-        active_now = [gid for gid in active_sub_goal_ids if gid not in closed_now]
+        closed_goal_ids = {entry["id"] for entry in goal_close}
+        active_now = [gid for gid in active_sub_goal_ids if gid not in closed_goal_ids]
         if not queued_work and not open_now and not active_now:
             # Finale: this payload leaves nothing open — ends the project atomically.
             if goal_close:
@@ -411,7 +448,7 @@ def validate_decide_payload(
             if step_update:
                 complete_payload = {**complete_payload, "step_update": step_update}
             return "complete", complete_payload, lookups
-        if goal_add or goal_close or step_add or step_update:
+        if goal_add or goal_close or step_add or step_update or constraint_add or steer_replies:
             # Completing cancels every running step: a payload that still queues
             # work keeps its graph actions and drops the premature completion.
             complete_payload = None
@@ -421,7 +458,11 @@ def validate_decide_payload(
                 f"open steps {list(open_now) or '-'}; active sub-goals {active_now or '-'}"
             )
 
-    if not (goal_add or goal_close or step_add or step_update):
+    if not (goal_add or goal_close or step_add or step_update or constraint_add):
+        # A reply-only payload is a legal no-op: the run settles the steers with
+        # the model's answer, even when the graph has nothing left to do.
+        if steer_replies:
+            return "noop", None, lookups
         if open_steps_empty:
             raise ValueError("decide must add steps, add goals, or complete when no step is open")
         return "noop", None, lookups
@@ -431,6 +472,8 @@ def validate_decide_payload(
         {
             "goals": {"add": goal_add, "close": goal_close},
             "steps": {"add": step_add, "update": step_update},
+            # Decide may only tighten the boundary (deny); a human owns allow rules.
+            "constraints": {"add": constraint_add},
         },
         lookups,
     )

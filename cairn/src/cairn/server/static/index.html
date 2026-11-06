@@ -635,6 +635,11 @@
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 1 1 7.072 0l-.548.547A3.374 3.374 0 0 0 14 18.469V19a2 2 0 1 1-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547Z"/></svg>
             提示
           </button>
+          <button @click="openConstraintModal()"
+            class="px-3 py-1.5 bg-white/90 backdrop-blur border border-rose-200 text-rose-600 rounded-lg shadow-sm text-xs font-medium hover:bg-rose-50 transition flex items-center gap-1">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg>
+            约束
+          </button>
         </div>
         <div class="flex gap-1.5" x-show="projectIsActive()">
           <button @click="sendHeartbeatForSelectedStep()" :disabled="!selectedActionableOpenStepRecord()"
@@ -670,6 +675,10 @@
         <button @click="sideTab = 'hints'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
           :class="sideTab === 'hints' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">
           提示 <span class="ml-0.5 text-[10px] opacity-60" x-text="project.hints.length"></span>
+        </button>
+        <button @click="sideTab = 'constraints'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
+          :class="sideTab === 'constraints' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">
+          约束 <span class="ml-0.5 text-[10px] opacity-60" x-text="(project.constraints || []).length"></span>
         </button>
         <button @click="sideTab = 'sessions'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
           :class="sideTab === 'sessions' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">
@@ -959,6 +968,80 @@
               <p class="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words" x-text="h.content"></p>
             </div>
           </button>
+        </template>
+      </div>
+
+      <!-- Constraints: the authorization boundary, read fresh by Decide and Execute -->
+      <div x-show="sideTab === 'constraints'" class="flex-1 overflow-y-auto p-4 space-y-3 bg-rose-50/25">
+        <div class="rounded-2xl border border-rose-200/80 bg-white/80 px-4 py-3 text-[11px] text-slate-500 leading-relaxed shadow-sm">
+          约束优先于目标：禁止项不会被当成提示忽略；约束之外的新主机、新端口不算授权。新增或删除在下一轮 Decide / Execute 生效，不会打断正在执行的 worker。
+        </div>
+        <div x-show="projectIsActive() && !replay.active" class="rounded-2xl border border-slate-200 bg-white shadow-sm p-3 space-y-2">
+          <div class="text-xs font-medium text-slate-600">给主 Agent 发指令</div>
+          <textarea x-model="steerForm.text" rows="2" placeholder="例如：停止对 10.0.0.9 的所有测试，只做只读信息收集"
+            class="w-full resize-none rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700 focus:border-brand-300 focus:outline-none"></textarea>
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-[10px] text-slate-400">运行中可随时发送 · 下一轮 Decide 读取 · 不打断正在执行的 worker</span>
+            <button type="button" @click="sendSteer()" :disabled="!steerForm.text.trim()"
+              class="px-3 py-1.5 bg-brand-500 text-white rounded-lg text-xs font-medium hover:bg-brand-600 transition disabled:opacity-30">发送</button>
+          </div>
+          <div class="space-y-1 pt-1" x-show="(project.steers || []).length">
+            <template x-for="s in (project.steers || []).slice(-5)" :key="s.id">
+              <div class="rounded-lg bg-slate-50 px-2 py-1.5 space-y-1">
+                <div class="flex items-start gap-2 text-[11px] text-slate-500">
+                  <span class="shrink-0 text-slate-400" x-text="formatTime(s.created_at)"></span>
+                  <span class="break-words" x-text="s.text"></span>
+                </div>
+                <div class="text-[11px] break-words" :class="s.answer ? 'text-emerald-700' : 'text-slate-400 italic'">
+                  <span x-text="s.answer ? '主 Agent：' + s.answer : '等待主 Agent 答复…'"></span>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+        <div class="rounded-2xl border border-slate-200 bg-white shadow-sm p-3 space-y-2">
+          <div class="flex items-center justify-between gap-2">
+            <div class="text-xs font-medium text-slate-600">测试范围（硬拦截）</div>
+            <span class="text-[10px] text-slate-400" x-text="(project.scope || []).length ? '白名单生效中' : '未启用白名单'"></span>
+          </div>
+          <p class="text-[10px] text-slate-400 leading-relaxed">这里配置的是平台级拦截，不是提示：支持主机 / IP / CIDR / 域名后缀。只要有一条，命令里出现范围外的主机就会被拒绝；留空则不限制。</p>
+          <div class="flex gap-2" x-show="!replay.active">
+            <input x-model="scopeForm.host" @keydown.enter.prevent="addScopeHost()" placeholder="example.com 或 10.0.0.5"
+              class="flex-1 px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs focus:outline-none focus:border-brand-400">
+            <button type="button" @click="addScopeHost()" :disabled="!scopeForm.host.trim()"
+              class="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs font-medium hover:bg-slate-800 transition disabled:opacity-30">添加</button>
+          </div>
+          <div class="flex flex-wrap gap-1.5">
+            <template x-for="r in (project.scope || [])" :key="r.id">
+              <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-slate-100 text-[11px] text-slate-600">
+                <span x-text="r.value"></span>
+                <span class="text-slate-400" x-text="r.kind"></span>
+                <button type="button" x-show="!replay.active" @click="deleteScopeEntry(r.id)" class="text-slate-400 hover:text-rose-500">&times;</button>
+              </span>
+            </template>
+          </div>
+        </div>
+        <template x-if="(project.constraints || []).length === 0">
+          <div class="rounded-2xl border border-dashed border-rose-200 bg-white/80 px-5 py-10 text-center shadow-sm">
+            <p class="text-sm text-slate-300">还没有约束</p>
+          </div>
+        </template>
+        <template x-for="c in (project.constraints || [])" :key="c.id">
+          <div class="rounded-2xl border border-rose-200/80 bg-white shadow-sm overflow-hidden">
+            <div class="px-4 py-3 border-b border-rose-100 bg-rose-50/70 flex items-center justify-between gap-3">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="px-1.5 py-0.5 rounded text-[10px] font-medium"
+                  :class="c.kind === 'deny' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'"
+                  x-text="c.kind === 'deny' ? '禁止' : '允许'"></span>
+                <span class="text-[11px] text-slate-500 truncate" x-text="c.origin === 'planner' ? 'Decide 派生' : c.origin"></span>
+              </div>
+              <button type="button" x-show="projectCanWriteHints()" @click="deleteConstraint(c.id)"
+                class="text-[11px] text-slate-400 hover:text-rose-500 transition">移除</button>
+            </div>
+            <div class="p-4">
+              <p class="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words" x-text="c.text"></p>
+            </div>
+          </div>
         </template>
       </div>
 
@@ -1301,6 +1384,32 @@
         class="px-5 py-2 text-sm bg-amber-500 text-white rounded-xl font-medium hover:bg-amber-600 transition disabled:opacity-30 shadow-sm shadow-amber-200">添加</button>
     </div>
 </div>
+</div>
+
+<!-- Constraint -->
+<div x-show="showConstraintModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center overlay" @click.self="showConstraintModal = false">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 border border-slate-200/60" @click.stop>
+    <h3 class="text-base font-semibold text-slate-700 mb-1">添加操作约束</h3>
+    <p class="text-xs text-slate-400 mb-4">约束优先于目标，运行中修改在下一轮 Decide / Execute 生效。</p>
+    <div class="space-y-3">
+      <div class="flex gap-2">
+        <button type="button" @click="constraintForm.kind = 'deny'"
+          :class="constraintForm.kind === 'deny' ? 'bg-rose-500 text-white' : 'bg-slate-50 text-slate-500'"
+          class="px-3 py-1.5 rounded-lg text-xs font-medium transition">禁止（收紧范围）</button>
+        <button type="button" @click="constraintForm.kind = 'allow'"
+          :class="constraintForm.kind === 'allow' ? 'bg-emerald-500 text-white' : 'bg-slate-50 text-slate-500'"
+          class="px-3 py-1.5 rounded-lg text-xs font-medium transition">允许（明确授权）</button>
+      </div>
+      <textarea x-model="constraintForm.text" placeholder="例如：不要进行增删改查；不要测试 10.0.0.0/24 以外的系统" rows="3"
+        class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-rose-100 focus:border-rose-400 transition placeholder:text-slate-300"></textarea>
+      <p class="text-[10px] text-slate-400">来源会标记为「人工」；Decide 只能追加禁止项，不能自行扩大授权范围。</p>
+    </div>
+    <div class="flex justify-end gap-2 mt-5">
+      <button @click="showConstraintModal = false" class="px-4 py-2 text-sm text-slate-500 hover:bg-slate-50 rounded-xl transition">取消</button>
+      <button @click="addConstraint()" :disabled="!constraintForm.text.trim()"
+        class="px-5 py-2 text-sm bg-rose-500 text-white rounded-xl font-medium hover:bg-rose-600 transition disabled:opacity-30 shadow-sm shadow-rose-200">添加</button>
+    </div>
+  </div>
 </div>
 
 <!-- Reopen -->

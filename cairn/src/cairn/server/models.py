@@ -15,6 +15,8 @@ from cairn.contracts.models import (
     FINDING_SEVERITIES,
     FINDING_STATUSES,
     MAX_DOCUMENT_CHARS,
+    TERMINAL_STEP_STATUSES,
+    Constraint,
     ContextSummary,
     Document,
     DocumentMeta,
@@ -38,12 +40,14 @@ from cairn.contracts.models import (
     RecallHit,
     RecallPlan,
     RecallResponse,
+    ScopeEntry,
     Session,
     SessionDetail,
     SessionMessage,
     SessionRole,
     SessionStatus,
     Settings,
+    Steer,
     Step,
     StepStatus,
     TokenUsage,
@@ -53,7 +57,9 @@ from cairn.contracts.models import (
 __all__ = [
     "FINDING_SEVERITIES",
     "MAX_DOCUMENT_CHARS",
+    "TERMINAL_STEP_STATUSES",
     "AnswerQuestionRequest",
+    "AnswerSteerRequest",
     "AppendSessionMessagesRequest",
     "ClaimQuestionRequest",
     "CloseGoalRequest",
@@ -61,15 +67,20 @@ __all__ = [
     "CompleteResponse",
     "ConcludeStepRequest",
     "ConcludeStepResponse",
+    "Constraint",
     "ContextSummary",
+    "CreateConstraintRequest",
     "CreateDocumentRequest",
     "CreateGoalRequest",
     "CreateHintInline",
     "CreateHintRequest",
     "CreateProjectRequest",
     "CreateQuestionRequest",
+    "CreateScopeEntryRequest",
     "CreateSessionRequest",
+    "CreateSteerRequest",
     "CreateStepRequest",
+    "CreateToolRuleRequest",
     "DecideClaimRequest",
     "Document",
     "DocumentMeta",
@@ -95,12 +106,15 @@ __all__ = [
     "RecallResponse",
     "ReopenRequest",
     "ReopenResponse",
+    "ScopeCheckRequest",
+    "ScopeEntry",
     "Session",
     "SessionDetail",
     "SessionMessage",
     "SessionRole",
     "SessionStatus",
     "Settings",
+    "Steer",
     "Step",
     "StepStatus",
     "SubmittedDocument",
@@ -254,6 +268,115 @@ class CreateHintRequest(BaseModel):
         return text
 
 
+class CreateConstraintRequest(BaseModel):
+    """A rule outranking the goal.
+
+    ``kind`` defaults to ``deny``: a bare rule read as a prohibition fails closed,
+    while silently promoting it to an authorization would widen the task.
+    ``origin`` is a caller-declared provenance label, not an authenticated
+    identity: the HTTP layer has no auth. The guarantee that Decide cannot widen
+    the boundary lives in ``validate_decide_payload`` (which rejects `allow`),
+    reinforced below for calls that declare themselves as the planner.
+    """
+
+    text: str
+    kind: Literal["allow", "deny"] = "deny"
+    origin: Literal["human", "planner"] = "human"
+
+    @model_validator(mode="after")
+    def planner_cannot_allow(self) -> CreateConstraintRequest:
+        if self.origin == "planner" and self.kind == "allow":
+            raise ValueError("the planner may only add deny rules")
+        return self
+
+    @field_validator("text")
+    @classmethod
+    def validate_non_empty_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class AnswerSteerRequest(BaseModel):
+    """The planner's reply to one human message."""
+
+    text: str
+
+    @field_validator("text")
+    @classmethod
+    def validate_non_empty_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class CreateScopeEntryRequest(BaseModel):
+    """One authorized target; adding the first one closes the host gate."""
+
+    kind: Literal["host", "ip", "cidr", "domain"]
+    value: str
+
+    @field_validator("value")
+    @classmethod
+    def validate_value(cls, value: str) -> str:
+        text = value.strip().lower()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class ScopeCheckRequest(BaseModel):
+    """Dry-run a command against the scope gate without writing an audit row."""
+
+    command: str = Field(min_length=1)
+
+
+class CreateToolRuleRequest(BaseModel):
+    """A task-level tool rule.
+
+    `host`/`allow` rules are one of two host allowlists; the other, and the
+    preferred one, is the `project_scope` resource (host / IP / CIDR / domain).
+    """
+
+    target: Literal["tool", "command", "host", "*"]
+    match_type: Literal["exact", "prefix", "contains", "regex"]
+    pattern: str
+    action: Literal["allow", "deny", "ask"]
+    priority: int = 50
+    message: str | None = None
+    timeout_seconds: int = 60
+    timeout_action: Literal["deny", "allow"] = "deny"
+
+    @field_validator("pattern")
+    @classmethod
+    def validate_non_empty_pattern(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class CreateSteerRequest(BaseModel):
+    """A message to the planner while it is running.
+
+    Messages are append-only; the planner's reply is stored separately on the
+    same row (``answer`` / ``answered_at``) via ``/steers/{id}/answer``.
+    """
+
+    text: str
+    creator: str
+
+    @field_validator("text", "creator")
+    @classmethod
+    def validate_non_empty_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
 class CreateStepRequest(BaseModel):
     from_: list[str] = Field(default_factory=list, alias="from")
     goal: str | None = None
@@ -290,10 +413,14 @@ class CreateStepRequest(BaseModel):
 
 
 class UpdateStepRequest(BaseModel):
-    """Used by Decide: reprioritize or abandon a step. The step itself is never deleted."""
+    """Used by Decide: reprioritize, abandon (pending) or cancel (running) a step.
+
+    The step itself is never deleted. Cancelling kills the live executor and
+    discards its unsubmitted result.
+    """
 
     priority: int | None = None
-    status: Literal["abandoned"] | None = None
+    status: Literal["abandoned", "cancelled"] | None = None
     note: str | None = None
 
 

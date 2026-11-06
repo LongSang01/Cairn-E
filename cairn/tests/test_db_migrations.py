@@ -331,3 +331,48 @@ def test_db_busy_counter_counts_lock_failures(tmp_path, monkeypatch) -> None:
         other.close()
 
     assert db.db_busy_total() == before + 1
+
+
+def test_configure_upgrades_legacy_tool_rules_and_steers(tmp_path, monkeypatch) -> None:
+    """A pre-006 DB already has `tool_rules` (no project_id) and a pre-007 `steers`.
+
+    SCHEMA runs before the migrations, so it must not reference a column those
+    migrations are about to add (an index on project_id would abort startup).
+    """
+    path = tmp_path / "legacy_guard.db"
+    _legacy_db(path, with_intents=False)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE tool_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target TEXT NOT NULL,
+                match_type TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                action TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0,
+                message TEXT,
+                timeout_seconds INTEGER NOT NULL DEFAULT 60,
+                timeout_action TEXT NOT NULL DEFAULT 'deny',
+                enabled INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        conn.execute(
+            """CREATE TABLE steers (
+                id TEXT, project_id TEXT, text TEXT, creator TEXT, created_at TEXT
+            )"""
+        )
+
+    monkeypatch.setattr(db, "_db_path", None)
+    db.configure(path)
+
+    with db.get_conn() as conn:
+        assert "project_id" in db._table_columns(conn, "tool_rules")
+        assert {"answer", "answered_at"} <= set(db._table_columns(conn, "steers"))
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'tool_rules_by_project'"
+        ).fetchone()
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_scope'"
+        ).fetchone()

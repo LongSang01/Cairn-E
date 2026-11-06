@@ -9,6 +9,7 @@ from cairn import __version__
 from cairn.server import db
 from cairn.server.middleware import RequestIdMiddleware
 from cairn.server.routers import (
+    constraints,
     context,
     documents,
     export,
@@ -20,8 +21,10 @@ from cairn.server.routers import (
     projects,
     questions,
     recall,
+    scope,
     sessions,
     settings,
+    steers,
     steps,
     tool_guard,
     usage,
@@ -48,6 +51,9 @@ app.include_router(metrics.router)
 app.include_router(settings.router)
 app.include_router(projects.router)
 app.include_router(hints.router)
+app.include_router(constraints.router)
+app.include_router(steers.router)
+app.include_router(scope.router)
 app.include_router(goals.router)
 app.include_router(steps.router)
 app.include_router(sessions.router)

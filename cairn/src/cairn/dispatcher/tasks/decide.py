@@ -7,6 +7,7 @@ from typing import Any
 
 from cairn.contracts.models import ContextSummary, ProjectDetail, RecallPlan
 from cairn.dispatcher.config import ContextBudgetConfig, DispatchConfig, WorkerConfig
+from cairn.dispatcher.constraints import policy_blocks
 from cairn.dispatcher.context import GraphView, prepare_snapshot
 from cairn.dispatcher.models import StepFailure
 from cairn.dispatcher.output_validation import parse_json_output, validate_decide_payload
@@ -114,6 +115,9 @@ def run_decide_task(
         # Only a pending step is abandonable from here: a running step is closed by
         # its own executor, and abandoning it would throw that result away.
         pending_step_ids = [str(step["id"]) for step in open_steps if step["status"] == "pending"]
+        # Only these can be cancelled: a cancel is a kill of a live executor, not
+        # a way to drop a step that has not started.
+        running_step_ids = [str(step["id"]) for step in open_steps if step["status"] == "running"]
 
         template = load_prompt(config.runtime.prompt_group, "decide.md")
         recall_block, document_block = _consume_recall_plan(client, project_id)
@@ -123,6 +127,9 @@ def run_decide_task(
             "max_steps": str(config.tasks.decide.max_steps),
             "recall": recall_block,
             "documents": document_block,
+            # Read from this run's snapshot, so a rule added a moment ago is already
+            # in force here and needs no push to the running worker.
+            **policy_blocks(project),
         }
         # The snapshot gets whatever budget the template and its JSON blocks leave.
         overhead_tokens = prompt_overhead_tokens(template, blocks)
@@ -253,6 +260,7 @@ def run_decide_task(
                 active_sub_goal_ids=active_sub_goal_ids,
                 step_ids=step_ids,
                 pending_step_ids=pending_step_ids,
+                running_step_ids=running_step_ids,
             )
         except Exception as exc:  # noqa: BLE001 - every parse failure must close the task cleanly
             LOG.warning(
@@ -277,6 +285,8 @@ def run_decide_task(
                 total_ms,
                 preview(result.stdout),
             )
+            # A rejected output is not an answer: the steer stays unanswered so
+            # `steers:pending:N` wakes another (bounded) Decide round.
             record("rejected")
             return "rejected"
 
@@ -294,6 +304,7 @@ def run_decide_task(
                 execute_ms,
                 total_ms,
             )
+            _settle_steers(client, project_id, project.steers, lookups, note="本轮维持原计划。")
             record("success")
             return "success"
 
@@ -335,6 +346,9 @@ def run_decide_task(
                     project_id,
                     worker.name,
                 )
+                _settle_steers(
+                    client, project_id, project.steers, lookups, note="项目已停止。"
+                )
                 record("success")
                 return "success"
             if not response.ok:
@@ -355,6 +369,7 @@ def run_decide_task(
                 execute_ms,
                 total_ms,
             )
+            _settle_steers(client, project_id, project.steers, lookups, note="任务已完成。")
             record("success")
             return "success"
 
@@ -378,6 +393,7 @@ def run_decide_task(
             )
             record("failed", "applied no graph change")
             return "failed"
+        _settle_steers(client, project_id, project.steers, lookups, applied=applied)
         record("success")
         return "success"
     except Exception:
@@ -398,8 +414,28 @@ def _apply_actions(
         "goals_closed": 0,
         "steps_added": 0,
         "steps_updated": 0,
+        "constraints_added": 0,
         "total": 0,
     }
+
+    # Decide may only tighten (deny) the boundary; allow rules belong to a human.
+    for rule in data.get("constraints", {}).get("add", ()):
+        response = client.create_constraint(
+            project_id,
+            text=rule["text"],
+            kind=rule["kind"],
+            origin="planner",
+        )
+        if response.ok:
+            applied["constraints_added"] += 1
+            LOG.info(
+                "decide added deny constraint project=%s worker=%s text=%s",
+                project_id,
+                worker_name,
+                rule["text"],
+            )
+        else:
+            _log_write_failure("constraint add", project_id, worker_name, response)
 
     for goal in data["goals"]["add"]:
         response = client.create_goal(
@@ -472,6 +508,19 @@ def _apply_actions(
             note=step["note"],
         )
         if response.ok:
+            # update_step returns 200 when the step is already terminal. A cancel
+            # that did not happen must not be counted as applied (or surfaced as
+            # "step adjusted" in the steer reply) when an executor won the race.
+            if step["status"] == "cancelled" and (
+                not isinstance(response.data, dict)
+                or response.data.get("status") != "cancelled"
+            ):
+                LOG.info(
+                    "decide cancel skipped, step already terminal project=%s step=%s",
+                    project_id,
+                    step["id"],
+                )
+                continue
             applied["steps_updated"] += 1
             LOG.info(
                 "decide updated step project=%s worker=%s step=%s priority=%s status=%s",
@@ -489,6 +538,7 @@ def _apply_actions(
         + applied["goals_closed"]
         + applied["steps_added"]
         + applied["steps_updated"]
+        + applied["constraints_added"]
     )
     return applied
 
@@ -791,3 +841,49 @@ def _store_lookups(client: CairnClient, project_id: str, lookups: dict) -> None:
         client.save_recall_plan(project_id, queries=lookups["recall"], doc_ids=lookups["doc_ids"])
     except Exception:
         LOG.warning("recall plan write failed project=%s", project_id, exc_info=True)
+
+
+def _settle_steers(
+    client: CairnClient,
+    project_id: str,
+    steers,
+    lookups: dict,
+    applied: dict | None = None,
+    note: str = "",
+) -> None:
+    """Answer every unread human instruction once the Decide run is settled.
+
+    This is Cairn's chat reply: the planner can write its own text through
+    ``steers.reply``. When it does not, we answer with a factual summary of what
+    the run actually did — never an invented "done" — so the human always sees
+    whether the instruction landed. Failed/cancelled runs do not settle steers:
+    they stay unanswered and are re-read next round.
+    """
+    explicit = {item["id"]: item["text"] for item in (lookups.get("steer_replies") or ())}
+    counts = applied or {}
+    parts = [
+        f"{label} {counts[key]}"
+        for key, label in (
+            ("goals_added", "新增目标"),
+            ("goals_closed", "关闭目标"),
+            ("steps_added", "新增步骤"),
+            ("steps_updated", "调整步骤"),
+            ("constraints_added", "新增约束"),
+        )
+        if counts.get(key)
+    ]
+    summary = note + (
+        "本轮：" + "、".join(parts) + "。" if parts else "本轮未改动图，维持原计划。"
+    )
+    for steer in steers:
+        if getattr(steer, "answer", None):
+            continue
+        text = explicit.get(steer.id) or summary
+        response = client.answer_steer(project_id, steer.id, text=text)
+        if not response.ok:
+            LOG.warning(
+                "steer answer write failed project=%s steer=%s status=%s",
+                project_id,
+                steer.id,
+                response.status_code,
+            )

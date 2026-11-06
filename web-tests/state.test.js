@@ -32,4 +32,13 @@ describe('createState', () => {
     expect(s.selectedFacts).toEqual([]);
     expect(s.selectedNode).toBe(null);
   });
+
+  it('defaults the authorization-boundary forms and panels', () => {
+    const s = createState();
+    expect(s.showConstraintModal).toBe(false);
+    expect(s.constraintForm).toEqual({ text: '', kind: 'deny' });
+    expect(s.steerForm).toEqual({ text: '' });
+    expect(s.scopeForm).toEqual({ host: '' });
+    expect(s.sideTab).toBe('detail');
+  });
 });

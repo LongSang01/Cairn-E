@@ -27,8 +27,23 @@ WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
 }
 
 DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
-    "decide.md": ("{graph_yaml}", "{fact_ids}", "{open_steps}", "{max_steps}"),
-    "execute.md": ("{graph_yaml}", "{step_id}", "{step_description}"),
+    "decide.md": (
+        "{graph_yaml}",
+        "{fact_ids}",
+        "{open_steps}",
+        "{max_steps}",
+        "{constraints}",
+        "{steers}",
+        "{scope}",
+    ),
+    "execute.md": (
+        "{graph_yaml}",
+        "{step_id}",
+        "{step_description}",
+        "{constraints}",
+        "{steers}",
+        "{scope}",
+    ),
     "execute_conclude.md": ("{graph_yaml}", "{step_id}", "{step_description}"),
 }
 

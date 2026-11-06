@@ -43,9 +43,10 @@ pending ──claim──▶ running ──conclude──▶ done
    ▲                  │
    └────release───────┘
 pending ──Decide abandon──▶ abandoned
+running ──Decide cancel───▶ cancelled
 ```
 
-`running` 的 Step 由持有它的 worker 收尾（`conclude`），Decide 不能废弃它：中途废弃会丢掉已经跑完的结果（见 `/steps/{id}/update`）。租约过期（`step_timeout`）后 Step 回到 `pending`，此时才可以被废弃。
+`running` 的 Step 由持有它的 worker 收尾（`conclude`），Decide 不能废弃它：中途废弃会丢掉已经跑完的结果（见 `/steps/{id}/update`）。租约过期（`step_timeout`）后 Step 回到 `pending`，此时才可以被废弃。但 Decide 可以**取消** `running` 步骤：该步骤立即转为终态，worker 的下一次心跳与迟到的 `conclude` 都得到 `409`，进程由租约失败路径终止，未提交的结果被丢弃。这是有意的强制终止，不是等待结果。
 
 `kind` 为 `action` 的 Step 是普通动作；`kind` 为 `completion` 的 Step 是完成声明，由 `complete` 接口原子写入。
 
@@ -58,6 +59,19 @@ pending ──Decide abandon──▶ abandoned
 ### Hint
 
 人类判断，任何时刻都可以注入，下一次 Decide / Execute 读取图时自然吸收。
+
+### 授权边界与运行中干预
+
+图本身只描述「探索到哪一步」，不描述「允许探索到哪里」。以下四类资源是外挂在图上的边界，端点与字段见 `docs/protocol.md` §2.5–2.7：
+
+| 资源 | 层次 | 语义 |
+|---|---|---|
+| `Constraint` | 提示级 | `allow` / `deny` 规则，渲染在目标之前；Decide 只能追加 `deny` |
+| `Steer` | 对话级 | 运行中人类指令 + 主 agent 答复；同时经 pi 扩展在下一次工具调用前注入运行中的 worker |
+| `project_scope` | 命令级硬闸门 | host / IP / CIDR / domain 白名单；空范围 = 不启用 |
+| 任务级 `tool_rules` | 命令级硬闸门 | 只对该项目生效；平台级 `deny/ask` 不可被项目 `allow` 解除 |
+
+约束与指令**不派生**任何拦截规则：软约束与硬拦截必须分别显式配置，避免提示内容（或其中的注入文字）改写平台策略。Decide 对 `running` 步骤的 `cancelled` 是唯一的「主 agent 强制结束子 agent」动作。
 
 ## 数据结构
 
@@ -671,11 +685,11 @@ SSE（`text/event-stream`）提问流：
 
 #### GET /projects/{project_id}/export?format=yaml
 
-导出当前 FGS 图快照（`project` / `hints` / `facts` / `goals` / `steps` / `findings`），Finding 带 `severity`。
+导出当前 FGS 图快照（`project` / `hints` / `constraints` / `steers` / `scope` / `facts` / `goals` / `steps` / `findings`），Finding 带 `severity`。`steers` 含 `answer` / `answered_at`。
 
 #### GET /projects/{project_id}/export?format=timeline
 
-导出人类可读的时间线，事件包括：PROJECT CREATED、HINT、GOAL DECLARED / ACHIEVED / DROPPED、STEP DECLARED / CONCLUDED / ABANDONED、FINDING、PROJECT COMPLETED。FINDING 行会带上 `severity`。
+导出人类可读的时间线，事件包括：PROJECT CREATED、HINT、CONSTRAINT REQUIRED / FORBIDDEN、STEER / STEER ANSWER、SCOPE ENTRY、GOAL DECLARED / ACHIEVED / DROPPED、STEP DECLARED / CONCLUDED / ABANDONED / CANCELLED、FINDING、PROJECT COMPLETED。FINDING 行会带上 `severity`。
 
 #### GET /projects/{project_id}/export?format=findings
 

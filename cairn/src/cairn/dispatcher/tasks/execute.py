@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 from cairn.contracts.models import ProjectDetail, Step
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
+from cairn.dispatcher.constraints import policy_blocks
 from cairn.dispatcher.output_validation import parse_json_output, validate_execute_payload
 from cairn.dispatcher.prompting import load_prompt, render_prompt
 from cairn.dispatcher.protocol.client import CairnClient
@@ -76,7 +77,12 @@ def run_execute_task(
             # a failure here must not take the run down (the guard fails open).
             try:
                 install_pi_guard(
-                    container_manager, container_name, worker, project_id, config.tool_guard
+                    container_manager,
+                    container_name,
+                    worker,
+                    project_id,
+                    config.tool_guard,
+                    session_id=step.id,
                 )
             except Exception:
                 LOG.warning("failed to install tool guard project=%s", project_id, exc_info=True)
@@ -124,7 +130,11 @@ def run_execute_task(
                 return "unhealthy"
 
         template = load_prompt(config.runtime.prompt_group, "execute.md")
-        blocks = {"step_id": step.id, "step_description": step.description}
+        blocks = {
+            "step_id": step.id,
+            "step_description": step.description,
+            **policy_blocks(project),
+        }
         graph_yaml = budgeted_graph_yaml(
             export_yaml.strip(),
             client=client,
@@ -247,6 +257,7 @@ def run_execute_task(
                     worker,
                     driver,
                     project_id,
+                    project,
                     step,
                     export_yaml,
                     session,
@@ -319,6 +330,7 @@ def run_execute_task(
                 worker,
                 driver,
                 project_id,
+                project,
                 step,
                 export_yaml,
                 session,
@@ -361,6 +373,7 @@ def _try_conclude_fallback(
     worker: WorkerConfig,
     driver,
     project_id: str,
+    project: ProjectDetail,
     step: Step,
     export_yaml: str,
     session: str | None,
@@ -407,7 +420,11 @@ def _try_conclude_fallback(
     container_name = container_manager.ensure_running(project_id)
 
     template = load_prompt(config.runtime.prompt_group, "execute_conclude.md")
-    blocks = {"step_id": step.id, "step_description": step.description}
+    blocks = {
+        "step_id": step.id,
+        "step_description": step.description,
+        **policy_blocks(project),
+    }
     graph_yaml = budgeted_graph_yaml(
         export_yaml.strip(),
         client=client,

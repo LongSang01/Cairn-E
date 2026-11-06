@@ -137,6 +137,75 @@ export const actionsMixins = {
       } catch(e) { this.showToast(e.message, 'error'); }
     },
 
+    openConstraintModal() {
+      if (!this.projectCanWriteHints()) return;
+      this.constraintForm = { text: '', kind: 'deny' };
+      this.showConstraintModal = true;
+    },
+
+    async addConstraint() {
+      if (!this.projectCanWriteHints() || !this.constraintForm.text.trim()) return;
+      try {
+        await this.api('POST', `/projects/${this.selectedProjectId}/constraints`, {
+          text: this.constraintForm.text.trim(),
+          kind: this.constraintForm.kind,
+        });
+        this.showConstraintModal = false;
+        this.constraintForm = { text: '', kind: 'deny' };
+        await this.loadProject(this.selectedProjectId);
+        this.sideTab = 'constraints';
+        this.showToast('约束已添加，下一轮 Decide / Execute 起生效');
+      } catch(e) { this.showToast(e.message, 'error'); }
+    },
+
+    async sendSteer() {
+      if (!this.projectIsActive() || !this.steerForm.text.trim() || this.replay.active) return;
+      try {
+        await this.api('POST', `/projects/${this.selectedProjectId}/steers`, {
+          text: this.steerForm.text.trim(),
+          creator: this.actorName(),
+        });
+        this.steerForm = { text: '' };
+        await this.loadProject(this.selectedProjectId);
+        this.sideTab = 'constraints';
+        this.showToast('指令已发出，下一轮 Decide 会读到');
+      } catch(e) { this.showToast(e.message, 'error'); }
+    },
+
+    async addScopeHost() {
+      const host = this.scopeForm.host.trim().toLowerCase();
+      if (!host || this.replay.active) return;
+      const kind = host.includes('/') ? 'cidr'
+        : /^\d{1,3}(\.\d{1,3}){3}$/.test(host) ? 'ip'
+        : host.includes('.') ? 'domain' : 'host';
+      try {
+        await this.api('POST', `/projects/${this.selectedProjectId}/scope`, {
+          kind, value: host,
+        });
+        this.scopeForm = { host: '' };
+        await this.loadProject(this.selectedProjectId);
+        this.showToast('已加入测试范围，范围外主机将被平台拦截');
+      } catch(e) { this.showToast(e.message, 'error'); }
+    },
+
+    async deleteScopeEntry(id) {
+      if (this.replay.active) return;
+      try {
+        await this.api('DELETE', `/projects/${this.selectedProjectId}/scope/${id}`);
+        await this.loadProject(this.selectedProjectId);
+        this.showToast('范围条目已移除');
+      } catch(e) { this.showToast(e.message, 'error'); }
+    },
+
+    async deleteConstraint(id) {
+      if (!this.projectCanWriteHints()) return;
+      try {
+        await this.api('DELETE', `/projects/${this.selectedProjectId}/constraints/${id}`);
+        await this.loadProject(this.selectedProjectId);
+        this.showToast('约束已移除');
+      } catch(e) { this.showToast(e.message, 'error'); }
+    },
+
     saveLocalSettings() {
       try {
         this.localPrefs.actor_name = this.actorName();

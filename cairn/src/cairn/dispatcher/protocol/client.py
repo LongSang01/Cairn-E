@@ -177,6 +177,29 @@ class CairnClient:
             "POST", f"/projects/{project_id}/steps/{step_id}/update", json=payload
         )
 
+    def answer_steer(self, project_id: str, steer_id: str, *, text: str) -> ApiResult:
+        """The planner's answer to one human instruction (idempotent on the server)."""
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/steers/{steer_id}/answer",
+            json={"text": text},
+        )
+
+    def create_constraint(
+        self,
+        project_id: str,
+        *,
+        text: str,
+        kind: str = "deny",
+        origin: str = "planner",
+    ) -> ApiResult:
+        """Decide tightens the authorization boundary; only a human may add allow."""
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/constraints",
+            json={"text": text, "kind": kind, "origin": origin},
+        )
+
     def create_goal(
         self, project_id: str, *, description: str, creator: str, parent: str | None = None
     ) -> ApiResult:

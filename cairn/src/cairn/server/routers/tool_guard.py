@@ -5,7 +5,11 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from cairn.server.db import get_conn
-from cairn.server.models import ToolApprovalDecision, ToolGuardCheckRequest
+from cairn.server.models import (
+    CreateToolRuleRequest,
+    ToolApprovalDecision,
+    ToolGuardCheckRequest,
+)
 from cairn.server.services import (
     decide_tool_approval,
     expire_tool_approvals,
@@ -33,6 +37,80 @@ def _approval_payload(row) -> dict[str, object]:
         "created_at": row["created_at"],
         "decided_at": row["decided_at"],
     }
+
+
+def _rule_payload(row) -> dict[str, object]:
+    return {
+        "id": row["id"],
+        "project_id": row["project_id"],
+        "target": row["target"],
+        "match_type": row["match_type"],
+        "pattern": row["pattern"],
+        "action": row["action"],
+        "priority": row["priority"],
+        "message": row["message"],
+        "timeout_seconds": row["timeout_seconds"],
+        "timeout_action": row["timeout_action"],
+        "enabled": row["enabled"],
+    }
+
+
+@router.get("/projects/{project_id}/tool-rules")
+def list_project_rules(project_id: str):
+    """Task-level rules only; platform-wide rules are not editable from here."""
+    with get_conn() as conn:
+        get_project_or_404(conn, project_id)
+        rows = conn.execute(
+            "SELECT * FROM tool_rules WHERE project_id = ? ORDER BY priority DESC, id ASC",
+            (project_id,),
+        ).fetchall()
+        return {"rules": [_rule_payload(row) for row in rows]}
+
+
+@router.post("/projects/{project_id}/tool-rules", status_code=201)
+def create_project_rule(project_id: str, body: CreateToolRuleRequest):
+    """Add a rule that only this project's workers see.
+
+    `target=host, action=allow` entries define the test scope allowlist: once at
+    least one exists, commands naming a host outside it are denied. Add several
+    entries — a single allow rule gates everything else.
+    """
+    with get_conn() as conn:
+        get_project_or_404(conn, project_id)
+        cursor = conn.execute(
+            """
+            INSERT INTO tool_rules (
+                target, match_type, pattern, action, priority, message,
+                timeout_seconds, timeout_action, enabled, project_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            """,
+            (
+                body.target,
+                body.match_type,
+                body.pattern,
+                body.action,
+                body.priority,
+                body.message,
+                body.timeout_seconds,
+                body.timeout_action,
+                project_id,
+            ),
+        )
+        row = conn.execute("SELECT * FROM tool_rules WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        return _rule_payload(row)
+
+
+@router.delete("/projects/{project_id}/tool-rules/{rule_id}", status_code=204)
+def delete_project_rule(project_id: str, rule_id: int):
+    with get_conn() as conn:
+        get_project_or_404(conn, project_id)
+        cursor = conn.execute(
+            "DELETE FROM tool_rules WHERE id = ? AND project_id = ?",
+            (rule_id, project_id),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(404, f"Project tool rule {rule_id} not found")
+        return None
 
 
 @router.post("/projects/{project_id}/tool-guard/check")

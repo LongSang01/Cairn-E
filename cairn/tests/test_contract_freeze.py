@@ -7,13 +7,64 @@
 from fastapi.testclient import TestClient
 
 from cairn.contracts import CONTRACT_VERSION
-from cairn.contracts.models import Session, SessionDetail, SessionMessage
+from cairn.contracts.models import (
+    Constraint,
+    ProjectDetail,
+    ScopeEntry,
+    Session,
+    SessionDetail,
+    SessionMessage,
+    Steer,
+)
 from cairn.server import db
-from cairn.server.models import CreateSessionRequest, SubmittedSessionMessage
+from cairn.server.models import (
+    AnswerSteerRequest,
+    CreateConstraintRequest,
+    CreateScopeEntryRequest,
+    CreateSessionRequest,
+    CreateSteerRequest,
+    CreateToolRuleRequest,
+    ScopeCheckRequest,
+    SubmittedSessionMessage,
+)
 
 
 def test_contract_version_is_frozen() -> None:
     assert CONTRACT_VERSION == "1.0"
+
+
+def test_project_detail_fields_are_frozen() -> None:
+    assert set(ProjectDetail.model_fields) == {
+        "project",
+        "facts",
+        "goals",
+        "steps",
+        "findings",
+        "hints",
+        "constraints",
+        "steers",
+        "scope",
+        "sessions",
+    }
+
+
+def test_constraint_fields_are_frozen() -> None:
+    assert set(Constraint.model_fields) == {"id", "kind", "text", "origin", "created_at"}
+
+
+def test_scope_entry_fields_are_frozen() -> None:
+    assert set(ScopeEntry.model_fields) == {"id", "kind", "value", "source", "created_at"}
+
+
+def test_steer_fields_are_frozen() -> None:
+    assert set(Steer.model_fields) == {
+        "id",
+        "text",
+        "creator",
+        "created_at",
+        "answer",
+        "answered_at",
+    }
 
 
 def test_session_message_fields_are_frozen() -> None:
@@ -87,4 +138,22 @@ def test_healthz_exposes_contract_version(client: TestClient) -> None:
 
 def test_schema_migrations_are_registered() -> None:
     # 契约兼容性依赖迁移台账:新版本只能追加,不能改写已发布的迁移。
-    assert [version for version, _ in db._MIGRATIONS] == [1, 2, 3, 4, 5]
+    assert [version for version, _ in db._MIGRATIONS] == [1, 2, 3, 4, 5, 6, 7]
+
+
+def test_boundary_request_bodies_are_frozen() -> None:
+    assert set(CreateConstraintRequest.model_fields) == {"text", "kind", "origin"}
+    assert set(AnswerSteerRequest.model_fields) == {"text"}
+    assert set(CreateSteerRequest.model_fields) == {"text", "creator"}
+    assert set(CreateScopeEntryRequest.model_fields) == {"kind", "value"}
+    assert set(ScopeCheckRequest.model_fields) == {"command"}
+    assert set(CreateToolRuleRequest.model_fields) == {
+        "target",
+        "match_type",
+        "pattern",
+        "action",
+        "priority",
+        "message",
+        "timeout_seconds",
+        "timeout_action",
+    }

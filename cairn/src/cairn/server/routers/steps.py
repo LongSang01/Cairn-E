@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
+from cairn.contracts.models import TERMINAL_STEP_STATUSES
 from cairn.server.db import get_conn
 from cairn.server.models import (
     ConcludeStepRequest,
@@ -115,25 +116,31 @@ def release(project_id: str, step_id: str, body: HeartbeatRequest):
 
 @router.post("/projects/{project_id}/steps/{step_id}/update", response_model=Step)
 def update_step(project_id: str, step_id: str, body: UpdateStepRequest):
-    """Decide's reprioritize / abandon operation. Steps are never deleted.
+    """Decide's reprioritize / abandon / cancel operation. Steps are never deleted.
 
-    A step that is currently ``running`` is owned by its executor: abandoning it here
-    would kill a run whose result is already on its way, and the finished work would be
-    dropped instead of closing the step (proj_008: the final verification finished with
-    exit code 0, but Decide abandoned the step mid-run, so its fact was never recorded
-    and the project could not be completed). The executor's own conclusion, its lease
-    expiring, or the project being stopped are the only ways to end a running step.
+    A ``running`` step cannot be *abandoned*: abandoning it would kill a run whose
+    result is already on its way, and the finished work would be dropped instead of
+    closing the step (proj_008). But it can be *cancelled* deliberately — the planner
+    kill, equivalent to ARTEX's ``kill_work``. Cancellation keeps the owner on the row
+    so the executor's next heartbeat gets a 409; the heartbeat kills the process, and
+    a stale conclusion is rejected because the step is terminal. The work it had not
+    submitted is discarded on purpose.
     """
     with get_conn() as conn:
         check_project_active(conn, project_id)
         expire_steps(conn, project_id)
         row = get_step_or_404(conn, project_id, step_id)
-        if row["status"] in ("done", "abandoned"):
+        if row["status"] in TERMINAL_STEP_STATUSES:
             return step_to_model(conn, row, project_id)
         if body.status == "abandoned" and row["status"] == "running":
             raise HTTPException(
                 409,
                 f"Step {step_id} is running; its executor must conclude it before it can be abandoned",
+            )
+        if body.status == "cancelled" and row["status"] != "running":
+            raise HTTPException(
+                409,
+                f"Step {step_id} is {row['status']}; only a running step can be cancelled",
             )
 
         now = utcnow()
@@ -153,6 +160,15 @@ def update_step(project_id: str, step_id: str, body: UpdateStepRequest):
                 """
                 UPDATE steps
                 SET status = 'abandoned', worker = NULL, concluded_at = ?, note = ?
+                WHERE id = ? AND project_id = ?
+                """,
+                (now, body.note, step_id, project_id),
+            )
+        if body.status == "cancelled":
+            conn.execute(
+                """
+                UPDATE steps
+                SET status = 'cancelled', concluded_at = ?, note = ?
                 WHERE id = ? AND project_id = ?
                 """,
                 (now, body.note, step_id, project_id),

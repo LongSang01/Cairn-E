@@ -272,7 +272,7 @@ class DispatchMixin:
                 claim.status_code,
             )
             return False
-        if trigger.startswith(("idle:", "stuck:")):
+        if trigger.startswith(("idle:", "stuck:", "steers:pending:")):
             # Burn one unprompted attempt only when the run is actually dispatched; a
             # busy worker or a lost claim must not consume the budget.
             checkpoint = self.decide_checkpoints.get(project.project.id)
@@ -525,6 +525,17 @@ class DispatchMixin:
             changes.append(f"facts:{checkpoint.fact_count}->{len(project.facts)}")
         if len(project.hints) > checkpoint.hint_count:
             changes.append(f"hints:{checkpoint.hint_count}->{len(project.hints)}")
+        if len(project.steers) > checkpoint.steer_count:
+            changes.append(f"steers:{checkpoint.steer_count}->{len(project.steers)}")
+        else:
+            # A steer left unanswered means the previous run failed or was
+            # cancelled. Retry with the same bounded budget as idle/stuck runs
+            # instead of waiting forever for a graph change that may never come.
+            # Kept separate from a new-steer trigger so a legitimate wake-up does
+            # not consume the retry budget.
+            unanswered = sum(1 for steer in project.steers if not steer.answer)
+            if unanswered and checkpoint.unprompted_attempts < MAX_UNPROMPTED_DECIDE_RUNS:
+                changes.append(f"steers:pending:{unanswered}")
         if len(project.findings) > checkpoint.finding_count:
             changes.append(f"findings:{checkpoint.finding_count}->{len(project.findings)}")
         if checkpoint.open_step_count > 0 and open_step_count == 0:

@@ -79,27 +79,33 @@ class CheckpointsMixin:
             hint_count = len(project.hints)
             finding_count = len(project.findings)
             open_step_count = self._project_open_step_count(project)
-            previous = self.decide_checkpoints.get(project_id)
-            unprompted_attempts = 0
-            if previous is not None and (
-                previous.fact_count,
-                previous.hint_count,
-                previous.finding_count,
-                previous.open_step_count,
-            ) == (
+            steer_count = len(project.steers)
+            counts = (
                 fact_count,
                 hint_count,
                 finding_count,
                 open_step_count,
-            ):
-                # Graph changed -> the budget starts over; a no-change run keeps the
-                # attempts it already spent so a stuck graph cannot spin forever.
+                steer_count,
+            )
+            previous = self.decide_checkpoints.get(project_id)
+            unprompted_attempts = 0
+            previous_counts = previous and (
+                previous.fact_count,
+                previous.hint_count,
+                previous.finding_count,
+                previous.open_step_count,
+                previous.steer_count,
+            )
+            if previous_counts == counts:
+                # No change -> keep the attempts already spent, so a graph that
+                # never changes cannot spin forever. A real change resets the budget.
                 unprompted_attempts = previous.unprompted_attempts
             checkpoint = DecideCheckpoint(
                 fact_count=fact_count,
                 hint_count=hint_count,
                 finding_count=finding_count,
                 open_step_count=open_step_count,
+                steer_count=steer_count,
                 unprompted_attempts=unprompted_attempts,
             )
             self.decide_checkpoints[project_id] = checkpoint
