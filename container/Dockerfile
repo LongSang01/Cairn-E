@@ -118,13 +118,12 @@ RUN set -eux; \
 
 ENV TZ=Asia/Shanghai
 ENV GH_PROXY=${GH_PROXY}
-ENV PLAYWRIGHT_MCP_BROWSER=chromium
 ENV PYTHONUNBUFFERED=1
 
+# pi 会读取工作目录的 AGENTS.md，并递归加载 .agents/skills（见 pi docs/sdk.md），
+# 所以同一份内容不再复制成 CLAUDE.md，否则上下文会被加载两遍。
 COPY --chown=agent:agent ./.agents /home/agent/workspace/.agents
-COPY --chown=agent:agent ./.agents /home/agent/workspace/.claude
 COPY --chown=agent:agent ./AGENTS.md /home/agent/workspace/AGENTS.md
-COPY --chown=agent:agent ./AGENTS.md /home/agent/workspace/CLAUDE.md
 
 USER agent
 WORKDIR /home/agent/workspace

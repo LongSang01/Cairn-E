@@ -25,7 +25,7 @@ Dispatcher 是 FGS 图的**唯一写入者**。它观察图、选出该发生的
 
 - **Cairn Server**：图的读写与一致性（见 `server-protocol.md`）。
 - **Dispatcher**：轮询项目摘要、抢占租约、构造提示词、执行 CLI、校验输出、写回图。
-- **Worker**：Claude Code / Codex / Pi / Mock；容器模式下每个项目一个容器，本地模式下直接跑在宿主机。
+- **Worker**：Pi / Mock；容器模式下每个项目一个容器，本地模式下直接跑在宿主机。
 
 ### 执行主链路
 
@@ -86,8 +86,8 @@ local:
   workspace_root: null
   completed_action: keep        # keep | remove
 workers:
-  - name: claudecode-a
-    type: claudecode            # claudecode | codex | pi | mock
+  - name: pi-a
+    type: pi                    # pi | mock
     task_types: [decide, execute]
     max_running: 2
     priority: 0
@@ -109,7 +109,7 @@ workers:
 
 只读和修改图：评估 Step、添加 / 废弃 / 调整优先级、提出和关闭子 Goal、宣告根 Goal 达成。没有任何作用于世界的工具。
 
-权限边界由契约保证：Decide 的输出即使包含世界操作也会被忽略，Dispatcher 只应用图变更。若需要进程级隔离，可在驱动层进一步限制 CLI 可用工具（`claude` / `codex` / `pi` 各自提供工具白名单），但这不属于协议要求。
+权限边界由契约保证：Decide 的输出即使包含世界操作也会被忽略，Dispatcher 只应用图变更。若需要进程级隔离，可在驱动层进一步限制 CLI 可用工具（pi 提供 `--tools` 白名单），但这不属于协议要求。
 
 #### 触发条件
 
@@ -306,7 +306,7 @@ snapshot_tokens = max(min_snapshot_tokens, input_budget - overhead_tokens)
 | 字段 | 说明 |
 |------|------|
 | `name` | 唯一名称，出现在租约与日志里 |
-| `type` | `claudecode` / `codex` / `pi` / `mock` |
+| `type` | `pi` / `mock` |
 | `task_types` | 该 worker 可承担的活动 |
 | `max_running` | 该 worker 并发上限 |
 | `priority` | 越小越优先；同优先级看当前负载 |
@@ -339,7 +339,7 @@ Agent CLI 只需满足三点：
 
 1. 能从 argv 接收完整提示词；
 2. 最终把结构化 JSON 打到 stdout（允许夹杂文本 / markdown 代码块）；
-3. 最好以流式 JSON 输出过程事件（claudecode `--output-format stream-json --verbose`、codex `exec --json`、pi `--mode json`），否则 Session 里只留得下最终回答。
+3. 最好以流式 JSON 输出过程事件（`pi --mode json`），否则 Session 里只留得下最终回答。
 
 Dispatcher 负责从输出中提取最终回答（`extract_response_text`），并把事件流展开成对话记录（`session.build_messages`）。降级路径始终保留：拿不到结构化事件时，原始 stdout / stderr 会作为一条 `tool` 消息写入 Session。
 
@@ -388,7 +388,7 @@ cairn/src/cairn/dispatcher/prompts/
 
 - 每个项目一个工作目录 `<workspace_root>/<project_id>/`；
 - 图快照写到宿主机临时目录；
-- 复用宿主机已登录的 `claude` / `codex` / `pi`；
+- 复用宿主机已登录的 `pi`；
 - 没有沙箱，只应在有授权的环境使用。
 
 ## 已知限制

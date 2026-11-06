@@ -415,7 +415,7 @@ Session 记录一次 worker 运行中模型看到的输入和它的输出，用�
 - `message_count` 是该会话已有的消息数，列表接口也会带上，便于显示"增长中"的进度。
 - `summary` 是一行"这次运行要做什么"：Execute 取 Step 的标题（没有标题时取描述），Decide 取待办步骤数，例如 `决策下一步（3 个待办步骤）`。会话列表不用展开 transcript 就能分辨每次运行。创建时写入，最多 300 字符；旧会话没有这个字段，读作空串。
 - 用量字段：`input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_write_tokens` / `total_tokens`。由 dispatcher 从 worker CLI 的输出里解析，创建与收尾时都接受；CLI 不报用量时全部为 0，绝不估算。`total_tokens` 取各分量之和与 CLI 自报总量的较大值。
-- 四个分量互不重叠：`cache_read_tokens` 是独立的缓存命中量。像 codex 这类把缓存算进 `input_tokens` 的 CLI，dispatcher 会先减掉再上报，避免项目总量重复计数。
+- 四个分量互不重叠：`cache_read_tokens` 是独立的缓存命中量。OpenAI 风格接口把缓存命中算进 `input_tokens`，dispatcher 会先减掉再上报，避免项目总量重复计数。
 
 写入分四步：跑之前创建（`status: running` + prompt 消息）、跑的过程中追加消息、长时间没有输出时发心跳、结束后用 PATCH 收尾。`running` 会话若 60 秒内没有任何追加或心跳，会被读接口判定为失败（`error` 为 `dispatcher stopped before the run finished`）—— dispatcher 被杀掉时不会留下永远 `running` 的会话。
 
@@ -477,15 +477,15 @@ worker 长时间没有输出（例如跑一个很慢的命令）时，dispatcher
 
 `role` ∈ `system` | `user` | `assistant` | `thinking` | `tool_call` | `tool_result` | `tool`。写入前 dispatcher 会遮蔽 `sk-*`、`Bearer *`、`*_API_KEY=*` 一类的凭据。
 
-记录的是完整过程，而不是只留最终回答：dispatcher 让每个 worker CLI 以流式 JSON 输出（claudecode `--output-format stream-json --verbose`、codex `exec --json`、pi `--mode json`），再把事件流展开成逐条消息：
+记录的是完整过程，而不是只留最终回答：dispatcher 让 worker CLI 以流式 JSON 输出（`pi --mode json`），再把事件流展开成逐条消息：
 
 - `assistant` / `user`：消息里的 text 块，一段一块。
-- `thinking`：`thinking` / `reasoning` 块，或 codex 的 reasoning item。
+- `thinking`：`thinking` 块。
 - `tool_call`：一次工具调用，第一行是工具名，第二行是命令/路径/pattern 等关键参数。
 - `tool_result`：工具回填的内容，带 `[exit N]` 前缀；单条上限 8000 字符，其余消息单条上限 20000 字符，单会话最多 1000 条。
 - `tool`：整条输出里没有任何可识别事件时的兜底，保留原始 stdout/stderr。
 
-重复事件（pi 的 `turn_end` / `agent_end` 会重放消息、claude 的 `result` 会重复最后一条回答、CLI 回显 prompt）会按内容去重。
+重复事件（`turn_end` / `agent_end` 会重放消息、CLI 回显 prompt）会按内容去重。
 
 #### GET /projects/{project_id}/sessions
 

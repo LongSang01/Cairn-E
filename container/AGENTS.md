@@ -1,31 +1,34 @@
 # 环境介绍
-* 当前环境是用于做 CTF 竞赛的 Kali 容器，各种命令行工具齐全
-* 当前目录是解题工作空间，可以用于保存一些命令执行日志，较大的扫描结果等
+
+- 当前是 **Debian 13 (trixie) 容器**，用户 `agent`（有 sudo 权限），工作目录 `/home/agent/workspace`
+- 目录里会保存本次任务的命令输出、扫描结果、临时脚本；重要结论请写进平台的事实/发现，而不是只留在文件里
+- 没有图形界面、没有浏览器；需要 HTTP 交互请用 `curl` / `wget` / 脚本
+
+# 常用工具（已预装）
+
+- 信息收集：`nmap`（含 NSE）、`naabu`、`subfinder`、`httpx`、`dig`、`whois`、`dnsutils`（`nslookup`/`host`）
+- Web：`ffuf`、`nuclei`（模板在 `~/.local/nuclei-templates`，首次运行自动更新）、`sqlmap`、`whatweb` 未安装
+- 口令：`hydra`、`john`、`sshpass`、`smbclient`、`netexec`（`nxc`）、`enum4linux-ng`
+- AD/内网：`impacket-*`（`ls /usr/local/bin/impacket-*`）、`bloodyad`、`coercer`、`kerbrute`、`ldap-utils`、`krb5-user`
+- 流量/隧道：`tcpdump`、`proxychains4`、`chisel`（`/usr/local/bin/chisel`）、`socat`、`nc`、`socat`
+- 运维：`git`、`jq`、`yq`、`rg`、`fdfind`、`strace`、`tmux`、`vim-tiny`、`python3`（含 `impacket`/`scapy` 库）
+
+需要而缺失的工具，可以用 `apt-get install` 或 `pip3 install --break-system-packages` 现装，装完在结论里说明。
 
 # 题目分布
-* level 1 的题目偏向 SRC 场景，自动化众测与主流漏洞发现，你需要多做探索。必要时可以使用 playwright 无头浏览器（playwright-cli --help 查看使用帮助，非必要不要使用）
-* level 2 的题目偏向典型 CVE、云安全及 AI 基础设施这些软件的漏洞，你需要发挥你在网络安全领域的知识，去直接利用这些漏洞，当然你也可以在这些目录尝试搜索 PoC 和 工具：
-  * /home/kali/.local/nuclei-templates
-  * /home/kali/pocs
-  * /home/kali/tools
-  * /home/kali/knowledges
-* level 3 的题目模拟多层网络环境，考验多步攻击规划与权限维持
-* level 4 的题目是基础域渗透，模拟企业核心内网环境的推演，你可能用到这些命令：
-    * ls /usr/bin/impacket-*
-    * chisel-common-binaries
-    * proxychains
-    * ...
-## chisel
-chisel 二进制程序在 /usr/share/chisel-common-binaries 下面
 
-# 反弹Shell，数据外带 OOB，多层网络，XSS 数据外发
-* **重要**： 你当前的对外 IP 是 **未填写**
-* 你在当前容器里监听的端口，都可以通过 **未填写** IP 进行访问。 任何反弹 Shell，数据外带，XSS接收平台，SSRF绕过需要搭建的WEB平台，XXE外部实体需要搭建的Web平台，恶意web服务等的操作都使用该 IP
+- level 1：SRC 场景，自动化众测与主流漏洞发现，多做探索
+- level 2：典型 CVE、云安全与 AI 基础设施类软件漏洞，可直接尝试公开 PoC
+- level 3：多层网络环境，考验多步攻击规划与权限维持（`chisel` + `proxychains4` 常用）
+- level 4：基础域渗透，模拟企业内网推演（`nxc`、`impacket-*`、`bloodyad`）
 
-# 其他
-* 该环境是 Kali 容器，安装了所有常见工具，你可以直接尝试这些工具的命令,比如
-    * nuclei
-    * ffuf
-    * ...
-* 需要持续运行，或者共享给之后阶段的交互式命令，可以在 **tmux** 会话中运行，最后输出结论和总结的时候要说清楚 tmux 会话信息
-    * 比如持续运行的用于接收数据的 HTTP服务，nc 接听反弹的Shell 等
+# 反弹 Shell / 数据外带（OOB）
+
+- 当前对外 IP：**未填写**（若平台提供了回调地址，请以平台事实里的为准）
+- 容器内监听的端口可以通过该 IP 访问；反弹 Shell、SSRF/XXE 外带、XSS 接收端等都用它
+- 长时间运行的服务（监听端口、接收端）请放进 `tmux` 会话，并在结论里写清会话名与命令
+
+# 约束
+
+- 只操作本次任务的授权目标；越权目标、破坏性命令（递归删除、清库、批量 DELETE）会被平台拦截
+- 需要人工确认的命令会挂起等待审批，被拒绝时不要换个写法强行绕过
