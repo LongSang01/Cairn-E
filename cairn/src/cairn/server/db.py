@@ -381,7 +381,7 @@ def _migration_004_tool_guard(conn: sqlite3.Connection) -> None:
     conn.executemany(
         """
         INSERT INTO tool_rules (
-            target, match_type, pattern, action, priority, message, timeout_seconds,
+            target, match_type, pattern, action, message, priority, timeout_seconds,
             timeout_action, enabled
         ) VALUES (?, ?, ?, 'deny', ?, ?, 60, 'deny', 1)
         """,

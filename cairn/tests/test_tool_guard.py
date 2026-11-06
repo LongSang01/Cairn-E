@@ -79,6 +79,20 @@ def test_builtin_deny_rule_blocks_and_names_the_platform(client: TestClient) -> 
     assert body["decision"] == "deny"
     # The wording must not read like the target defended itself.
     assert body["reason"].startswith("【Cairn 平台管控·非目标防御】")
+    # The human-readable message, not the numeric priority, must reach the reason.
+    assert "递归删除" in body["reason"]
+
+
+def test_seeded_rules_keep_priority_and_message_apart(client: TestClient) -> None:
+    _project(client)
+
+    with db.get_conn() as conn:
+        rows = conn.execute("SELECT priority, message FROM tool_rules").fetchall()
+
+    assert rows
+    for row in rows:
+        assert isinstance(row["priority"], int)
+        assert row["message"] and not str(row["message"]).isdigit()
 
 
 def test_scope_rule_blocks_government_domains(client: TestClient) -> None:
