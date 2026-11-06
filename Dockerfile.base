@@ -1,0 +1,66 @@
+# Shared base image for both Cairn images.
+#
+#   cairn-base  ->  cairn-app              (server + dispatcher, see ./Dockerfile)
+#               ->  cairn-worker-container (agent sandbox,   see ./container/Dockerfile)
+#
+# Only things both sides need and that rarely change belong here: the Debian
+# runtime, one system Python (>= 3.12 as required by cairn/pyproject.toml), the
+# uv/uvx binaries, and the mirror configuration. Tools, npm CLIs and the agent
+# user stay in the derived images so a tool bump does not invalidate both.
+#
+# Build: docker build -f Dockerfile.base -t cairn-base:latest .
+#
+# Pinned so both derived images always share one uv build. The uv stage only
+# contributes the two binaries: the upstream image ships its own Python and we
+# deliberately keep Debian's.
+ARG UV_VERSION=0.13.7
+FROM --platform=amd64 ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
+FROM --platform=amd64 debian:trixie-slim
+
+# Mirror knobs. Production can override every one of them with --build-arg;
+# direct-connection environments pass the official URLs.
+ARG APT_MIRROR=http://mirrors.ustc.edu.cn/debian
+ARG APT_SECURITY_MIRROR=http://mirrors.ustc.edu.cn/debian-security
+ARG PIP_INDEX=https://mirrors.ustc.edu.cn/pypi/simple
+
+# Debian 13 uses deb822 sources. Replace security first, otherwise the shorter
+# main-repo prefix would eat it.
+RUN set -eux; \
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources; do \
+        [ -f "$f" ] || continue; \
+        sed -i -E \
+            -e "s#https?://deb\.debian\.org/debian-security#${APT_SECURITY_MIRROR}#g" \
+            -e "s#https?://deb\.debian\.org/debian#${APT_MIRROR}#g" \
+            "$f"; \
+    done; \
+    grep -rh "URIs\|^deb " /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true
+
+# Debian's own Python is the single interpreter for both images. The worker's
+# tooling (impacket, scapy, NetExec, ...) is installed with
+# `pip3 --break-system-packages` against /usr/local, which only stays coherent
+# when `python3` keeps pointing at /usr/bin/python3.
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates curl tzdata \
+      python3 python3-pip python3-venv; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
+
+# pip mirror for anything the derived images install with pip3.
+RUN set -eux; \
+    printf '%s\n' \
+      '[global]' \
+      "index-url = ${PIP_INDEX}" \
+      'trusted-host = mirrors.ustc.edu.cn' \
+      > /etc/pip.conf
+
+# Only the binaries from the pinned uv stage above.
+COPY --from=uv /uv /uvx /usr/local/bin/
+
+ENV TZ=Asia/Shanghai
+ENV PIP_INDEX_URL=${PIP_INDEX}
+# Never let uv download a private interpreter: the derived images must run the
+# same /usr/bin/python3 the worker tooling uses.
+ENV UV_PYTHON_DOWNLOADS=never

@@ -3,6 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Shared base image, built first with `make base`.
+        CAIRN_BASE_IMAGE: cairn-base:latest
     image: cairn-app
     container_name: cairn-server
     # Browser traffic goes through cairn-nginx (Basic Auth); the server is
@@ -14,7 +17,7 @@ services:
     healthcheck:
       test:
         - "CMD"
-        - "python"
+        - "python3"
         - "-c"
         - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/projects', timeout=5)"
       interval: 10s
@@ -48,6 +51,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        CAIRN_BASE_IMAGE: cairn-base:latest
     image: cairn-app
     container_name: cairn-dispatcher
     volumes:

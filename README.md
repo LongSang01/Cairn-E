@@ -10,11 +10,19 @@
 
 ### Docker Compose (已验证)
 
-```bash
-docker pull ghcr.io/astral-sh/uv:python3.13-trixie-slim
-docker build -t cairn-worker-container:latest ./container
-```
+系统镜像与 worker 镜像共用同一个基础镜像 `cairn-base`，必须按顺序构建：
 
 ```bash
+make base                      # cairn-base:latest
+make worker                    # cairn-worker-container:latest（dispatcher 使用）
+make app                       # cairn-app（server + dispatcher 使用）
+```
+
+或者一次做完：
+
+```bash
+make all
 docker compose up --build
 ```
+
+只重建系统镜像时 `make app` 即可；`docker compose up --build` 不会自动构建 base。
