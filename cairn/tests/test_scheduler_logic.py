@@ -532,6 +532,41 @@ def test_cancelled_execute_does_not_count_as_a_step_failure() -> None:
     assert loop.step_failures == {}
 
 
+def _checkpoint_matching(project) -> DecideCheckpoint:
+    """A checkpoint that matches the project, so the tick goes to Execute, not Decide."""
+    return DecideCheckpoint(
+        fact_count=len(project.facts),
+        hint_count=len(project.hints),
+        finding_count=len(project.findings),
+        open_step_count=len([step for step in project.steps if step.kind == "action"]),
+    )
+
+
+def test_one_step_is_dispatched_per_tick_by_default() -> None:
+    """max_running_steps=1 keeps the historical serial behaviour."""
+    project = make_project(steps=[make_step("s001"), make_step("s002")])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.decide_checkpoints["proj_001"] = _checkpoint_matching(project)
+
+    loop._try_dispatch_project(_summary("proj_001", "active"))
+
+    assert len(dispatched) == 1
+
+
+def test_slots_fill_up_to_max_running_steps() -> None:
+    project = make_project(steps=[make_step("s001"), make_step("s002"), make_step("s003")])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.config = make_config({"max_running_steps": 2})
+    loop.decide_checkpoints["proj_001"] = _checkpoint_matching(project)
+
+    loop._try_dispatch_project(_summary("proj_001", "active"))
+
+    # Highest priority first; equal priority falls back to the newest id.
+    assert [step_id for _kind, step_id in dispatched] == ["s003", "s002"]
+
+
 def test_a_stuck_step_is_handed_back_to_decide_instead_of_being_rerun() -> None:
     """proj_009: s062 timed out four times because nothing capped the blind retries.
 

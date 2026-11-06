@@ -179,11 +179,33 @@ class DispatchMixin:
             step for step in pending_steps if not self._step_attempts_exhausted(summary.id, step.id)
         ]
         if dispatchable_steps:
-            next_step = max(
-                dispatchable_steps, key=lambda step: (step.priority, step.created_at, step.id)
+            # Steps are independent unless they touch the same asset, and the graph
+            # cannot express that yet, so concurrency is a per-project slot count:
+            # keep at most `max_running_steps` Execute runs in flight and fill them
+            # by priority. The default of 1 preserves the old serial behaviour.
+            slots = self.config.runtime.max_running_steps
+            free = slots - len(running_step_ids)
+            if free <= 0:
+                self._log_changed(
+                    f"{skip_scope}:execute_slots_full",
+                    logging.DEBUG,
+                    "skip execute project=%s because %s/%s slots are running",
+                    summary.id,
+                    len(running_step_ids),
+                    slots,
+                )
+                return False
+            ordered = sorted(
+                dispatchable_steps,
+                key=lambda step: (step.priority, step.created_at, step.id),
+                reverse=True,
             )
             export_yaml = self.client.export_project(summary.id)
-            return self._dispatch_execute(project, export_yaml, next_step)
+            dispatched = False
+            for step in ordered[:free]:
+                if self._dispatch_execute(project, export_yaml, step):
+                    dispatched = True
+            return dispatched
         if pending_steps:
             # Every remaining step already burned its attempts; Decide is the only one
             # that may re-route or abandon them, so do not spend another run here.

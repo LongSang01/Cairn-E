@@ -18,6 +18,9 @@ runtime:
   max_running_projects: 3
   # Per-project worker cap. Prevents one project from monopolizing the whole dispatcher.
   max_project_workers: 4
+  # Per-project concurrent Execute runs. Keep 1 unless the steps touch different
+  # assets; worker.max_running must also allow it, and SQLite writes are serialized.
+  max_running_steps: 1
   # Timeout for each enabled worker healthcheck.
   healthcheck_timeout: 20
   # "startup_and_task" checks at dispatcher startup and before every task.

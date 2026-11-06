@@ -175,6 +175,10 @@ class RuntimeConfig(BaseModel):
     max_workers: int = Field(gt=0)
     max_running_projects: int = Field(gt=0)
     max_project_workers: int = Field(gt=0)
+    # Concurrent Execute runs per project. 1 keeps the historical serial behaviour;
+    # raise it only when the steps touch different assets, because the graph cannot
+    # express "these two steps would fight over the same login endpoint".
+    max_running_steps: int = Field(ge=1, default=1)
     interval: int = Field(gt=0)
     healthcheck_timeout: int = Field(gt=0)
     worker_healthcheck: WorkerHealthcheckMode = "startup_only"
