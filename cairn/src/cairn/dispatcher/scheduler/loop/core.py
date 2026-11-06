@@ -191,7 +191,7 @@ class CoreMixin:
             )
         LOG.warning(
             "[!] Local mode uses each CLI's own host config: make sure %s already logged in / "
-            "configured and usable directly (e.g. `claude -p ...` works) — Cairn injects no API keys.",
+            "configured and usable directly (e.g. `pi -p ...` works) — Cairn injects no API keys.",
             ", ".join(sorted(available)),
         )
 

@@ -16,8 +16,8 @@ class LocalBackend:
 
     Each project gets an isolated working directory under ``workspace_root`` (defaulting
     to the directory the dispatcher was started in). Worker processes inherit the host
-    environment so the pre-configured ``claude`` / ``codex`` / ``pi`` CLIs and their
-    credentials are used as-is; no API keys are injected. There are no containers to
+    environment so the pre-configured ``pi`` CLI and its credentials are used as-is;
+    no API keys are injected. There are no containers to
     build or tear down, so the container-lifecycle methods are inert.
     """
 

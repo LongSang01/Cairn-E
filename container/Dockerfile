@@ -96,12 +96,9 @@ RUN set -eux; cd /tmp; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /tmp/netexec /tmp/e4l
 
-# 三个 agent CLI 才是这个镜像作为 worker 的核心。
+# pi 是唯一保留的 agent CLI（codex / claude-code 已从代码与镜像中移除）。
 RUN npm config set registry "${NPM_REGISTRY}" \
- && npm install -g \
-      @openai/codex@0.118.0 \
-      @anthropic-ai/claude-code@2.1.98 \
-      @mariozechner/pi-coding-agent@0.73.0 \
+ && npm install -g @mariozechner/pi-coding-agent@0.73.0 \
  && npm cache clean --force
 
 RUN set -eux; \
@@ -120,7 +117,6 @@ RUN set -eux; \
 ENV TZ=Asia/Shanghai
 ENV GH_PROXY=${GH_PROXY}
 ENV PLAYWRIGHT_MCP_BROWSER=chromium
-ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 ENV PYTHONUNBUFFERED=1
 
 COPY --chown=agent:agent ./.agents /home/agent/workspace/.agents

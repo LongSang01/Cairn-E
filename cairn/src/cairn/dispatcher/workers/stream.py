@@ -1,7 +1,6 @@
 """Helpers for the JSON event streams that agent CLIs print in streaming modes.
 
-claude-code (`--output-format stream-json`), codex (`exec --json`) and pi
-(`--mode json`) all emit newline-delimited JSON events. The dispatcher uses
+pi (`--mode json`) emits newline-delimited JSON events. The dispatcher uses
 these helpers to keep the answer extraction and the transcript building on the
 same parsing rules.
 """

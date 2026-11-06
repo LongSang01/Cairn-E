@@ -4,8 +4,6 @@ import requests
 
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
 from cairn.dispatcher.runtime.startup_healthcheck import run_startup_healthchecks
-from cairn.dispatcher.workers.adapters.claudecode import ClaudeCodeDriver
-from cairn.dispatcher.workers.adapters.codex import CodexDriver
 from cairn.dispatcher.workers.adapters.mock import MockDriver
 from cairn.dispatcher.workers.adapters.pi import PiDriver
 from cairn.dispatcher.workers.health import http_ping, proxies_from_env
@@ -82,34 +80,6 @@ def _worker(worker_type: str, env: dict[str, str]) -> WorkerConfig:
     )
 
 
-def test_claudecode_check_health_hits_messages_with_bearer(monkeypatch) -> None:
-    captured = _capture_post(monkeypatch, _Resp(200))
-    worker = _worker(
-        "claudecode",
-        {"ANTHROPIC_BASE_URL": "http://api", "ANTHROPIC_AUTH_TOKEN": "tok", "ANTHROPIC_MODEL": "m"},
-    )
-
-    result = ClaudeCodeDriver().check_health(worker, timeout=7)
-
-    assert result.ok
-    assert captured["url"] == "http://api/v1/messages"
-    assert captured["headers"]["Authorization"] == "Bearer tok"
-    assert captured["json"]["model"] == "m"
-    assert captured["timeout"] == 7
-
-
-def test_codex_check_health_hits_responses(monkeypatch) -> None:
-    captured = _capture_post(monkeypatch, _Resp(200))
-    worker = _worker(
-        "codex", {"CODEX_BASE_URL": "http://api/v1", "OPENAI_API_KEY": "k", "CODEX_MODEL": "m"}
-    )
-
-    CodexDriver().check_health(worker, timeout=5)
-
-    assert captured["url"] == "http://api/v1/responses"
-    assert captured["headers"]["Authorization"] == "Bearer k"
-
-
 def test_pi_check_health_openai_completions_uses_chat_completions(monkeypatch) -> None:
     captured = _capture_post(monkeypatch, _Resp(200))
     worker = _worker(
@@ -148,16 +118,17 @@ def test_pi_check_health_anthropic_uses_messages(monkeypatch) -> None:
 def test_check_health_uses_worker_proxy(monkeypatch) -> None:
     captured = _capture_post(monkeypatch, _Resp(200))
     worker = _worker(
-        "claudecode",
+        "pi",
         {
-            "ANTHROPIC_BASE_URL": "http://api",
-            "ANTHROPIC_AUTH_TOKEN": "t",
-            "ANTHROPIC_MODEL": "m",
+            "PI_BASE_URL": "http://api",
+            "PI_API_KEY": "k",
+            "PI_MODEL": "m",
+            "PI_PROVIDER_API": "anthropic-messages",
             "https_proxy": "http://127.0.0.1:7897",
         },
     )
 
-    ClaudeCodeDriver().check_health(worker, timeout=5)
+    PiDriver().check_health(worker, timeout=5)
 
     assert captured["proxies"] == {"https": "http://127.0.0.1:7897"}
 

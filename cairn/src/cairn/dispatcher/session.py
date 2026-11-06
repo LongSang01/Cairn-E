@@ -38,8 +38,8 @@ UPLOAD_RETRY_BACKOFF_SECONDS = 0.25
 HEARTBEAT_INTERVAL_SECONDS = 5.0
 
 # Replayed events repeat what an earlier event already carried (pi's turn_end /
-# agent_end repeat the messages, claude's result repeats the last answer).
-_REPLAY_EVENT_TYPES = ("turn_end", "agent_end", "result")
+# agent_end repeat the messages).
+_REPLAY_EVENT_TYPES = ("turn_end", "agent_end")
 
 # Keys that usually hold the interesting part of a tool call's input.
 _TOOL_INPUT_KEYS = ("command", "cmd", "file_path", "path", "pattern", "query", "url", "description")
@@ -189,79 +189,12 @@ def _blocks_to_messages(role: str, content: Any) -> list[dict[str, Any]]:
     return messages
 
 
-def _item_messages(item: Any) -> list[dict[str, Any]]:
-    """Parse one stream item (codex `item.*`, or a generic tool event)."""
-    if not isinstance(item, dict):
-        return []
-    kind = item.get("type")
-    if kind is None and "role" in item:
-        return _blocks_to_messages(_normalize_role(item.get("role")), item.get("content"))
-    if kind in ("reasoning", "thinking"):
-        return _text_message("thinking", item.get("text") or item.get("content"))
-    if kind in ("agent_message", "assistant_message"):
-        return _blocks_to_messages(
-            "assistant", item.get("text") if item.get("text") is not None else item.get("content")
-        )
-    if kind == "user_message":
-        return _blocks_to_messages(
-            "user", item.get("text") if item.get("text") is not None else item.get("content")
-        )
-    if kind in ("tool_use", "function_call"):
-        return _tool_call_messages(
-            item.get("name") or item.get("tool"),
-            item.get("input") if "input" in item else item.get("arguments"),
-        )
-    if kind in ("tool_result", "tool_output", "function_call_output"):
-        return _tool_result_messages(
-            item.get("content") if "content" in item else item.get("output")
-        )
-    if kind == "command_execution":
-        messages = _tool_call_messages(
-            item.get("name") or "bash", {"command": item.get("command") or ""}
-        )
-        messages.extend(
-            _tool_result_messages(
-                item.get("aggregated_output") or item.get("output"), item.get("exit_code")
-            )
-        )
-        return messages
-    if kind == "file_change":
-        changes = [change for change in (item.get("changes") or []) if isinstance(change, dict)]
-        summary = "\n".join(
-            " ".join(
-                part
-                for part in (str(change.get("kind") or "edit"), str(change.get("path") or ""))
-                if part
-            )
-            for change in changes
-        )
-        return _tool_call_messages("apply_patch", summary or item.get("path") or item.get("text"))
-    if kind == "mcp_tool_call":
-        name = ".".join(
-            str(part) for part in (item.get("server"), item.get("tool") or item.get("name")) if part
-        )
-        messages = _tool_call_messages(
-            name or "mcp", item.get("arguments") if "arguments" in item else item.get("input")
-        )
-        result = item.get("result")
-        if isinstance(result, dict) and "content" in result:
-            messages.extend(_tool_result_messages(result.get("content")))
-        elif result is not None:
-            messages.extend(_tool_result_messages(_flatten(result)))
-        return messages
-    if kind == "web_search":
-        return _tool_call_messages("web_search", {"query": item.get("query")})
-    if kind == "error":
-        return _text_message("system", item.get("message") or item.get("text"))
-    return []
-
-
 def _event_messages(event: dict[str, Any]) -> list[dict[str, Any]]:
     kind = event.get("type")
     if not isinstance(kind, str):
         return []
 
-    # claude stream-json: {"type":"assistant","message":{"role":..,"content":[..]}}
+    # Generic message envelope: {"type":"<role>","message":{"role":..,"content":[..]}}.
     if kind in ("assistant", "user"):
         message = event.get("message")
         if not isinstance(message, dict):
@@ -269,7 +202,7 @@ def _event_messages(event: dict[str, Any]) -> list[dict[str, Any]]:
         role = _normalize_role(message.get("role"), _normalize_role(kind))
         return _blocks_to_messages(role, message.get("content"))
 
-    # pi --mode json and the generic event shape used by older workers.
+    # pi --mode json: {"type":"message","message":{"role":..,"content":[..]}}
     if kind in ("message", "message_end"):
         message = event.get("message")
         if not isinstance(message, dict):
@@ -304,14 +237,6 @@ def _event_messages(event: dict[str, Any]) -> list[dict[str, Any]]:
                 messages.extend(_tool_result_messages(entry.get("result")))
         return messages
 
-    if kind == "item":
-        return _item_messages(event.get("item"))
-    if kind == "item.completed":
-        return _item_messages(event.get("item"))
-    if kind in ("item.started", "item.updated"):
-        # The matching `item.completed` carries the same payload plus the result.
-        return []
-
     if kind == "tool_execution_start":
         return _tool_call_messages(
             event.get("toolName") or event.get("tool_name"),
@@ -323,12 +248,6 @@ def _event_messages(event: dict[str, Any]) -> list[dict[str, Any]]:
             result.get("content") if isinstance(result, dict) and "content" in result else result
         )
         return _tool_result_messages(output)
-
-    # claude stream-json: {"type":"result","result":"final answer","is_error":false}
-    if kind == "result":
-        return _text_message(
-            "system" if event.get("is_error") else "assistant", event.get("result")
-        )
 
     if kind in ("error", "turn.failed"):
         error = event.get("error")

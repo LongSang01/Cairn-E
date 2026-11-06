@@ -229,137 +229,24 @@ def test_build_messages_falls_back_to_raw_output() -> None:
     assert "boom output" in messages[1]["content"]
 
 
-def test_build_messages_expands_claude_stream_json() -> None:
-    stdout = "\n".join(
-        [
-            json.dumps({"type": "system", "subtype": "init", "session_id": "s1"}),
-            json.dumps(
-                {
-                    "type": "assistant",
-                    "message": {
-                        "role": "assistant",
-                        "content": [
-                            {"type": "thinking", "thinking": "先看看工作目录"},
-                            {"type": "text", "text": "我先列出文件"},
-                            {
-                                "type": "tool_use",
-                                "id": "t1",
-                                "name": "Bash",
-                                "input": {"command": "ls -la"},
-                            },
-                        ],
-                    },
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "user",
-                    "message": {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": "t1",
-                                "content": [{"type": "text", "text": "a.txt"}],
-                            }
-                        ],
-                    },
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "assistant",
-                    "message": {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": '{"accepted":true,"data":{}}'}],
-                    },
-                }
-            ),
-            json.dumps(
-                {"type": "result", "subtype": "success", "result": '{"accepted":true,"data":{}}'}
-            ),
-        ]
-    )
-
-    messages = build_messages("do the thing", ProcessResult(returncode=0, stdout=stdout, stderr=""))
-
-    assert [m["role"] for m in messages] == [
-        "user",
-        "thinking",
-        "assistant",
-        "tool_call",
-        "tool_result",
-        "assistant",
-    ]
-    assert messages[0]["content"] == "do the thing"
-    assert messages[3]["content"] == "Bash\nls -la"
-    assert messages[4]["content"] == "a.txt"
-    # The trailing `result` event repeats the last answer and must not duplicate it.
-    assert messages[-1]["content"] == '{"accepted":true,"data":{}}'
-
-
-def test_build_messages_expands_codex_json_items() -> None:
-    stdout = "\n".join(
-        [
-            json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
-            json.dumps({"type": "turn.started"}),
-            json.dumps(
-                {
-                    "type": "item.completed",
-                    "item": {"type": "reasoning", "text": "need to list files"},
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "item.started",
-                    "item": {"type": "command_execution", "command": "ls", "status": "in_progress"},
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "item.completed",
-                    "item": {
-                        "type": "command_execution",
-                        "command": "ls",
-                        "aggregated_output": "a.txt",
-                        "exit_code": 0,
-                        "status": "completed",
-                    },
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "item.completed",
-                    "item": {"type": "agent_message", "text": '{"accepted":true}'},
-                }
-            ),
-            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 12}}),
-        ]
-    )
-
-    messages = build_messages("go", ProcessResult(returncode=0, stdout=stdout, stderr=""))
-
-    assert [m["role"] for m in messages] == [
-        "user",
-        "thinking",
-        "tool_call",
-        "tool_result",
-        "assistant",
-    ]
-    assert messages[2]["content"] == "bash\nls"
-    assert messages[3]["content"] == "[exit 0]\na.txt"
-
-
 def test_build_messages_truncates_long_tool_output() -> None:
-    stdout = json.dumps(
-        {
-            "type": "item.completed",
-            "item": {
-                "type": "command_execution",
-                "command": "cat big",
-                "aggregated_output": "x" * 20000,
-            },
-        }
+    stdout = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "tool_execution_start",
+                    "toolName": "bash",
+                    "args": {"command": "cat big"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_execution_end",
+                    "toolName": "bash",
+                    "result": {"content": [{"type": "text", "text": "x" * 20000}]},
+                }
+            ),
+        ]
     )
     messages = build_messages("go", ProcessResult(returncode=0, stdout=stdout, stderr=""))
     tool_output = messages[-1]
@@ -436,8 +323,10 @@ def test_session_stream_appends_while_the_worker_runs() -> None:
     assert _wait_for(lambda: bool(client.appended))
     assert [message["role"] for message in client.appended[0]] == ["assistant"]
 
+    stream.feed('{"type":"tool_execution_start","toolName":"bash","args":{"command":"ls"}}\n')
     stream.feed(
-        '{"type":"item.completed","item":{"type":"command_execution","command":"ls","aggregated_output":"a.txt"}}\n'
+        '{"type":"tool_execution_end","toolName":"bash",'
+        '"result":{"content":[{"type":"text","text":"a.txt"}]}}\n'
     )
     assert _wait_for(lambda: sum(len(batch) for batch in client.appended) >= 3)
 

@@ -14,7 +14,6 @@ from cairn.dispatcher.runtime.local_backend import LocalBackend
 from cairn.dispatcher.runtime.local_process import LocalProcess
 from cairn.dispatcher.scheduler import loop as loop_module
 from cairn.dispatcher.tasks import common, execute
-from cairn.dispatcher.workers.adapters.codex import CodexDriver
 from cairn.dispatcher.workers.adapters.pi import PiDriver
 from cairn.dispatcher.workers.registry import get_driver
 
@@ -167,7 +166,7 @@ def test_local_common_env_reaches_worker_subprocess(tmp_path: Path, monkeypatch)
         "all_proxy": "http://127.0.0.1:7897",
     }
     config = DispatchConfig.model_validate(payload)
-    worker = next(w for w in config.workers if w.type == "claudecode")
+    worker = next(w for w in config.workers if w.type == "pi")
     assert worker.env["https_proxy"] == "http://127.0.0.1:7897"
 
     assert config.local is not None
@@ -243,25 +242,18 @@ def _local_payload() -> dict:
         },
         "workers": [
             {
-                "name": "local-claude",
-                "type": "claudecode",
+                "name": "local-pi",
+                "type": "pi",
                 "task_types": ["execute"],
                 "max_running": 1,
                 "priority": 0,
             },
             {
-                "name": "local-codex",
-                "type": "codex",
-                "task_types": ["execute"],
-                "max_running": 1,
-                "priority": 1,
-            },
-            {
-                "name": "local-pi",
-                "type": "pi",
+                "name": "local-mock",
+                "type": "mock",
                 "task_types": ["decide"],
                 "max_running": 1,
-                "priority": 2,
+                "priority": 1,
             },
         ],
     }
@@ -355,27 +347,6 @@ def _bare_worker(worker_type: str) -> WorkerConfig:
     )
 
 
-def test_codex_local_driver_omits_provider_injection() -> None:
-    worker = _bare_worker("codex")
-    argv = CodexDriver(local=True).build_execute(worker, "PROMPT", None).argv
-
-    assert argv == [
-        "codex",
-        "exec",
-        "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--",
-        "PROMPT",
-    ]
-    assert not any("model_providers" in part for part in argv)
-    assert "--model" not in argv
-
-    conclude = CodexDriver(local=True).build_conclude(worker, "PROMPT", "sess-1")
-    assert conclude[:4] == ["codex", "exec", "resume", "sess-1"]
-    assert conclude[-2:] == ["--", "PROMPT"]
-    assert not any("model_providers" in part for part in conclude)
-
-
 def test_pi_local_driver_omits_models_json_and_provider() -> None:
     worker = _bare_worker("pi")
     argv = PiDriver(local=True).build_execute(worker, "PROMPT", None).argv
@@ -388,11 +359,9 @@ def test_pi_local_driver_omits_models_json_and_provider() -> None:
 
 
 def test_get_driver_selects_local_or_container_variant() -> None:
-    assert get_driver("codex", "local").local is True
-    assert get_driver("codex").local is False
     assert get_driver("pi", "local").local is True
-    # claudecode and mock are shared instances across both modes
-    assert get_driver("claudecode", "local") is get_driver("claudecode")
+    assert get_driver("pi").local is False
+    # mock is a shared instance across both modes
     assert get_driver("mock", "local") is get_driver("mock")
 
 
@@ -440,17 +409,20 @@ def _install_fake_cli(tmp_path: Path, monkeypatch, name: str, body: str) -> None
 
 
 def test_execute_runs_real_local_cli_end_to_end(tmp_path: Path, monkeypatch) -> None:
-    # A fake `claude` on PATH stands in for the real CLI: the whole local path is exercised
+    # A fake `pi` on PATH stands in for the real CLI: the whole local path is exercised
     # for real — driver argv -> LocalBackend -> LocalProcess subprocess -> stdout parsing.
     _install_fake_cli(
         tmp_path,
         monkeypatch,
-        "claude",
-        'echo \'{"accepted":true,"data":{"facts":[{"description":"local fake fact"}]}}\'',
+        "pi",
+        "printf '%s\\n' '"
+        '{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text",'
+        '"text":"{\\"accepted\\":true,\\"data\\":{\\"facts\\":[{\\"description\\":'
+        '\\"local fake fact\\"}]}}"}]}}\'',
     )
     monkeypatch.setattr(common, "GRAPH_SNAPSHOT_ROOT", str(tmp_path / "prompts"))
 
-    config = _local_config_for_worker("test-worker", "claudecode")
+    config = _local_config_for_worker("test-worker", "pi")
     backend = LocalBackend(LocalConfig(workspace_root=str(tmp_path / "work")))
     step = make_step(status="running", worker="test-worker")
     project = make_project(steps=[step])
@@ -478,12 +450,14 @@ def test_execute_local_cli_rejection_releases_step(tmp_path: Path, monkeypatch) 
     _install_fake_cli(
         tmp_path,
         monkeypatch,
-        "claude",
-        'echo \'{"accepted":false,"reason":"policy_refusal"}\'',
+        "pi",
+        "printf '%s\\n' '"
+        '{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text",'
+        '"text":"{\\"accepted\\":false,\\"reason\\":\\"policy_refusal\\"}"}]}}\'',
     )
     monkeypatch.setattr(common, "GRAPH_SNAPSHOT_ROOT", str(tmp_path / "prompts"))
 
-    config = _local_config_for_worker("test-worker", "claudecode")
+    config = _local_config_for_worker("test-worker", "pi")
     backend = LocalBackend(LocalConfig(workspace_root=str(tmp_path / "work")))
     step = make_step(status="running", worker="test-worker")
     project = make_project(steps=[step])

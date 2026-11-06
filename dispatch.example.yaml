@@ -75,37 +75,17 @@ workers:
   # Worker priority is ascending: lower numbers are preferred first.
   # max_running is per-worker concurrency. Slower backends such as Pi usually benefit from lower values.
   # Decide benefits from a strong reasoning model; Execute benefits from a model that is good with tools.
-  - name: "claudecode_deepseek-v4-pro"
-    type: "claudecode"
+  - name: "pi_deepseek-v4-pro"
+    type: "pi"
     task_types: [decide, execute]
     max_running: 2
     priority: 0
     env:
-      ANTHROPIC_MODEL: "deepseek-v4-pro"
-      ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
-      ANTHROPIC_AUTH_TOKEN: "sk-xxx"
-
-  # - name: "codex_qwen3.6-plus"
-  #   type: "codex"
-  #   task_types: [decide,execute]
-  #   max_running: 2
-  #   priority: 0
-  #   env:
-  #     CODEX_MODEL: "qwen3.6-plus"
-  #     CODEX_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  #     OPENAI_API_KEY: "sk-xxx"
-
-  # - name: "pi_qwen3.6-plus"
-  #   type: "pi"
-  #   task_types: [decide,execute]
-  #   max_running: 2
-  #   priority: 0
-  #   env:
-  #     PI_MODEL: "qwen3.6-plus"
-  #     PI_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  #     PI_API_KEY: "sk-xxx"
-  #     PI_PROVIDER_API: "openai-completions"
-  #     PI_MODEL_CONTEXT_WINDOW: "262144"
+      PI_MODEL: "deepseek-v4-pro"
+      PI_BASE_URL: "https://api.deepseek.com/v1"
+      PI_API_KEY: "sk-xxx"
+      PI_PROVIDER_API: "openai-completions"
+      PI_MODEL_CONTEXT_WINDOW: "131072"
 
 # Web front (cairn-nginx) settings — consumed by the nginx Basic Auth entrypoint
 # in Docker Compose mode; the dispatcher itself ignores this section.

@@ -11,7 +11,6 @@ from cairn.dispatcher.config import (
     WorkerConfig,
     validate_prompt_resources,
 )
-from cairn.dispatcher.workers.adapters.codex import CodexDriver
 from cairn.dispatcher.workers.adapters.pi import PiDriver
 
 
@@ -144,27 +143,3 @@ def test_pi_driver_models_json_and_execute_argv_include_context_window_and_tools
     assert models["providers"]["cairn"]["models"][0]["contextWindow"] == 131072
     assert "--tools" in result.argv
     assert result.argv[-2:] == ["-p", "prompt"]
-
-
-def test_codex_driver_execute_argv_passes_model_endpoint_and_prompt() -> None:
-    worker = WorkerConfig.model_validate(
-        {
-            "name": "codex",
-            "type": "codex",
-            "task_types": ["decide"],
-            "max_running": 1,
-            "priority": 0,
-            "env": {
-                "CODEX_MODEL": "gpt-test",
-                "CODEX_BASE_URL": "http://api/v1",
-                "OPENAI_API_KEY": "secret",
-            },
-        }
-    )
-
-    argv = CodexDriver().build_execute(worker, "prompt", None).argv
-
-    assert "--model" in argv
-    assert "gpt-test" in argv
-    assert 'model_providers.cairn.base_url="http://api/v1"' in argv
-    assert argv[-2:] == ["--", "prompt"]
