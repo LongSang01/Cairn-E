@@ -98,6 +98,9 @@ def run_decide_task(
             if failure is not None and failure.count > 0:
                 entry["failures"] = {
                     "count": failure.count,
+                    "budget_exhausted": failure.budget_exhausted,
+                    "error": failure.error,
+                    "noop": failure.noop,
                     "last_error": failure.reason,
                     "last_at": failure.at,
                 }

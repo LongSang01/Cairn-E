@@ -36,6 +36,12 @@ class StepFailure:
     count: int = 0
     reason: str = ""
     at: str = ""
+    # Spend split so Decide can tell "ran out of time" from "the worker broke":
+    # the first means split the step, the second means the run never had a chance.
+    budget_exhausted: int = 0
+    error: int = 0
+    # Executes that closed the step without adding a fact or a finding.
+    noop: int = 0
 
 
 @dataclass(slots=True)

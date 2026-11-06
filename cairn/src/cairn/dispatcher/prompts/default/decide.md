@@ -99,7 +99,12 @@ reports, so paging forward never loses text.
 
 ## Open steps
 
-A step may carry `failures`: how many consecutive Execute runs already failed on it
+A step may carry `failures` with a breakdown: `budget_exhausted` means the run used its
+whole time budget (split the step), `error` means the run crashed or its output could not
+be parsed (the worker never had a chance), and `noop` means the step closed without adding
+a fact or finding (the plan was circular).
+
+`failures.count` is the total of consecutive Execute runs that already failed on the step
 (timeouts included), with the last error and when it happened. That work never reached
 the graph, so the step is still open and the scheduler will hand it out again. When
 `failures.count` keeps growing, change route: split it into smaller steps, add the

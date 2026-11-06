@@ -115,6 +115,11 @@ class ExecuteTaskConfig(BaseModel):
 
     timeout: int = Field(gt=0)
     conclude_timeout: int = Field(gt=0)
+    # Seconds reserved out of `timeout` for the settlement round. The main run is
+    # cut short by this much so a conclude pass still fits in the same budget: a run
+    # that hits the wall with nothing written is worth less than a shorter run that
+    # writes back what it found.
+    settlement_margin: int = Field(ge=0, default=90)
 
 
 class QuestionTaskConfig(BaseModel):

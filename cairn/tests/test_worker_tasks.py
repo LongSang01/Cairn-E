@@ -602,8 +602,11 @@ def test_execute_timeout_without_session_releases_claim(monkeypatch) -> None:
 
     assert outcome == "failed"
     assert client.released == [("proj_001", "s001", "test-worker")]
-    # The scheduler needs the reason to tell the next Decide why this step is stuck.
-    assert reasons == [f"timed out after {config.tasks.execute.timeout}s"]
+    # The scheduler needs the reason to tell the next Decide why this step is stuck:
+    # a spent budget is classified apart from a crash.
+    assert len(reasons) == 1
+    assert reasons[0].startswith("budget_exhausted:")
+    assert f"of {config.tasks.execute.timeout}s" in reasons[0]
 
 
 def test_decide_startup_only_mode_skips_task_healthcheck(monkeypatch) -> None:

@@ -140,6 +140,21 @@ class ReaperMixin:
             return
         key = (project_id, step_id)
         if outcome == "success":
+            if reason and reason.startswith("noop"):
+                # The step closed but produced nothing; keep it visible to Decide
+                # instead of clearing the counters as a real success would.
+                failure = self.step_failures.get(key) or StepFailure()
+                failure.noop += 1
+                failure.reason = reason
+                failure.at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                self.step_failures[key] = failure
+                LOG.warning(
+                    "step produced nothing project=%s step=%s noop=%s",
+                    project_id,
+                    step_id,
+                    failure.noop,
+                )
+                return
             if self.step_failures.pop(key, None) is not None:
                 LOG.info("step recovered project=%s step=%s", project_id, step_id)
             return
@@ -151,6 +166,10 @@ class ReaperMixin:
             failure = StepFailure()
         failure.count += 1
         failure.reason = reason or "execute failed"
+        if failure.reason.startswith("budget_exhausted"):
+            failure.budget_exhausted += 1
+        else:
+            failure.error += 1
         failure.at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.step_failures[key] = failure
         LOG.warning(

@@ -151,13 +151,19 @@ def run_execute_task(
             native_session=session,
         )
         execute_started = time.perf_counter()
+        budget = config.tasks.execute.timeout
+        margin = config.tasks.execute.settlement_margin
+        # Reserve room for the settlement round: running to the hard wall leaves no
+        # time to write back findings, which is exactly how a project ends up with
+        # ten minutes spent and zero output.
+        run_timeout = max(1, budget - margin) if margin else budget
         first = _run_process(
             container_manager,
             container_name,
             worker,
             execute.argv,
             phase="execute",
-            timeout=config.tasks.execute.timeout,
+            timeout=run_timeout,
             lease=lease,
             cancellation=cancellation,
             on_stdout=stream.feed,
@@ -271,6 +277,11 @@ def run_execute_task(
                 phase_ms=execute_ms,
                 total_ms=int((time.perf_counter() - task_started) * 1000),
             ).status
+            # A step that closes without landing anything is spinning in place; the
+            # scheduler keeps the count so the next Decide can change the plan.
+            produced = bool(data.get("facts")) or bool(data.get("findings"))
+            if status == "done" and not produced:
+                report_failure("noop: step closed without adding a fact or a finding")
             record("success")
             return status
 
@@ -286,7 +297,9 @@ def run_execute_task(
                 preview(first.stderr),
             )
             record("failed", "timed out")
-            report_failure(f"timed out after {config.tasks.execute.timeout}s")
+            # Distinct from a crash: the run used its whole budget, which Decide
+            # should treat as "split the step", not "the worker is broken".
+            report_failure(f"budget_exhausted: no answer within {run_timeout}s of {budget}s")
             return _try_conclude_fallback(
                 config,
                 client,

@@ -485,6 +485,34 @@ def test_failed_execute_accumulates_the_step_history() -> None:
     assert failure.at
 
 
+def test_failure_counters_split_budget_from_errors() -> None:
+    """Decide must tell "ran out of time" from "the run broke"."""
+    loop = _loop()
+    loop.futures = {}
+
+    _reap_execute(loop, "failed", "budget_exhausted: no answer within 510s of 600s")
+    _reap_execute(loop, "failed", "budget_exhausted: no answer within 510s of 600s")
+    _reap_execute(loop, "failed", "parse failed: boom")
+
+    failure = loop.step_failures[("proj_001", "s001")]
+    assert failure.count == 3
+    assert failure.budget_exhausted == 2
+    assert failure.error == 1
+
+
+def test_noop_success_is_recorded_without_clearing_the_history() -> None:
+    loop = _loop()
+    loop.futures = {}
+    _reap_execute(loop, "failed", "budget_exhausted: no answer within 510s of 600s")
+
+    _reap_execute(loop, "success", "noop: step closed without adding a fact or a finding")
+
+    failure = loop.step_failures[("proj_001", "s001")]
+    assert failure.noop == 1
+    # The step produced nothing, so it did not "recover" either.
+    assert failure.count == 1
+
+
 def test_successful_execute_clears_the_step_history() -> None:
     loop = _loop()
     loop.futures = {}
