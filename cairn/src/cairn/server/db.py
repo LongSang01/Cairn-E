@@ -215,6 +215,62 @@ CREATE TABLE IF NOT EXISTS scoped_counters (
 CREATE INDEX IF NOT EXISTS sessions_by_project ON sessions (project_id, created_at);
 CREATE INDEX IF NOT EXISTS findings_by_project ON findings (project_id, created_at);
 
+-- Command-level guard. Rules are evaluated before a worker runs a shell command:
+-- the first enabled rule by descending priority decides, otherwise the default
+-- (allow) applies. `ask` suspends the command in `tool_approvals` until a human
+-- decides or the rule's timeout expires.
+CREATE TABLE IF NOT EXISTS tool_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target TEXT NOT NULL,
+    match_type TEXT NOT NULL,
+    pattern TEXT NOT NULL,
+    action TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    message TEXT,
+    timeout_seconds INTEGER NOT NULL DEFAULT 60,
+    timeout_action TEXT NOT NULL DEFAULT 'deny',
+    enabled INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS tool_approvals (
+    id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    session_id TEXT,
+    worker TEXT,
+    tool TEXT NOT NULL,
+    command TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    reason TEXT,
+    rule_id INTEGER,
+    decision_source TEXT,
+    decided_by TEXT,
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    expires_at TEXT,
+    PRIMARY KEY (id)
+);
+
+CREATE INDEX IF NOT EXISTS tool_approvals_by_status ON tool_approvals (status, created_at);
+
+CREATE TABLE IF NOT EXISTS tool_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    session_id TEXT,
+    worker TEXT,
+    tool TEXT NOT NULL,
+    command TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    decision_source TEXT NOT NULL,
+    rule_id INTEGER,
+    actor TEXT,
+    enforced INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS tool_audit_by_project ON tool_audit (project_id, created_at);
+
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL
@@ -310,10 +366,61 @@ def _migration_003_finding_evidence(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE findings ADD COLUMN status TEXT NOT NULL DEFAULT 'tentative'")
 
 
+def _migration_004_tool_guard(conn: sqlite3.Connection) -> None:
+    """Seed the built-in command deny rules.
+
+    Deliberately short: rules only cover actions no legitimate task needs (wiping
+    the filesystem, dropping databases, destructive HTTP verbs) plus the usual
+    "never touch government/education infrastructure" scope line. Anything else is
+    left to the operator, because over-blocking silently breaks legitimate testing.
+    """
+    if conn.execute("SELECT COUNT(*) AS n FROM tool_rules").fetchone()["n"]:
+        return
+    conn.executemany(
+        """
+        INSERT INTO tool_rules (
+            target, match_type, pattern, action, priority, message, timeout_seconds,
+            timeout_action, enabled
+        ) VALUES (?, ?, ?, 'deny', ?, ?, 60, 'deny', 1)
+        """,
+        [
+            (
+                "command",
+                "regex",
+                r"\brm\s+-(?:rf|fr)\s+/(?:\s|$)",
+                "在容器内递归删除根目录，不属于任何测试步骤",
+                100,
+            ),
+            (
+                "command",
+                "regex",
+                r"\b(?:DROP\s+(?:TABLE|DATABASE)|TRUNCATE\s+TABLE)\b",
+                "对数据库执行不可逆的清空操作",
+                95,
+            ),
+            (
+                "command",
+                "contains",
+                "curl -X DELETE",
+                "使用 DELETE 动词删除远端数据，请改用只读验证",
+                90,
+            ),
+            (
+                "command",
+                "regex",
+                r"\.(?:gov|edu)(?:[./:]|$)",
+                "目标属于禁止范围（政府/教育域名），需人工确认后由管理员处理",
+                85,
+            ),
+        ],
+    )
+
+
 _MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (1, _migration_001_baseline),
     (2, _migration_002_idempotency),
     (3, _migration_003_finding_evidence),
+    (4, _migration_004_tool_guard),
 )
 
 

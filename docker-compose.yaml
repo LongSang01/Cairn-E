@@ -12,6 +12,10 @@ services:
     # only reachable on the compose network.
     expose:
       - "8000"
+    ports:
+      # Worker containers run with host networking and reach the command guard over
+      # host loopback; binding 127.0.0.1 keeps it off the LAN. nginx owns :8000.
+      - "127.0.0.1:8001:8000"
     volumes:
       - ./datas/cairn/:/root/.local/share/cairn/
     healthcheck:

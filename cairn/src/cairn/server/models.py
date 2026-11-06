@@ -495,6 +495,29 @@ class CloseGoalRequest(BaseModel):
         return text
 
 
+class ToolGuardCheckRequest(BaseModel):
+    """One shell command a worker is about to run."""
+
+    tool: str = "bash"
+    command: str
+    worker: str | None = None
+    session: str | None = None
+
+    @field_validator("command")
+    @classmethod
+    def validate_command(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class ToolApprovalDecision(BaseModel):
+    approve: bool
+    actor: str | None = None
+    note: str | None = None
+
+
 class CompleteRequest(BaseModel):
     from_: list[str] = Field(alias="from", min_length=1)
     description: str

@@ -105,11 +105,33 @@ from .timeutil import (
     utcnow,
     utcnow_before,
 )
+from .tool_guard import (
+    BLOCK_PREFIX,
+    command_digest,
+    get_approval,
+    pending_approvals,
+)
+from .tool_guard import (
+    check as guard_check,
+)
+from .tool_guard import (
+    decide as decide_tool_approval,
+)
+from .tool_guard import (
+    evaluate as evaluate_tool_rules,
+)
+from .tool_guard import (
+    expire_due as expire_tool_approvals,
+)
+from .tool_guard import (
+    list_audit as list_tool_audit,
+)
 from .usage import (
     build_project_usage,
 )
 
 __all__ = [
+    "BLOCK_PREFIX",
     "PROJECT_COLUMNS",
     "QUESTION_PENDING_TTL_SECONDS",
     "QUESTION_RUNNING_TTL_SECONDS",
@@ -130,15 +152,20 @@ __all__ = [
     "check_project_completed",
     "check_project_hint_writable",
     "clear_project_decide",
+    "command_digest",
+    "decide_tool_approval",
     "doc_ids_by_owner",
     "document_to_meta",
     "document_to_model",
+    "evaluate_tool_rules",
     "exchange_evidence_id",
     "expire_decide_leases",
     "expire_questions",
     "expire_stale_sessions",
     "expire_steps",
+    "expire_tool_approvals",
     "find_exchange_by_url",
+    "get_approval",
     "get_claimable_step_or_404",
     "get_completion_step_or_409",
     "get_context_summary",
@@ -155,8 +182,10 @@ __all__ = [
     "get_step_or_404",
     "get_step_timeout",
     "goal_to_model",
+    "guard_check",
     "insert_document",
     "list_pending_questions",
+    "list_tool_audit",
     "next_document_id",
     "next_fact_id",
     "next_finding_id",
@@ -169,6 +198,7 @@ __all__ = [
     "next_step_id",
     "normalize_finding_severity",
     "parse_http_exchanges",
+    "pending_approvals",
     "project_decide_from_row",
     "project_meta_from_row",
     "question_to_model",

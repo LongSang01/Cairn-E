@@ -23,6 +23,7 @@ from cairn.server.routers import (
     sessions,
     settings,
     steps,
+    tool_guard,
     usage,
 )
 
@@ -57,6 +58,7 @@ app.include_router(recall.router)
 app.include_router(findings.router)
 app.include_router(usage.router)
 app.include_router(export.router)
+app.include_router(tool_guard.router)
 
 app.add_middleware(RequestIdMiddleware)
 

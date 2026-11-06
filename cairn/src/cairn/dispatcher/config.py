@@ -252,6 +252,22 @@ class WebConfig(BaseModel):
     auth: WebAuthConfig | None = None
 
 
+class ToolGuardConfig(BaseModel):
+    """Command-level interception, enforced inside the worker by a pi extension.
+
+    The extension asks the server before every `bash` call; the server owns the
+    rules, the human approval queue and the audit log. `api_url` must be reachable
+    from the worker container (they run with `network_mode: host`, so the server's
+    internal port has to be published on loopback).
+    """
+
+    enabled: bool = False
+    api_url: str = "http://127.0.0.1:8001"
+    # What the extension does when the server is unreachable: blocking on a broken
+    # link would freeze the run, so the default is to let it through.
+    fail_action: Literal["allow", "deny"] = "allow"
+
+
 class DispatchConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -260,6 +276,7 @@ class DispatchConfig(BaseModel):
     tasks: TasksConfig
     container: ContainerConfig | None = None
     local: LocalConfig | None = None
+    tool_guard: ToolGuardConfig = Field(default_factory=ToolGuardConfig)
     common_env: dict[str, str] = Field(default_factory=dict)
     workers: list[WorkerConfig]
     web: WebConfig | None = None

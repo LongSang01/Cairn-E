@@ -28,6 +28,7 @@ from cairn.dispatcher.tasks.common import (
     write_graph_snapshot_reference,
     write_step_result,
 )
+from cairn.dispatcher.workers.pi_guard import install as install_pi_guard
 from cairn.dispatcher.workers.registry import get_driver
 
 LOG = logging.getLogger(__name__)
@@ -69,6 +70,16 @@ def run_execute_task(
 
     try:
         container_name = container_manager.ensure_running(project_id)
+
+        if config.tool_guard.enabled and worker.type == "pi":
+            # Written per task so the extension always sees the current project id;
+            # a failure here must not take the run down (the guard fails open).
+            try:
+                install_pi_guard(
+                    container_manager, container_name, worker, project_id, config.tool_guard
+                )
+            except Exception:
+                LOG.warning("failed to install tool guard project=%s", project_id, exc_info=True)
 
         if task_healthcheck_enabled(config):
             LOG.info(

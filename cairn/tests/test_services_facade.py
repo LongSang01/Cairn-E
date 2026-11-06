@@ -13,6 +13,7 @@ from cairn.server import services
 
 # The frozen contract. Edit deliberately when the facade's surface changes.
 EXPECTED_EXPORTS = {
+    "BLOCK_PREFIX",
     "PROJECT_COLUMNS",
     "QUESTION_PENDING_TTL_SECONDS",
     "QUESTION_RUNNING_TTL_SECONDS",
@@ -32,6 +33,14 @@ EXPECTED_EXPORTS = {
     "check_project_active",
     "check_project_completed",
     "check_project_hint_writable",
+    "command_digest",
+    "decide_tool_approval",
+    "evaluate_tool_rules",
+    "expire_tool_approvals",
+    "get_approval",
+    "guard_check",
+    "list_tool_audit",
+    "pending_approvals",
     "clear_project_decide",
     "doc_ids_by_owner",
     "document_to_meta",

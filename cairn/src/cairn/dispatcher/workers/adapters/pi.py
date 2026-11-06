@@ -198,17 +198,22 @@ class PiDriver(WorkerDriver):
     def _wrap_with_models(
         self, worker: WorkerConfig, pi_argv: list[str], *, enable_tools: bool = True
     ) -> list[str]:
+        # Extension discovery stays off; the only extension ever loaded is the one
+        # the dispatcher wrote for the command guard, and only when it exists.
         script = (
             'agent_dir="$1"\n'
             'models_json="$2"\n'
-            "shift 2\n"
+            'guard="$3"\n'
+            "shift 3\n"
             'mkdir -p "$agent_dir"\n'
             'mkdir -p "$agent_dir/sessions"\n'
             'printf "%s" "$models_json" > "$agent_dir/models.json"\n'
-            'exec env PI_CODING_AGENT_DIR="$agent_dir" pi "$@"\n'
+            'if [ -f "$guard" ]; then\n'
+            '  exec env PI_CODING_AGENT_DIR="$agent_dir" pi --no-extensions -e "$guard" "$@"\n'
+            'fi\n'
+            'exec env PI_CODING_AGENT_DIR="$agent_dir" pi --no-extensions "$@"\n'
         )
         argv = [
-            "--no-extensions",
             "--no-skills",
             "--no-prompt-templates",
             "--no-themes",
@@ -223,6 +228,7 @@ class PiDriver(WorkerDriver):
             "--",
             self._agent_dir(worker),
             self._models_json(worker),
+            str(self.guard_extension(worker)),
             *argv,
             *pi_argv,
         ]
@@ -230,6 +236,11 @@ class PiDriver(WorkerDriver):
     @staticmethod
     def _agent_dir(worker: WorkerConfig) -> str:
         return str(PurePosixPath("/tmp/cairn-pi") / worker.name)
+
+    @staticmethod
+    def guard_extension(worker: WorkerConfig) -> PurePosixPath:
+        """Path of the command-guard extension, written by ``pi_guard.install``."""
+        return PurePosixPath(PiDriver._agent_dir(worker)) / "extensions" / "cairn-guard.ts"
 
     @staticmethod
     def _session_dir(worker: WorkerConfig) -> str:
