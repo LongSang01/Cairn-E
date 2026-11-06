@@ -179,3 +179,43 @@ describe('session labels', () => {
     expect(title).toContain('合计 30');
   });
 });
+
+describe('blocked projects, findings evidence and the guard queue', () => {
+  it('gives blocked its own badge instead of reusing stopped', () => {
+    const c = ctx();
+    expect(c.projectStatusBadgeClass('blocked')).toContain('rose');
+    expect(c.projectStatusLabel('blocked')).toBe('已阻断');
+    expect(c.projectStatusLabel('active')).toBe('进行中');
+  });
+
+  it('projectBlockedReason is empty unless the server set one', () => {
+    expect(ctx().projectBlockedReason()).toBe('');
+    const blocked = ctx({
+      project: { project: { blocked_reason: 'token budget exceeded: 100/50 tokens' } },
+    });
+    expect(blocked.projectBlockedReason()).toContain('token budget exceeded');
+  });
+
+  it('labels finding status and evidence kinds', () => {
+    const c = ctx();
+    expect(c.findingStatusLabel('confirmed')).toBe('已确认');
+    expect(c.findingStatusLabel('tentative')).toBe('待确认');
+    expect(c.findingStatusLabel(undefined)).toBe('待确认');
+    expect(c.evidenceKindLabel('exchange')).toBe('报文');
+    expect(c.evidenceKindLabel('document')).toBe('文档');
+    expect(c.evidenceKindLabel('other')).toBe('other');
+  });
+
+  it('budgetLabel only shows a cap when one is configured', () => {
+    expect(ctx({ usage: { total_tokens: 1200 } }).budgetLabel()).toBe('');
+    const capped = ctx({ usage: { total_tokens: 1200 }, project: { project: { token_budget: 5000 } } });
+    expect(capped.budgetLabel()).toBe('1.2k / 5.0k');
+  });
+
+  it('counts only pending approvals', () => {
+    const c = ctx({
+      toolApprovals: [{ status: 'pending' }, { status: 'allowed' }, { status: 'pending' }],
+    });
+    expect(c.pendingApprovalCount()).toBe(2);
+  });
+});

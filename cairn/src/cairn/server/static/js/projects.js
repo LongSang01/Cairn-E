@@ -73,7 +73,9 @@ export const projectsMixins = {
         this.yamlPreviewText = text;
         this.yamlPreviewHtml = tab === 'yaml'
           ? this.highlightYaml(text)
-          : (tab === 'findings' ? this.highlightReport(text) : this.highlightTimeline(text));
+          : (tab === 'findings' || tab === 'report'
+            ? this.highlightReport(text)
+            : this.highlightTimeline(text));
       } catch (e) {
         this.showToast(e.message, 'error');
       }
@@ -145,15 +147,98 @@ export const projectsMixins = {
         this.usage = null;
         this.contextSummary = null;
       }
-      const [findingsSummary, usage, contextSummary] = await Promise.all([
+      const [findingsSummary, usage, contextSummary, approvals] = await Promise.all([
         this.api('GET', `/projects/${id}/findings/summary`).catch(() => null),
         this.api('GET', `/projects/${id}/usage`).catch(() => null),
         this.api('GET', `/projects/${id}/context`).catch(() => null),
+        // Pending `ask` rules block the worker until someone decides, so the count
+        // has to be visible on every poll, not only when the tab is open.
+        this.api('GET', `/projects/${id}/tool-approvals`).catch(() => null),
       ]);
       if (this._extrasProjectId !== id) return;
       if (findingsSummary) this.findingsSummary = findingsSummary;
       if (usage) this.usage = usage;
       if (contextSummary) this.contextSummary = contextSummary;
+      if (approvals) {
+        this.toolApprovals = approvals.approvals || [];
+        this.approvalsProjectId = id;
+      }
+    },
+
+    // --- Command guard: human approval queue -------------------------------
+
+    async loadToolApprovals() {
+      const projectId = this.selectedProjectId;
+      if (!projectId) return;
+      try {
+        const data = await this.api('GET', `/projects/${projectId}/tool-approvals`);
+        if (this.selectedProjectId !== projectId) return;
+        this.toolApprovals = data.approvals || [];
+        this.approvalsProjectId = projectId;
+      } catch (e) {
+        this.showToast(e.message, 'error');
+      }
+    },
+
+    async decideToolApproval(approvalId, approve) {
+      const projectId = this.selectedProjectId;
+      if (!projectId || !approvalId || this.decidingApprovalId) return;
+      this.decidingApprovalId = approvalId;
+      try {
+        await this.api('POST', `/projects/${projectId}/tool-approvals/${approvalId}/decide`, {
+          approve,
+          actor: this.actorName(),
+        });
+        this.showToast(approve ? '已批准该命令' : '已拒绝该命令');
+        await this.loadToolApprovals();
+      } catch (e) {
+        this.showToast(e.message, 'error');
+      } finally {
+        this.decidingApprovalId = '';
+      }
+    },
+
+    // --- Token budget -------------------------------------------------------
+
+    openBudgetDialog() {
+      const budget = this.project?.project?.token_budget;
+      this.budgetForm = { value: budget ? String(budget) : '' };
+      this.showBudgetModal = true;
+    },
+
+    async saveBudget(clear = false) {
+      const projectId = this.selectedProjectId;
+      if (!projectId || this.savingBudget) return;
+      const raw = clear ? '' : String(this.budgetForm.value ?? '').trim();
+      let tokenBudget = null;
+      if (raw) {
+        const parsed = Number(raw);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+          this.showToast('预算必须是正整数', 'error');
+          return;
+        }
+        tokenBudget = Math.floor(parsed);
+      }
+      this.savingBudget = true;
+      try {
+        const updated = await this.api('PUT', `/projects/${projectId}/budget`, {
+          token_budget: tokenBudget,
+        });
+        if (this.project && this.project.project.id === projectId) {
+          this.project.project.status = updated.status;
+          this.project.project.token_budget = updated.token_budget;
+          this.project.project.blocked_reason = updated.blocked_reason;
+        }
+        const summary = this.projects.find(item => item.id === projectId);
+        if (summary) summary.status = updated.status;
+        this.showBudgetModal = false;
+        this.showToast(tokenBudget ? '预算已更新' : '预算已清除');
+        await this.loadProjects();
+      } catch (e) {
+        this.showToast(e.message, 'error');
+      } finally {
+        this.savingBudget = false;
+      }
     },
 
     // --- Sessions: one model conversation per dispatcher run -------------------

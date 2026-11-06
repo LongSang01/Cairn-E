@@ -361,7 +361,7 @@
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M14.25 3H7.5A2.25 2.25 0 0 0 5.25 5.25v13.5A2.25 2.25 0 0 0 7.5 21h9a2.25 2.25 0 0 0 2.25-2.25V8.25L14.25 3Z"/><path d="M14.25 3v5.25h4.5"/><path d="M8.25 12h7.5M8.25 15h5.25"/></svg>
                 快照
               </button>
-              <template x-if="p.status !== 'completed'">
+              <template x-if="p.status !== 'completed' && p.status !== 'blocked'">
                 <button type="button" @click.stop="toggleProjectStopById(p.id, p.status)"
                   class="px-2 py-1 rounded-lg border text-[11px] transition flex items-center gap-1"
                   :class="p.status === 'active'
@@ -408,9 +408,10 @@
         :aria-label="`重命名 ${project.project.title}`">
         <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="m16.862 4.487 1.65-1.65a1.875 1.875 0 1 1 2.652 2.652l-9.193 9.193a4.5 4.5 0 0 1-1.897 1.13L6 17l1.188-4.074a4.5 4.5 0 0 1 1.13-1.897l8.544-8.542Z"/><path d="M19.5 7.125 16.875 4.5"/><path d="M5.25 18.75h13.5"/></svg>
       </button>
-      <span class="px-1.5 py-0.5 rounded-full text-[9px] font-semibold uppercase tracking-[0.12em] shrink-0"
+      <span class="px-1.5 py-0.5 rounded-full text-[9px] font-semibold tracking-[0.12em] shrink-0"
         :class="projectStatusBadgeClass(project.project.status)"
-        x-text="project.project.status"></span>
+        :title="project.project.blocked_reason || ''"
+        x-text="projectStatusLabel(project.project.status)"></span>
     </div>
     <div class="flex-1"></div>
     <div class="flex items-center gap-3 text-xs text-slate-400">
@@ -433,6 +434,10 @@
         <svg class="h-3 w-3 text-slate-400" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12l1-8.5Z"/></svg>
         <span class="font-medium text-slate-500 tabular-nums" x-text="`${formatTokens(usageTotal())} tokens`"></span>
       </span>
+      <button type="button" @click="openBudgetDialog()" class="text-[11px] text-slate-400 hover:text-slate-600 underline decoration-dotted"
+        :title="project.project.token_budget ? '当前预算：' + formatTokens(project.project.token_budget) : '未设置预算'">
+        <span x-text="project.project.token_budget ? `预算 ${budgetLabel()}` : '设置预算'"></span>
+      </button>
     </div>
     <div class="flex items-center gap-1.5">
       <template x-if="!replay.active">
@@ -465,7 +470,7 @@
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M14.25 3H7.5A2.25 2.25 0 0 0 5.25 5.25v13.5A2.25 2.25 0 0 0 7.5 21h9a2.25 2.25 0 0 0 2.25-2.25V8.25L14.25 3Z"/><path d="M14.25 3v5.25h4.5"/><path d="M8.25 12h7.5M8.25 15h5.25"/></svg>
         快照
       </button>
-      <template x-if="!replay.active && project.project.status !== 'completed'">
+      <template x-if="!replay.active && project.project.status !== 'completed' && project.project.status !== 'blocked'">
         <button @click="toggleProjectStop()"
           class="px-2.5 py-1 rounded-lg border text-xs transition flex items-center gap-1.5"
           :class="project.project.status === 'active'
@@ -497,6 +502,17 @@
       </button>
     </div>
   </header>
+
+  <!-- Token budget block: the status alone would look like the project stalled -->
+  <template x-if="project.project.status === 'blocked'">
+    <div class="px-4 py-2 bg-rose-50 border-b border-rose-100 flex items-center gap-2 text-xs text-rose-700 shrink-0 z-10">
+      <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 16h.01"/><path d="M10.29 3.86 2.82 17a2 2 0 0 0 1.74 3h14.88a2 2 0 0 0 1.74-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg>
+      <span class="shrink-0 font-medium">项目已停止派发</span>
+      <span class="font-mono text-[11px] break-all" x-text="projectBlockedReason() || '—'"></span>
+      <button type="button" @click="openBudgetDialog()"
+        class="ml-auto shrink-0 px-2 py-0.5 rounded-md border border-rose-200 bg-white/70 hover:bg-white transition">调整预算</button>
+    </div>
+  </template>
 
   <div class="flex-1 flex overflow-hidden" id="graphLayout">
     <!-- Graph -->
@@ -663,6 +679,12 @@
           :class="sideTab === 'questions' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">
           提问 <span class="ml-0.5 text-[10px] opacity-60" x-text="questions.length"></span>
         </button>
+        <button @click="sideTab = 'approvals'; loadToolApprovals()" class="flex-1 px-2 py-2.5 text-xs font-medium transition"
+          :class="sideTab === 'approvals' ? 'text-rose-600 border-b-2 border-rose-400' : 'text-slate-400 hover:text-slate-600'">
+          审批
+          <span x-show="pendingApprovalCount() > 0" class="ml-0.5 inline-flex items-center justify-center min-w-[16px] h-[16px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-semibold align-middle"
+            x-text="pendingApprovalCount()"></span>
+        </button>
         <button @click="sideTab = 'log'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
           :class="sideTab === 'log' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">日志</button>
       </div>
@@ -732,6 +754,7 @@
                 <div class="flex items-center gap-2">
                   <span class="text-[10px] font-semibold px-1.5 py-0.5 rounded" :class="severityBadgeClass(d.severity)" x-text="severityLabel(d.severity)"></span>
                   <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-600" x-text="d.kind"></span>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded" :class="findingStatusBadgeClass(d.status)" x-text="findingStatusLabel(d.status)"></span>
                   <span class="text-[10px] text-slate-300" x-text="d.step || '—'"></span>
                 </div>
                 <p class="mt-1 text-slate-600 break-words" x-text="d.description"></p>
@@ -841,9 +864,30 @@
               <p class="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words" x-text="selectedFindingRecord().description"></p>
               <div class="pt-4 border-t border-slate-100 space-y-3 text-xs">
                 <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">严重度</span><span class="font-medium text-right" :class="severityTextClass(selectedFindingRecord().severity)" x-text="severityLabel(selectedFindingRecord().severity)"></span></div>
+                <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">状态</span><span class="font-medium text-right px-1.5 py-0.5 rounded" :class="findingStatusBadgeClass(selectedFindingRecord().status)" x-text="findingStatusLabel(selectedFindingRecord().status)"></span></div>
                 <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">步骤</span><span class="font-mono text-slate-600 text-right" x-text="selectedFindingRecord().step || '—'"></span></div>
                 <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">创建者</span><span class="text-slate-600 text-right" x-text="selectedFindingRecord().creator"></span></div>
                 <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">创建时间</span><span class="text-slate-600 text-right" x-text="formatTime(selectedFindingRecord().created_at)"></span></div>
+              </div>
+              <div class="pt-4 border-t border-slate-100 space-y-2">
+                <div class="flex items-center justify-between">
+                  <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">证据</span>
+                  <span class="text-[10px] text-slate-400" x-text="`${(selectedFindingRecord().evidence || []).length} 条`"></span>
+                </div>
+                <template x-if="(selectedFindingRecord().evidence || []).length === 0">
+                  <p class="text-[11px] text-slate-400 leading-relaxed">
+                    没有可复现证据，只能作为待确认结论；补充报文或文档后再次提交才会升级为已确认。
+                  </p>
+                </template>
+                <template x-for="ev in (selectedFindingRecord().evidence || [])" :key="`${ev.kind}-${ev.ref}`">
+                  <div class="rounded-lg border border-slate-200 bg-slate-50/60 px-2.5 py-1.5">
+                    <div class="flex items-center gap-1.5">
+                      <span class="text-[10px] px-1.5 py-0.5 rounded bg-white text-slate-500 border border-slate-200" x-text="evidenceKindLabel(ev.kind)"></span>
+                      <span class="font-mono text-[10px] text-slate-500 break-all" x-text="ev.ref"></span>
+                    </div>
+                    <p x-show="ev.digest" class="mt-1 font-mono text-[10px] text-slate-300 break-all" :title="ev.digest" x-text="ev.digest"></p>
+                  </div>
+                </template>
               </div>
             </div>
           </section>
@@ -964,6 +1008,36 @@
       </div>
 
       <!-- Sessions -->
+      <div x-show="sideTab === 'approvals'" class="flex-1 overflow-y-auto p-4 space-y-3 bg-rose-50/20">
+        <template x-if="pendingApprovalCount() === 0">
+          <div class="rounded-2xl border border-dashed border-rose-200 bg-white/80 px-5 py-10 text-center shadow-sm">
+            <p class="text-sm text-slate-300">没有待审批的命令</p>
+            <p class="mt-1 text-[11px] text-slate-400 leading-relaxed">
+              只有命中 <span class="font-mono">ask</span> 规则的命令会出现在这里；超过规则时限未处理会按拒绝处理。
+            </p>
+          </div>
+        </template>
+        <template x-for="item in toolApprovals" :key="item.id">
+          <section class="rounded-2xl border border-rose-200/80 bg-white shadow-sm overflow-hidden">
+            <div class="px-4 py-2.5 border-b border-rose-100 bg-rose-50/70 flex items-center gap-2">
+              <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-600" x-text="item.tool"></span>
+              <span class="text-[10px] text-slate-400" x-text="item.worker || '—'"></span>
+              <span class="ml-auto text-[10px] text-slate-400" x-text="formatTime(item.created_at)"></span>
+            </div>
+            <div class="p-4 space-y-3">
+              <pre class="text-[11px] leading-5 font-mono text-slate-700 bg-slate-50 rounded-lg p-2 whitespace-pre-wrap break-all max-h-32 overflow-auto" x-text="item.command"></pre>
+              <p x-show="item.reason" class="text-[11px] text-rose-500 leading-relaxed" x-text="item.reason"></p>
+              <div class="flex items-center gap-2">
+                <button type="button" @click="decideToolApproval(item.id, true)" :disabled="decidingApprovalId === item.id"
+                  class="flex-1 px-3 py-1.5 rounded-xl bg-teal-600 text-white text-xs font-medium hover:bg-teal-700 disabled:opacity-50 transition">批准</button>
+                <button type="button" @click="decideToolApproval(item.id, false)" :disabled="decidingApprovalId === item.id"
+                  class="flex-1 px-3 py-1.5 rounded-xl border border-rose-200 text-rose-600 text-xs font-medium hover:bg-rose-50 disabled:opacity-50 transition">拒绝</button>
+              </div>
+            </div>
+          </section>
+        </template>
+      </div>
+
       <div x-show="sideTab === 'sessions'" x-ref="sessionList" class="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/40">
         <template x-if="(project.sessions || []).length === 0">
           <p class="text-sm text-slate-300 text-center mt-12">还没有模型会话记录</p>
@@ -1314,6 +1388,33 @@
   </div>
 </div>
 
+<!-- Token Budget -->
+<div x-show="showBudgetModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center overlay" @click.self="showBudgetModal = false">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 border border-slate-200/60 overflow-hidden" @click.stop>
+    <div class="px-5 py-4 border-b border-slate-200/80 flex items-center justify-between">
+      <h3 class="text-base font-semibold text-slate-700">Token 预算</h3>
+      <button @click="showBudgetModal = false" class="text-slate-400 hover:text-slate-600 transition">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="p-5 space-y-3">
+      <p class="text-xs text-slate-500 leading-relaxed">
+        达到预算后项目会被标记为「已阻断」并停止派发新任务；调高或清空预算会恢复为进行中。
+        当前已用 <span class="font-mono" x-text="formatTokens(usageTotal())"></span> tokens。
+      </p>
+      <label class="block text-xs text-slate-400">预算（tokens，留空表示不限制）</label>
+      <input type="number" min="1" step="1000" x-model="budgetForm.value" placeholder="例如 500000"
+        class="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-300">
+    </div>
+    <div class="px-5 py-3 bg-slate-50 border-t border-slate-200/80 flex items-center justify-end gap-2">
+      <button @click="saveBudget(true)" :disabled="savingBudget"
+        class="px-3 py-1.5 text-sm text-slate-500 hover:bg-white rounded-xl border border-slate-200 disabled:opacity-50 transition">清除预算</button>
+      <button @click="saveBudget(false)" :disabled="savingBudget"
+        class="px-3 py-1.5 text-sm text-white bg-brand-600 hover:bg-brand-700 rounded-xl disabled:opacity-50 transition">保存</button>
+    </div>
+  </div>
+</div>
+
 <!-- Export Preview -->
 <div x-show="showYamlModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center overlay" @click.self="showYamlModal = false">
   <div class="bg-white rounded-2xl shadow-2xl w-full max-w-4xl mx-4 border border-slate-200/60 overflow-hidden" @click.stop>
@@ -1326,6 +1427,8 @@
             :class="exportTab === 'timeline' ? 'bg-slate-100 text-slate-700' : 'text-slate-400 hover:text-slate-600'">时间线</button>
           <button @click="switchExportTab('findings')" class="px-2.5 py-1 text-xs font-medium transition"
             :class="exportTab === 'findings' ? 'bg-slate-100 text-slate-700' : 'text-slate-400 hover:text-slate-600'">发现报告</button>
+          <button @click="switchExportTab('report')" class="px-2.5 py-1 text-xs font-medium transition"
+            :class="exportTab === 'report' ? 'bg-slate-100 text-slate-700' : 'text-slate-400 hover:text-slate-600'">SRC 报告</button>
         </div>
         <p class="text-xs text-slate-400 truncate" x-text="yamlPreviewTitle"></p>
       </div>

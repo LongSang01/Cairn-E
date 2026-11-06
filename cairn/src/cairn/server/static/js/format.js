@@ -12,8 +12,25 @@ export const formatMixins = {
         active: 'bg-teal-50 text-teal-600',
         stopped: 'bg-amber-50 text-amber-700',
         completed: 'bg-slate-100 text-slate-500',
+        // Machine-set when token usage passes the budget; red so it reads as an error,
+        // not as an operator decision like `stopped`.
+        blocked: 'bg-rose-50 text-rose-600',
       };
       return classes[status] || 'bg-slate-100 text-slate-500';
+    },
+
+    projectStatusLabel(status) {
+      const labels = {
+        active: '进行中',
+        stopped: '已暂停',
+        completed: '已完成',
+        blocked: '已阻断',
+      };
+      return labels[status] || status;
+    },
+
+    projectBlockedReason() {
+      return this.project?.project?.blocked_reason || '';
     },
 
     decideBadgeText(decide, compact = false) {
@@ -110,6 +127,32 @@ export const formatMixins = {
       return this.severityOrder()
         .filter(key => counts[key])
         .map(key => ({ key, count: counts[key] }));
+    },
+
+    findingStatusLabel(status) {
+      return status === 'confirmed' ? '已确认' : '待确认';
+    },
+
+    findingStatusBadgeClass(status) {
+      return status === 'confirmed'
+        ? 'bg-teal-50 text-teal-600'
+        : 'bg-slate-100 text-slate-500';
+    },
+
+    evidenceKindLabel(kind) {
+      const labels = { exchange: '报文', document: '文档', seq: '会话' };
+      return labels[kind] || kind;
+    },
+
+    // "12.3k / 50k tokens": the header chip already shows usage, this adds the cap.
+    budgetLabel() {
+      const budget = this.project?.project?.token_budget;
+      if (!budget) return '';
+      return `${this.formatTokens(this.usageTotal())} / ${this.formatTokens(budget)}`;
+    },
+
+    pendingApprovalCount() {
+      return (this.toolApprovals || []).filter(item => item.status === 'pending').length;
     },
 
     sortedFindings() {
