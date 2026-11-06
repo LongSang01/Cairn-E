@@ -3,10 +3,12 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from typing import Any
 
 from cairn.contracts.models import ContextSummary, ProjectDetail, RecallPlan
 from cairn.dispatcher.config import ContextBudgetConfig, DispatchConfig, WorkerConfig
 from cairn.dispatcher.context import GraphView, prepare_snapshot
+from cairn.dispatcher.models import StepFailure
 from cairn.dispatcher.output_validation import parse_json_output, validate_decide_payload
 from cairn.dispatcher.prompting import (
     format_fact_ids,
@@ -47,11 +49,16 @@ def run_decide_task(
     cancellation: TaskCancellation,
     *,
     summary_sink: Callable[[SummaryRequest], bool] | None = None,
+    step_failures: dict[str, StepFailure] | None = None,
 ) -> str:
     """Decide: read the whole FGS graph, evolve it, never touch the world.
 
     ``summary_sink`` lets the scheduler fold expired history into the stored summaries
     after this run finishes instead of blocking it with a second model call.
+
+    ``step_failures`` is the scheduler's per-step record of consecutive failed Execute
+    runs (timeouts included). It is attached to ``open_steps`` so the model can change
+    route or abandon a step that keeps failing instead of re-running it blindly.
     """
     driver = get_driver(worker.type, config.runtime.execution)
     project_id = project.project.id
@@ -70,8 +77,12 @@ def run_decide_task(
             if health is not None:
                 return health
 
-        open_steps = [
-            {
+        failures = step_failures or {}
+        open_steps: list[dict[str, Any]] = []
+        for step in project.steps:
+            if step.kind != "action" or step.status not in ("pending", "running"):
+                continue
+            entry: dict[str, Any] = {
                 "id": step.id,
                 "from": step.from_,
                 "goal": step.goal,
@@ -83,9 +94,14 @@ def run_decide_task(
                 "worker": step.worker,
                 "note": step.note,
             }
-            for step in project.steps
-            if step.kind == "action" and step.status in ("pending", "running")
-        ]
+            failure = failures.get(step.id)
+            if failure is not None and failure.count > 0:
+                entry["failures"] = {
+                    "count": failure.count,
+                    "last_error": failure.reason,
+                    "last_at": failure.at,
+                }
+            open_steps.append(entry)
         fact_ids = [fact.id for fact in project.facts]
         goal_ids = [goal.id for goal in project.goals if goal.status == "active"]
         active_sub_goal_ids = [
@@ -261,7 +277,33 @@ def run_decide_task(
             record("rejected")
             return "rejected"
 
-        assert data is not None
+        # A no-op is the legal "wait" answer while steps are open: it carries no graph
+        # data, so it has to be handled before anything indexes into `data`. Persist
+        # what the run wants looked up next, then close the task cleanly.
+        if lookups["recall"] or lookups["doc_ids"]:
+            _store_lookups(client, project_id, lookups)
+
+        if kind == "noop":
+            LOG.info(
+                "decide finished without graph change project=%s worker=%s execute_ms=%s total_ms=%s",
+                project_id,
+                worker.name,
+                execute_ms,
+                total_ms,
+            )
+            record("success")
+            return "success"
+
+        if data is None:  # pragma: no cover - validation never returns no data for actions
+            LOG.error(
+                "decide returned no data project=%s worker=%s kind=%s",
+                project_id,
+                worker.name,
+                kind,
+            )
+            record("failed", f"no data for kind {kind}")
+            return "failed"
+
         if kind == "complete":
             for goal in data.get("goal_close") or ():
                 closed = client.close_goal(
@@ -307,22 +349,6 @@ def run_decide_task(
                 project_id,
                 worker.name,
                 data["from"],
-                execute_ms,
-                total_ms,
-            )
-            record("success")
-            return "success"
-
-        # The project keeps running, so persist what this run wants looked up next;
-        # the following Decide injects the results and clears the plan.
-        if lookups["recall"] or lookups["doc_ids"]:
-            _store_lookups(client, project_id, lookups)
-
-        if kind == "noop":
-            LOG.info(
-                "decide finished without graph change project=%s worker=%s execute_ms=%s total_ms=%s",
-                project_id,
-                worker.name,
                 execute_ms,
                 total_ms,
             )

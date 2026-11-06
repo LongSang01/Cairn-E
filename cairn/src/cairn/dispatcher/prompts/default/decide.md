@@ -57,6 +57,7 @@ If you genuinely cannot make progress: `{"accepted": false, "reason": "..."}`.
 - Priority is 0 (lowest) to 9 (highest). Higher priority runs first.
 - A `steps.update` entry may carry only a `note`: that pins short guidance onto a step the executor has not started yet. Combine it with `priority` or `status` when you also want to reprioritize or abandon.
 - Abandon pending steps that are exhausted, duplicated, or contradicted by new facts.
+- A step whose `failures.count` is already 2 or more has burned that many runs without landing a fact. Do not resend the same plan: change the approach, split it into smaller verifiable steps, or abandon it with a note describing what was tried.
 - Add at most {max_steps} steps in one run.
 - Never add facts. Only Execute submits facts.
 
@@ -97,6 +98,12 @@ reports, so paging forward never loses text.
 ```
 
 ## Open steps
+
+A step may carry `failures`: how many consecutive Execute runs already failed on it
+(timeouts included), with the last error and when it happened. That work never reached
+the graph, so the step is still open and the scheduler will hand it out again. When
+`failures.count` keeps growing, change route: split it into smaller steps, add the
+missing prerequisite, or abandon it with a note saying what was tried.
 
 ```
 {open_steps}

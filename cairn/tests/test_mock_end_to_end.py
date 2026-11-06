@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
+from conftest import bare_loop
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
 
@@ -461,7 +462,7 @@ def _config(
 def _loop(
     config: DispatchConfig, client: InProcessClient, containers: LocalContainerManager
 ) -> DispatcherLoop:
-    loop = DispatcherLoop.__new__(DispatcherLoop)
+    loop = bare_loop()
     loop.config = config
     loop.client = client
     loop.container_manager = containers
@@ -469,20 +470,6 @@ def _loop(
     loop.cleanup_executor = ThreadPoolExecutor(max_workers=1)
     loop.question_executor = ThreadPoolExecutor(max_workers=config.runtime.max_questions)
     loop.summary_executor = ThreadPoolExecutor(max_workers=config.runtime.max_summaries)
-    loop.futures = {}
-    loop.cleanup_futures = {}
-    loop.question_futures = {}
-    loop.summary_futures = {}
-    loop.summary_inflight = set()
-    loop._summary_lock = threading.Lock()
-    loop.decide_checkpoints = {}
-    loop.runtime_project_ids = set()
-    loop.worker_unhealthy_until = {}
-    loop.worker_rejected_until = {}
-    loop._log_state = {}
-    loop._cleanup_pending = set()
-    loop._inactive_cleanup_done = {}
-    loop.project_cursor = 0
     return loop
 
 

@@ -13,6 +13,7 @@ from conftest import (
     make_step,
 )
 
+from cairn.dispatcher.models import StepFailure
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.process import ProcessResult
@@ -69,6 +70,80 @@ def test_decide_writes_graph_snapshot_and_creates_steps(monkeypatch) -> None:
     assert content == graph_yaml
     assert graph_yaml not in driver.execute_prompts[0]
     assert path in driver.execute_prompts[0]
+
+
+def test_decide_noop_is_a_success_and_still_stores_the_recall_plan(monkeypatch) -> None:
+    """A "wait" answer carries no graph data and must not crash the task.
+
+    proj_009: 66 of the 71 `task crashed` Decide runs were exactly this — an empty
+    `data` object while every step was running — because a type-narrowing assert
+    indexed into the payload before the noop branch could return.
+    """
+    config = make_config()
+    project = make_project(steps=[make_step()])
+    client = FakeClient(project)
+    driver = FakeDriver()
+    lease = FakeLease()
+
+    monkeypatch.setattr(decide, "get_driver", lambda *_a, **_k: driver)
+    monkeypatch.setattr(decide.HeartbeatLease, "for_decide", _lease_factory(lease))
+    monkeypatch.setattr(
+        decide,
+        "run_worker_process",
+        lambda *_args, **_kwargs: ProcessResult(
+            0, '{"accepted":true,"data":{"recall":["uac"]}}', ""
+        ),
+    )
+
+    outcome = decide.run_decide_task(
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        config.workers[0],
+        TaskCancellation(),
+    )
+
+    assert outcome == "success"
+    assert client.recall_plan.queries == ["uac"]
+    assert client.released_decide == [("proj_001", "test-worker")]
+
+
+def test_decide_sees_how_many_times_a_step_already_failed(monkeypatch) -> None:
+    """The step's failure history must reach the prompt, not just the scheduler log."""
+    config = make_config()
+    project = make_project(steps=[make_step()])
+    client = FakeClient(project)
+    driver = FakeDriver()
+
+    monkeypatch.setattr(decide, "get_driver", lambda *_a, **_k: driver)
+    monkeypatch.setattr(decide.HeartbeatLease, "for_decide", _lease_factory(FakeLease()))
+    monkeypatch.setattr(
+        decide,
+        "run_worker_process",
+        lambda *_args, **_kwargs: ProcessResult(0, '{"accepted":true,"data":{}}', ""),
+    )
+
+    outcome = decide.run_decide_task(
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        config.workers[0],
+        TaskCancellation(),
+        step_failures={
+            "s001": StepFailure(count=3, reason="timed out after 600s", at="2026-11-06T01:24:27Z")
+        },
+    )
+
+    assert outcome == "success"
+    prompt = driver.execute_prompts[0]
+    assert '"failures"' in prompt
+    assert '"count": 3' in prompt
+    assert "timed out after 600s" in prompt
+    assert "2026-11-06T01:24:27Z" in prompt
 
 
 def test_decide_injects_and_clears_the_recall_plan(monkeypatch) -> None:
@@ -504,6 +579,7 @@ def test_execute_timeout_without_session_releases_claim(monkeypatch) -> None:
         lambda *_args, **_kwargs: ProcessResult(124, "", "", timed_out=True),
     )
 
+    reasons: list[str] = []
     outcome = execute.run_execute_task(
         config,
         client,
@@ -513,10 +589,13 @@ def test_execute_timeout_without_session_releases_claim(monkeypatch) -> None:
         step,
         config.workers[0],
         TaskCancellation(),
+        on_failure=reasons.append,
     )
 
     assert outcome == "failed"
     assert client.released == [("proj_001", "s001", "test-worker")]
+    # The scheduler needs the reason to tell the next Decide why this step is stuck.
+    assert reasons == [f"timed out after {config.tasks.execute.timeout}s"]
 
 
 def test_decide_startup_only_mode_skips_task_healthcheck(monkeypatch) -> None:

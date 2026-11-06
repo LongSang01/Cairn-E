@@ -78,7 +78,7 @@ tasks:
   question:
     timeout: 120
 container:
-  image: ghcr.io/oritera/cairn-worker-container:latest
+  image: cairn-worker-container:latest
   network_mode: host
   completed_action: stop        # stop | remove
   cap_add: []
@@ -122,6 +122,13 @@ workers:
 | `hints:N->M` | 提示增加 |
 | `findings:N->M` | Finding 增加 |
 | `open_steps:N->0` | 所有 Step 结束，需要重新规划 |
+| `stuck:s062,...` | 剩下的 pending Step 都已烧完 Execute 次数（`MAX_STEP_EXECUTE_ATTEMPTS`），必须换路线或 abandon |
+| `idle:1..3` | 图已全终结但项目仍 active，给 Decide 有界预算宣布完成 |
+
+`stuck:` / `idle:` 是"图本身没有要求"的 Decide：每个 checkpoint 只有
+`MAX_UNPROMPTED_DECIDE_RUNS` 次预算，且只在真正派发时扣减；图发生变化后预算重置。
+预算花完后调度器不再重跑这些 Step，只按 WARNING 记录卡住的 Step——宁可停在死局，
+也不要无限消耗 token。
 
 checkpoint 在 Decide 成功后**重新读取图**再写入，这样"Decide 只废弃了 Step"也会在 Step 清空时再次触发。
 
@@ -129,7 +136,13 @@ checkpoint 在 Decide 成功后**重新读取图**再写入，这样"Decide 只�
 
 - `{graph_yaml}`：图快照的容器内路径（大图不直接塞进提示词）。
 - `{fact_ids}`：可引用的事实 id 列表。
-- `{open_steps}`：pending / running 的 Step 摘要。
+- `{open_steps}`：pending / running 的 Step 摘要。失败过的 Step 额外带
+  `failures: {count, last_error, last_at}`：这是调度器内存里该 Step 连续失败的 Execute
+  轮数与最近一次原因（超时、退出码、解析失败等）。这些失败不会进入图，模型否则只会看到
+  一个"还在 pending"的 Step 并原样重发同一条计划；`count >= 2` 时提示词要求换路线、拆小步
+  或带说明地 abandon。连续失败达到 `MAX_STEP_EXECUTE_ATTEMPTS`（3）后调度器**不再重派**
+  该 Step，并在它是图上最后一个可跑的 Step 时用 `stuck:` 触发 Decide。Step 成功或废弃、
+  项目离开 active 时计数清零（废弃的 Step 在下一轮派发前就被丢弃）。
 - `{max_steps}`：一次运行最多新增多少 Step。
 
 #### 输出契约
@@ -159,7 +172,9 @@ checkpoint 在 Decide 成功后**重新读取图**再写入，这样"Decide 只�
   `complete` 也随之不生效——等它 `conclude` 出事实后下一轮 Decide 再完成。
 - 携带 `goals.add` / `steps.add` / 只改 `priority`、`note` 的 `steps.update` 时，图操作保留、
   `complete` 丢弃；既没有任何图操作又有 open Step 的裸 `complete` → 失败。
-- 没有任何动作且当前没有 open Step → 失败（必须推进）。
+- 没有任何动作但仍有 open Step → **noop**：合法的“等待”（典型场景是所有 Step 都在跑），记 success、
+  不动图，只保存本轮的 recall / doc 请求。
+- 没有任何动作且当前没有 open Step → 失败（必须推进：加 Step、关 Goal 或 complete）。
 - `accepted: false` → 直接判定 rejected。
 
 #### 接口映射
@@ -218,6 +233,10 @@ checkpoint 在 Decide 成功后**重新读取图**再写入，这样"Decide 只�
 | 心跳冲突（租约被回收） | 立即结束，不写图 |
 | 写 conclude 时项目已非 active | 视为正常结束，只释放 Step |
 | 连续失败 | worker 进入 rejected 冷却（项目 + 任务类型维度） |
+| Decide 失败（解析失败 / 完成被拒 / 崩溃） | checkpoint 不推进，同一 trigger 会立刻再次触发；按项目冷却 `DECIDE_RETRY_AFTER_SECONDS`（10s）后再派发 |
+| 同一 trigger 连续失败达 `MAX_CONSECUTIVE_DECIDE_FAILURES`（5） | 不再派发该 trigger，直到图变化（trigger 字符串随之改变）；否则冷却只是把"无限重试"摊慢成每 10s 一次 |
+| Decide 成功但图没变（noop） | 记 success，不写图；下一轮由 open Step / facts 变化继续驱动 |
+| 调度循环单轮抛非 HTTP 异常 | `LOG.exception` 后 sleep 一个 interval 继续，不让整个 dispatcher 退出 |
 
 ### Question（旁路提问）
 

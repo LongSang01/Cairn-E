@@ -1,27 +1,27 @@
 from __future__ import annotations
 
+import time
 from concurrent.futures import Future
 
-from conftest import FakeClient, make_config, make_project, make_step
+from conftest import FakeClient, bare_loop, make_config, make_project, make_step
 
-from cairn.dispatcher.models import DecideCheckpoint, RunningTask
+from cairn.dispatcher.models import DecideCheckpoint, RunningTask, StepFailure
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.scheduler.loop import DispatcherLoop
+from cairn.dispatcher.scheduler.loop._common import (
+    DECIDE_RETRY_AFTER_SECONDS,
+    MAX_CONSECUTIVE_DECIDE_FAILURES,
+)
+from cairn.dispatcher.scheduler.loop.dispatch import (
+    MAX_STEP_EXECUTE_ATTEMPTS,
+    MAX_UNPROMPTED_DECIDE_RUNS,
+)
 from cairn.dispatcher.scheduler.worker_select import choose_worker
 from cairn.server.models import Fact, Finding, ProjectSummary
 
 
 def _loop() -> DispatcherLoop:
-    loop = DispatcherLoop.__new__(DispatcherLoop)
-    loop.decide_checkpoints = {}
-    loop.runtime_project_ids = set()
-    loop.cleanup_futures = {}
-    loop._cleanup_pending = set()
-    loop._inactive_cleanup_done = {}
-    loop.worker_unhealthy_until = {}
-    loop.worker_rejected_until = {}
-    loop._log_state = {}
-    loop.project_cursor = 0
+    loop = bare_loop()
     loop.container_manager = type(
         "Containers", (), {"container_name": lambda _self, project_id: project_id}
     )()
@@ -43,6 +43,28 @@ def _summary(project_id: str, status: str) -> ProjectSummary:
         finding_count=0,
         hint_count=0,
     )
+
+
+def _dispatchable_loop(project, dispatched: list[tuple[str, str]]) -> DispatcherLoop:
+    """A loop that records Decide / Execute dispatches instead of running them."""
+    loop = _loop()
+    loop.config = make_config()
+    loop.futures = {}
+    loop.client = type(
+        "Client",
+        (),
+        {
+            "get_project": lambda _self, _project_id: project,
+            "export_project": lambda _self, _project_id: "graph",
+        },
+    )()
+    loop._dispatch_decide = lambda _project, _graph, trigger: (
+        dispatched.append(("decide", trigger)) or True
+    )
+    loop._dispatch_execute = lambda _project, _graph, step: (
+        dispatched.append(("execute", step.id)) or True
+    )
+    return loop
 
 
 def test_decide_trigger_detects_new_facts_and_drained_steps() -> None:
@@ -102,24 +124,24 @@ def test_decide_trigger_rewakes_a_terminal_graph_until_the_budget_is_spent() -> 
     assert loop._decide_trigger(project) == "idle:1"
 
     loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
-        fact_count=2, hint_count=1, finding_count=0, open_step_count=0, idle_attempts=3
+        fact_count=2, hint_count=1, finding_count=0, open_step_count=0, unprompted_attempts=3
     )
     assert loop._decide_trigger(project) is None
 
 
-def test_refresh_decide_checkpoint_keeps_the_idle_budget_only_while_nothing_changed() -> None:
+def test_refresh_decide_checkpoint_keeps_the_budget_only_while_nothing_changed() -> None:
     loop = _loop()
     loop.client = FakeClient(make_project())
     loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
-        fact_count=2, hint_count=1, finding_count=0, open_step_count=0, idle_attempts=2
+        fact_count=2, hint_count=1, finding_count=0, open_step_count=0, unprompted_attempts=2
     )
 
     loop._refresh_decide_checkpoint("proj_001")
-    assert loop.decide_checkpoints["proj_001"].idle_attempts == 2
+    assert loop.decide_checkpoints["proj_001"].unprompted_attempts == 2
 
     loop.client = FakeClient(make_project(steps=[make_step()]))
     loop._refresh_decide_checkpoint("proj_001")
-    assert loop.decide_checkpoints["proj_001"].idle_attempts == 0
+    assert loop.decide_checkpoints["proj_001"].unprompted_attempts == 0
 
 
 def test_refresh_runtime_projects_discards_active_and_changed_cleanup_markers() -> None:
@@ -179,83 +201,33 @@ def test_choose_worker_prefers_priority_then_lower_running_count() -> None:
 
 
 def test_new_fact_dispatches_decide_before_pending_step() -> None:
-    loop = _loop()
-    loop.config = make_config()
-    loop.futures = {}
     project = make_project(steps=[make_step()])
     project.facts.append(Fact(id="f002", description="new"))
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
     loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
         fact_count=2, hint_count=1, finding_count=0, open_step_count=1
     )
-    loop.container_manager = type(
-        "Containers", (), {"container_name": lambda _self, project_id: project_id}
-    )()
-    loop.client = type(
-        "Client",
-        (),
-        {
-            "get_project": lambda _self, _project_id: project,
-            "export_project": lambda _self, _project_id: "graph",
-        },
-    )()
-    dispatched: list[tuple[str, str]] = []
-    loop._dispatch_decide = lambda _project, _graph, trigger: (
-        dispatched.append(("decide", trigger)) or True
-    )
-    loop._dispatch_execute = lambda *_args: dispatched.append(("execute", "")) or True
 
     assert loop._try_dispatch_project(_summary("proj_001", "active"))
     assert dispatched == [("decide", "facts:2->3")]
 
 
 def test_initial_project_dispatches_decide() -> None:
-    loop = _loop()
-    loop.config = make_config()
-    loop.futures = {}
-    project = make_project()
-    loop.container_manager = type(
-        "Containers", (), {"container_name": lambda _self, project_id: project_id}
-    )()
-    loop.client = type(
-        "Client",
-        (),
-        {
-            "get_project": lambda _self, _project_id: project,
-            "export_project": lambda _self, _project_id: "graph",
-        },
-    )()
     dispatched: list[tuple[str, str]] = []
-    loop._dispatch_decide = lambda _project, _graph, trigger: (
-        dispatched.append(("decide", trigger)) or True
-    )
-    loop._dispatch_execute = lambda *_args: dispatched.append(("execute", "")) or True
+    loop = _dispatchable_loop(make_project(), dispatched)
 
     assert loop._try_dispatch_project(_summary("proj_001", "active"))
     assert dispatched == [("decide", "initial")]
 
 
 def test_project_with_pending_step_and_unchanged_graph_dispatches_execute_by_priority() -> None:
-    loop = _loop()
-    loop.config = make_config()
-    loop.futures = {}
     low = make_step("s001").model_copy(update={"priority": 1})
     high = make_step("s002").model_copy(update={"priority": 8})
-    project = make_project(steps=[low, high])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(make_project(steps=[low, high]), dispatched)
     loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
         fact_count=2, hint_count=1, finding_count=0, open_step_count=2
-    )
-    loop.client = type(
-        "Client",
-        (),
-        {
-            "get_project": lambda _self, _project_id: project,
-            "export_project": lambda _self, _project_id: "graph",
-        },
-    )()
-    dispatched: list[tuple[str, str]] = []
-    loop._dispatch_decide = lambda *_args: dispatched.append(("decide", "")) or True
-    loop._dispatch_execute = lambda _project, _graph, step: (
-        dispatched.append(("execute", step.id)) or True
     )
 
     assert loop._try_dispatch_project(_summary("proj_001", "active"))
@@ -353,3 +325,252 @@ def test_startup_only_worker_healthcheck_runs_automatic_startup_check() -> None:
     loop.run_startup_healthchecks()
 
     assert calls == [False]
+
+
+def _reap_decide(loop: DispatcherLoop, result: str | Exception, trigger: str = "initial") -> None:
+    future: Future = Future()
+    if isinstance(result, Exception):
+        future.set_exception(result)
+    else:
+        future.set_result(result)
+    loop.futures[future] = RunningTask(
+        project_id="proj_001",
+        task_type="decide",
+        worker_name="test-worker",
+        cancellation=TaskCancellation(),
+        trigger=trigger,
+    )
+    loop._reap_futures()
+
+
+def test_failed_decide_cools_down_before_the_same_trigger_retries() -> None:
+    """A failed Decide leaves the checkpoint untouched, so retry has to cool down.
+
+    proj_009: every noop Decide crashed, the checkpoint never advanced, and the same
+    trigger was dispatched again on the next tick — 71 runs, seconds apart.
+    """
+    loop = _loop()
+    loop.futures = {}
+
+    before = time.time()
+    _reap_decide(loop, "failed")
+
+    assert loop.decide_retry_until["proj_001"] >= before + DECIDE_RETRY_AFTER_SECONDS - 1
+    assert loop.decide_retry_until["proj_001"] <= time.time() + DECIDE_RETRY_AFTER_SECONDS
+
+
+def test_crashed_decide_also_cools_down() -> None:
+    loop = _loop()
+    loop.futures = {}
+
+    _reap_decide(loop, RuntimeError("boom"))
+
+    assert "proj_001" in loop.decide_retry_until
+    assert loop.decide_failures[("proj_001", "initial")] == 1
+
+
+def test_successful_decide_clears_the_cooldown() -> None:
+    loop = _loop()
+    loop.futures = {}
+    loop.client = FakeClient(make_project())
+    loop.decide_retry_until["proj_001"] = time.time() + 60
+
+    _reap_decide(loop, "success")
+
+    assert "proj_001" not in loop.decide_retry_until
+
+
+def test_repeated_decide_failures_stop_the_same_trigger_from_retrying() -> None:
+    """The cooldown only spaces the runs out; a counter has to stop them altogether.
+
+    proj_009 burned 71 noop runs on a graph that never moved: cooldown-free until the
+    fix, then one run every 10s — still unbounded.
+    """
+    project = make_project(steps=[make_step()])
+    project.facts.append(Fact(id="f002", description="new"))
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
+        fact_count=2, hint_count=1, finding_count=0, open_step_count=1
+    )
+    for _ in range(MAX_CONSECUTIVE_DECIDE_FAILURES):
+        _reap_decide(loop, "failed", trigger="facts:2->3")
+
+    loop.decide_retry_until.pop("proj_001")  # the cooldown has expired again
+
+    # The step still runs, but no further Decide is spent on the dead end.
+    assert loop._try_dispatch_project(_summary("proj_001", "active")) is True
+    assert dispatched == [("execute", "s001")]
+
+
+def test_a_new_graph_change_reopens_the_decide_budget() -> None:
+    project = make_project(steps=[make_step()])
+    project.facts.append(Fact(id="f002", description="new"))
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
+        fact_count=2, hint_count=1, finding_count=0, open_step_count=1
+    )
+    for _ in range(MAX_CONSECUTIVE_DECIDE_FAILURES):
+        _reap_decide(loop, "failed", trigger="facts:2->3")
+    loop.decide_retry_until.pop("proj_001")
+
+    project.facts.append(Fact(id="f003", description="newer"))
+
+    assert loop._try_dispatch_project(_summary("proj_001", "active")) is True
+    assert dispatched == [("decide", "facts:2->4")]
+
+
+def test_successful_decide_clears_the_failure_counters() -> None:
+    loop = _loop()
+    loop.futures = {}
+    loop.client = FakeClient(make_project())
+    loop.decide_failures[("proj_001", "facts:2->3")] = 4
+
+    _reap_decide(loop, "success", trigger="facts:2->3")
+
+    assert loop.decide_failures == {}
+
+
+def test_runtime_refresh_drops_decide_failures_of_inactive_projects() -> None:
+    loop = _loop()
+    loop.decide_failures = {("active", "t"): 1, ("stopped", "t"): 2}
+
+    loop._refresh_runtime_projects([_summary("active", "active"), _summary("stopped", "stopped")])
+
+    assert set(loop.decide_failures) == {("active", "t")}
+
+
+def test_decide_cooldown_skips_decide_but_still_dispatches_steps() -> None:
+    loop = _loop()
+    loop.futures = {}
+    loop.config = make_config()
+    loop.client = FakeClient(make_project(steps=[make_step()]))
+    loop.client.export_project = lambda _project_id: "graph"  # type: ignore[method-assign]
+    loop.decide_retry_until["proj_001"] = time.time() + 60
+    dispatched: list[str] = []
+    loop._dispatch_decide = lambda *_a, **_k: dispatched.append("decide") or True
+    loop._dispatch_execute = lambda *_a, **_k: dispatched.append("execute") or True
+
+    assert loop._try_dispatch_project(_summary("proj_001", "active")) is True
+    assert dispatched == ["execute"]
+
+
+def _reap_execute(loop: DispatcherLoop, outcome: str, reason: str | None = None) -> None:
+    future: Future = Future()
+    future.set_result(outcome)
+    task = RunningTask(
+        project_id="proj_001",
+        task_type="execute",
+        worker_name="test-worker",
+        cancellation=TaskCancellation(),
+        step_id="s001",
+    )
+    task.failure_reason = reason
+    loop.futures[future] = task
+    loop._reap_futures()
+
+
+def test_failed_execute_accumulates_the_step_history() -> None:
+    """A timeout never reaches the graph, so Decide can only learn it from here."""
+    loop = _loop()
+    loop.futures = {}
+
+    _reap_execute(loop, "failed", "timed out after 600s")
+    _reap_execute(loop, "failed", "worker exited with code 1")
+
+    failure = loop.step_failures[("proj_001", "s001")]
+    assert failure.count == 2
+    assert failure.reason == "worker exited with code 1"
+    assert failure.at
+
+
+def test_successful_execute_clears_the_step_history() -> None:
+    loop = _loop()
+    loop.futures = {}
+    _reap_execute(loop, "failed", "timed out after 600s")
+
+    _reap_execute(loop, "success")
+
+    assert ("proj_001", "s001") not in loop.step_failures
+
+
+def test_cancelled_execute_does_not_count_as_a_step_failure() -> None:
+    loop = _loop()
+    loop.futures = {}
+
+    _reap_execute(loop, "cancelled")
+
+    assert loop.step_failures == {}
+
+
+def test_a_stuck_step_is_handed_back_to_decide_instead_of_being_rerun() -> None:
+    """proj_009: s062 timed out four times because nothing capped the blind retries.
+
+    A failure never changes the graph, so the checkpoint saw no reason to wake Decide:
+    the step was released to ``pending`` and re-claimed on the very next tick, burning
+    one 600s model run each time.
+    """
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(make_project(steps=[make_step()]), dispatched)
+    loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
+        fact_count=2, hint_count=1, finding_count=0, open_step_count=1
+    )
+    for _ in range(MAX_STEP_EXECUTE_ATTEMPTS - 1):
+        _reap_execute(loop, "failed", "timed out after 600s")
+
+    # Below the cap the step is retried; no Decide is spent on it yet.
+    assert loop._decide_trigger(loop.client.get_project("proj_001")) is None
+
+    _reap_execute(loop, "failed", "timed out after 600s")
+
+    assert loop._decide_trigger(loop.client.get_project("proj_001")) == "stuck:s001"
+    assert loop._try_dispatch_project(_summary("proj_001", "active")) is True
+    assert dispatched == [("decide", "stuck:s001")]
+
+
+def test_a_stuck_step_is_not_rerun_once_the_decide_budget_is_spent() -> None:
+    """The escalation itself must be bounded, otherwise the dead end just moves to Decide."""
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(make_project(steps=[make_step()]), dispatched)
+    loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
+        fact_count=2,
+        hint_count=1,
+        finding_count=0,
+        open_step_count=1,
+        unprompted_attempts=MAX_UNPROMPTED_DECIDE_RUNS,
+    )
+    for _ in range(MAX_STEP_EXECUTE_ATTEMPTS):
+        _reap_execute(loop, "failed", "timed out after 600s")
+
+    assert loop._decide_trigger(loop.client.get_project("proj_001")) is None
+    assert loop._try_dispatch_project(_summary("proj_001", "active")) is False
+    assert dispatched == []
+
+
+def test_a_healthy_step_still_runs_while_another_step_is_stuck() -> None:
+    stuck = make_step("s001")
+    healthy = make_step("s002")
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(make_project(steps=[stuck, healthy]), dispatched)
+    loop.decide_checkpoints["proj_001"] = DecideCheckpoint(
+        fact_count=2, hint_count=1, finding_count=0, open_step_count=2
+    )
+    loop.step_failures[("proj_001", "s001")] = StepFailure(
+        count=MAX_STEP_EXECUTE_ATTEMPTS, reason="timed out after 600s"
+    )
+
+    assert loop._decide_trigger(loop.client.get_project("proj_001")) is None
+    assert loop._try_dispatch_project(_summary("proj_001", "active")) is True
+    assert dispatched == [("execute", "s002")]
+
+
+def test_step_failure_history_is_dropped_once_the_step_closes() -> None:
+    project = make_project(steps=[make_step(status="abandoned")])
+    loop = _dispatchable_loop(project, [])
+    loop.step_failures[("proj_001", "s001")] = StepFailure(count=2, reason="timed out")
+    loop.step_failures[("proj_002", "s001")] = StepFailure(count=2, reason="timed out")
+
+    loop._forget_closed_step_failures(project)
+
+    assert set(loop.step_failures) == {("proj_002", "s001")}

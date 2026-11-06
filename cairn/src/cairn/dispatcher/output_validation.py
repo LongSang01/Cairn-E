@@ -240,7 +240,8 @@ def validate_decide_payload(
         return "rejected", None, {"recall": [], "doc_ids": []}
     if accepted is None:
         data = payload
-    assert data is not None
+    if data is None:  # pragma: no cover - a wrapped payload always carries an object
+        raise ValueError("data must be an object")
 
     lookups = {
         "recall": _string_list(data.get("recall"), "recall", 3, 200),
@@ -396,7 +397,8 @@ def validate_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, An
         return "rejected", None
     if accepted is None:
         data = payload
-    assert data is not None
+    if data is None:  # pragma: no cover - a wrapped payload always carries an object
+        raise ValueError("data must be an object")
 
     status = data.get("status", "done")
     if status not in ("done", "abandoned"):

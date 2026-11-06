@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from cairn.dispatcher.config import DispatchConfig
 from cairn.dispatcher.protocol.client import ApiResult
+from cairn.dispatcher.scheduler.loop import DispatcherLoop
 from cairn.dispatcher.workers.base import DriverResult
 from cairn.dispatcher.workers.health import HealthResult
 from cairn.dispatcher.workers.usage import Usage
@@ -36,6 +38,34 @@ def client(tmp_path, monkeypatch) -> TestClient:
     db.configure(tmp_path / "cairn.db")
     with TestClient(app) as test_client:
         yield test_client
+
+
+def bare_loop() -> DispatcherLoop:
+    """A DispatcherLoop with only its in-memory bookkeeping wired.
+
+    ``__init__`` loads the config, builds a server client and opens four pools; tests
+    that exercise the mixins need none of that. Every attribute the mixins read lives
+    here so a new one cannot be forgotten by one test file and remembered by another.
+    """
+    loop = DispatcherLoop.__new__(DispatcherLoop)
+    loop.futures = {}
+    loop.cleanup_futures = {}
+    loop.question_futures = {}
+    loop.summary_futures = {}
+    loop.summary_inflight = set()
+    loop._summary_lock = threading.Lock()
+    loop.decide_checkpoints = {}
+    loop.runtime_project_ids = set()
+    loop.worker_unhealthy_until = {}
+    loop.worker_rejected_until = {}
+    loop.decide_retry_until = {}
+    loop.decide_failures = {}
+    loop.step_failures = {}
+    loop._log_state = {}
+    loop._cleanup_pending = set()
+    loop._inactive_cleanup_done = {}
+    loop.project_cursor = 0
+    return loop
 
 
 def make_config(runtime: dict | None = None) -> DispatchConfig:

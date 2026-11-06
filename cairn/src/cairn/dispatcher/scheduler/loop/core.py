@@ -13,7 +13,7 @@ from pathlib import Path
 import requests
 
 from cairn.dispatcher.config import DispatchConfig, LocalConfig
-from cairn.dispatcher.models import DecideCheckpoint, RunningTask
+from cairn.dispatcher.models import DecideCheckpoint, RunningTask, StepFailure
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.backend import ExecutionBackend
 from cairn.dispatcher.runtime.containers import ContainerManager
@@ -58,6 +58,10 @@ class CoreMixin:
         self.runtime_project_ids: set[str] = set()
         self.worker_unhealthy_until: dict[str, float] = {}
         self.worker_rejected_until: dict[tuple[str, str, str], float] = {}
+        self.decide_retry_until: dict[str, float] = {}
+        # (project_id, trigger) -> consecutive failed Decide runs on that same trigger.
+        self.decide_failures: dict[tuple[str, str], int] = {}
+        self.step_failures: dict[tuple[str, str], StepFailure] = {}
         self._log_state: dict[str, tuple[int, str, tuple[object, ...]]] = {}
         self._cleanup_pending: set[str] = set()
         self._inactive_cleanup_done: dict[str, str] = {}
@@ -103,6 +107,15 @@ class CoreMixin:
                     LOG.warning(
                         "dispatcher server request failed error=%s retry_in=%ss",
                         exc,
+                        self.config.runtime.interval,
+                    )
+                    time.sleep(self.config.runtime.interval)
+                    continue
+                except Exception:  # one bad tick must not stop the scheduler
+                    if once:
+                        raise
+                    LOG.exception(
+                        "dispatcher loop iteration failed retry_in=%ss",
                         self.config.runtime.interval,
                     )
                     time.sleep(self.config.runtime.interval)

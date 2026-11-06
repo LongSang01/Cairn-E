@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 
 from cairn.contracts.models import ProjectDetail, Step
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
@@ -41,8 +42,13 @@ def run_execute_task(
     step: Step,
     worker: WorkerConfig,
     cancellation: TaskCancellation,
+    on_failure: Callable[[str], None] | None = None,
 ) -> str:
-    """Execute: one claimed step, world tools, and submit_fact / submit_finding."""
+    """Execute: one claimed step, world tools, and submit_fact / submit_finding.
+
+    ``on_failure`` receives a short reason whenever the run ends in ``failed``, so the
+    scheduler can show the next Decide that this step has already burned attempts.
+    """
     driver = get_driver(worker.type, config.runtime.execution)
     project_id = project.project.id
     task_started = time.perf_counter()
@@ -52,6 +58,15 @@ def run_execute_task(
     )
     lease.start()
     stream: SessionStream | None = None
+
+    def report_failure(reason: str) -> None:
+        if on_failure is None:
+            return
+        try:
+            on_failure(reason)
+        except Exception:  # bookkeeping must never break the task
+            LOG.warning("execute failure callback failed", exc_info=True)
+
     try:
         container_name = container_manager.ensure_running(project_id)
 
@@ -82,6 +97,7 @@ def run_execute_task(
                     worker.name,
                     lease.failure.status_code,
                 )
+                report_failure(f"heartbeat lost during healthcheck: {lease.failure.status_code}")
                 best_effort_release(client, project_id, step.id, worker.name)
                 return "failed"
             if not health.ok:
@@ -183,6 +199,7 @@ def run_execute_task(
                 execute_ms,
             )
             record("failed", f"heartbeat lost: {lease.failure.status_code}")
+            report_failure(f"heartbeat lost: {lease.failure.status_code}")
             best_effort_release(client, project_id, step.id, worker.name)
             return "failed"
 
@@ -204,6 +221,7 @@ def run_execute_task(
                     preview(first.stderr),
                 )
                 record("failed", f"parse failed: {exc}")
+                report_failure(f"parse failed: {exc}")
                 return _try_conclude_fallback(
                     config,
                     client,
@@ -231,7 +249,18 @@ def run_execute_task(
                 record("rejected")
                 best_effort_release(client, project_id, step.id, worker.name)
                 return "rejected"
-            assert data is not None
+            if data is None:  # pragma: no cover - only "rejected" carries no data
+                LOG.error(
+                    "execute returned no data project=%s step=%s worker=%s kind=%s",
+                    project_id,
+                    step.id,
+                    worker.name,
+                    kind,
+                )
+                record("failed", f"no data for kind {kind}")
+                report_failure(f"no data for kind {kind}")
+                best_effort_release(client, project_id, step.id, worker.name)
+                return "failed"
             status = write_step_result(
                 client,
                 project_id,
@@ -257,6 +286,7 @@ def run_execute_task(
                 preview(first.stderr),
             )
             record("failed", "timed out")
+            report_failure(f"timed out after {config.tasks.execute.timeout}s")
             return _try_conclude_fallback(
                 config,
                 client,
@@ -283,14 +313,16 @@ def run_execute_task(
             preview(first.stderr),
         )
         record("failed", f"exit code {first.returncode}")
+        report_failure(f"worker exited with code {first.returncode}")
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
-    except Exception:
+    except Exception as exc:
         LOG.exception(
             "execute task crashed project=%s step=%s worker=%s", project_id, step.id, worker.name
         )
         if stream is not None:
             stream.finish(status="failed", error="task crashed")
+        report_failure(f"task crashed: {exc}")
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
     finally:
@@ -479,7 +511,17 @@ def _try_conclude_fallback(
         record("rejected")
         best_effort_release(client, project_id, step.id, worker.name)
         return "rejected"
-    assert data is not None
+    if data is None:  # pragma: no cover - only "rejected" carries no data
+        LOG.error(
+            "conclude returned no data project=%s step=%s worker=%s kind=%s",
+            project_id,
+            step.id,
+            worker.name,
+            kind,
+        )
+        record("failed", f"no data for kind {kind}")
+        best_effort_release(client, project_id, step.id, worker.name)
+        return "failed"
     status = write_step_result(
         client,
         project_id,

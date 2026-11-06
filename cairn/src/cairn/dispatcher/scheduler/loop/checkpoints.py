@@ -14,6 +14,13 @@ class CheckpointsMixin:
     def _refresh_runtime_projects(self, summaries: list[ProjectSummary]) -> None:
         active_ids = {summary.id for summary in summaries if summary.status == "active"}
         self.runtime_project_ids.intersection_update(active_ids)
+        # Per-project retry bookkeeping must not outlive the project's active window.
+        for step_key in [key for key in self.step_failures if key[0] not in active_ids]:
+            self.step_failures.pop(step_key, None)
+        for project_id in [pid for pid in self.decide_retry_until if pid not in active_ids]:
+            self.decide_retry_until.pop(project_id, None)
+        for key in [key for key in self.decide_failures if key[0] not in active_ids]:
+            self.decide_failures.pop(key, None)
         inactive_status_by_id = {
             summary.id: summary.status for summary in summaries if summary.status != "active"
         }
@@ -61,44 +68,48 @@ class CheckpointsMixin:
             )
 
     def _refresh_decide_checkpoint(self, project_id: str) -> None:
+        """Re-read the graph after a Decide run so the next trigger is up to date.
+
+        Never raises: a failed refresh only costs a little context next round, and the
+        caller must not turn an already successful run into a crash.
+        """
         try:
             project = self.client.get_project(project_id)
+            fact_count = len(project.facts)
+            hint_count = len(project.hints)
+            finding_count = len(project.findings)
+            open_step_count = self._project_open_step_count(project)
+            previous = self.decide_checkpoints.get(project_id)
+            unprompted_attempts = 0
+            if previous is not None and (
+                previous.fact_count,
+                previous.hint_count,
+                previous.finding_count,
+                previous.open_step_count,
+            ) == (
+                fact_count,
+                hint_count,
+                finding_count,
+                open_step_count,
+            ):
+                # Graph changed -> the budget starts over; a no-change run keeps the
+                # attempts it already spent so a stuck graph cannot spin forever.
+                unprompted_attempts = previous.unprompted_attempts
+            checkpoint = DecideCheckpoint(
+                fact_count=fact_count,
+                hint_count=hint_count,
+                finding_count=finding_count,
+                open_step_count=open_step_count,
+                unprompted_attempts=unprompted_attempts,
+            )
+            self.decide_checkpoints[project_id] = checkpoint
+            LOG.debug(
+                "decide checkpoint updated project=%s facts=%s hints=%s findings=%s open_steps=%s",
+                project_id,
+                checkpoint.fact_count,
+                checkpoint.hint_count,
+                checkpoint.finding_count,
+                checkpoint.open_step_count,
+            )
         except Exception:  # a stale checkpoint only costs a little context
             LOG.exception("decide checkpoint refresh failed project=%s", project_id)
-            return
-        fact_count = len(project.facts)
-        hint_count = len(project.hints)
-        finding_count = len(project.findings)
-        open_step_count = self._project_open_step_count(project)
-        previous = self.decide_checkpoints.get(project_id)
-        idle_attempts = 0
-        if previous is not None and (
-            previous.fact_count,
-            previous.hint_count,
-            previous.finding_count,
-            previous.open_step_count,
-        ) == (
-            fact_count,
-            hint_count,
-            finding_count,
-            open_step_count,
-        ):
-            # Graph changed -> the idle budget starts over; a no-change run keeps
-            # the attempts it already spent so a stuck graph cannot spin forever.
-            idle_attempts = previous.idle_attempts
-        checkpoint = DecideCheckpoint(
-            fact_count=fact_count,
-            hint_count=hint_count,
-            finding_count=finding_count,
-            open_step_count=open_step_count,
-            idle_attempts=idle_attempts,
-        )
-        self.decide_checkpoints[project_id] = checkpoint
-        LOG.debug(
-            "decide checkpoint updated project=%s facts=%s hints=%s findings=%s open_steps=%s",
-            project_id,
-            checkpoint.fact_count,
-            checkpoint.hint_count,
-            checkpoint.finding_count,
-            checkpoint.open_step_count,
-        )

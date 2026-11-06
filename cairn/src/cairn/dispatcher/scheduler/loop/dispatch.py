@@ -7,18 +7,24 @@ import time
 
 from cairn.contracts.models import ProjectDetail, ProjectSummary, Step
 from cairn.dispatcher.config import WorkerConfig
-from cairn.dispatcher.models import RunningTask
+from cairn.dispatcher.models import RunningTask, StepFailure
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.scheduler.worker_select import choose_worker
 from cairn.dispatcher.tasks.decide import run_decide_task
 from cairn.dispatcher.tasks.execute import run_execute_task
 
-from ._common import WorkerSelection
+from ._common import MAX_CONSECUTIVE_DECIDE_FAILURES, WorkerSelection
 
 LOG = logging.getLogger("cairn.dispatcher.scheduler.loop")
 
-# Bounded budget for Decide runs triggered by an idle (fully terminal) graph.
-MAX_IDLE_DECIDE_RUNS = 3
+# Bounded budget for Decide runs the graph itself did not ask for: an idle (fully
+# terminal) graph, or one whose remaining steps already burned their Execute attempts.
+MAX_UNPROMPTED_DECIDE_RUNS = 3
+
+# Consecutive failed Execute runs after which a pending step stops being re-dispatched.
+# Retrying it blindly only re-spends a model run on the same dead end (proj_009: s062
+# burned four 600s runs), so the next Decide has to change route or abandon it.
+MAX_STEP_EXECUTE_ATTEMPTS = 3
 
 
 class DispatchMixin:
@@ -122,11 +128,36 @@ class DispatchMixin:
         # Decide runs first and is serial per project: it evaluates the graph, then either
         # completes, adds/drops sub goals, or adds/reprioritizes/abandons steps.
         if project.project.decide is None:
-            decide_trigger = self._decide_trigger(project)
-            if decide_trigger is not None:
-                export_yaml = self.client.export_project(summary.id)
-                return self._dispatch_decide(project, export_yaml, decide_trigger)
+            now = time.time()
+            retry_at = self.decide_retry_until.get(summary.id, 0.0)
+            if retry_at > now:
+                self._log_changed(
+                    f"{skip_scope}:decide_retry",
+                    logging.DEBUG,
+                    "skip decide project=%s because the last decide failed retry_in=%.0fs",
+                    summary.id,
+                    retry_at - now,
+                )
+            else:
+                decide_trigger = self._decide_trigger(project)
+                if decide_trigger is not None:
+                    failures = self.decide_failures.get((summary.id, decide_trigger), 0)
+                    if failures >= MAX_CONSECUTIVE_DECIDE_FAILURES:
+                        # The cooldown alone keeps re-spending a run on the same dead end:
+                        # stop until the graph (and with it the trigger) moves.
+                        self._log_changed(
+                            f"{skip_scope}:decide_failures",
+                            logging.ERROR,
+                            "skip decide project=%s because trigger=%s already failed %s times",
+                            summary.id,
+                            decide_trigger,
+                            failures,
+                        )
+                    else:
+                        export_yaml = self.client.export_project(summary.id)
+                        return self._dispatch_decide(project, export_yaml, decide_trigger)
 
+        self._forget_closed_step_failures(project)
         running_step_ids = self._project_running_steps(summary.id)
         pending_steps = [
             step
@@ -144,12 +175,26 @@ class DispatchMixin:
                 summary.id,
                 sorted(running_step_ids),
             )
-        if pending_steps:
+        dispatchable_steps = [
+            step for step in pending_steps if not self._step_attempts_exhausted(summary.id, step.id)
+        ]
+        if dispatchable_steps:
             next_step = max(
-                pending_steps, key=lambda step: (step.priority, step.created_at, step.id)
+                dispatchable_steps, key=lambda step: (step.priority, step.created_at, step.id)
             )
             export_yaml = self.client.export_project(summary.id)
             return self._dispatch_execute(project, export_yaml, next_step)
+        if pending_steps:
+            # Every remaining step already burned its attempts; Decide is the only one
+            # that may re-route or abandon them, so do not spend another run here.
+            self._log_changed(
+                f"{skip_scope}:step_attempts_exhausted",
+                logging.WARNING,
+                "skip execute project=%s because the remaining steps burned their attempts steps=%s",
+                summary.id,
+                sorted(step.id for step in pending_steps),
+            )
+            return False
         if project.project.decide is not None:
             self._log_changed(
                 f"{skip_scope}:decide_claimed",
@@ -205,12 +250,12 @@ class DispatchMixin:
                 claim.status_code,
             )
             return False
-        if trigger.startswith("idle:"):
-            # Burn one idle attempt only when the run is actually dispatched; a busy
-            # worker or a lost claim must not consume the budget.
+        if trigger.startswith(("idle:", "stuck:")):
+            # Burn one unprompted attempt only when the run is actually dispatched; a
+            # busy worker or a lost claim must not consume the budget.
             checkpoint = self.decide_checkpoints.get(project.project.id)
             if checkpoint is not None:
-                checkpoint.idle_attempts += 1
+                checkpoint.unprompted_attempts += 1
         try:
             future = self.executor.submit(
                 run_decide_task,
@@ -222,6 +267,7 @@ class DispatchMixin:
                 worker,
                 cancellation := TaskCancellation(),
                 summary_sink=self.request_summary,
+                step_failures=self._project_step_failures(project.project.id),
             )
         except Exception:  # keep the loop alive when a submit fails
             LOG.exception(
@@ -235,6 +281,7 @@ class DispatchMixin:
             worker.name,
             cancellation,
             step_id=None,
+            trigger=trigger,
             fact_count=len(project.facts),
             hint_count=len(project.hints),
             finding_count=len(project.findings),
@@ -287,9 +334,13 @@ class DispatchMixin:
                 claim.status_code,
             )
             return False
-        try:
-            future = self.executor.submit(
-                run_execute_task,
+        cancellation = TaskCancellation()
+        task = RunningTask(
+            project.project.id, "execute", worker.name, cancellation, step_id=step.id
+        )
+
+        def job() -> str:
+            return run_execute_task(
                 self.config,
                 self.client,
                 self.container_manager,
@@ -297,8 +348,12 @@ class DispatchMixin:
                 export_yaml,
                 step,
                 worker,
-                cancellation := TaskCancellation(),
+                cancellation,
+                on_failure=lambda text: setattr(task, "failure_reason", text),
             )
+
+        try:
+            future = self.executor.submit(job)
         except Exception:  # keep the loop alive when a submit fails
             LOG.exception(
                 "failed to submit execute task project=%s step=%s worker=%s",
@@ -308,9 +363,7 @@ class DispatchMixin:
             )
             self._best_effort_release(project.project.id, step.id, worker.name)
             return False
-        self.futures[future] = RunningTask(
-            project.project.id, "execute", worker.name, cancellation, step_id=step.id
-        )
+        self.futures[future] = task
         self.runtime_project_ids.add(project.project.id)
         self._clear_project_log_state(project.project.id)
         LOG.info(
@@ -320,6 +373,14 @@ class DispatchMixin:
             worker.name,
         )
         return True
+
+    def _project_step_failures(self, project_id: str) -> dict[str, StepFailure]:
+        """The failure counters Decide gets to see, keyed by step id."""
+        return {
+            step_id: failure
+            for (pid, step_id), failure in self.step_failures.items()
+            if pid == project_id
+        }
 
     def _select_worker(self, project_id: str, task_type: str) -> WorkerSelection:
         now = time.time()
@@ -448,8 +509,52 @@ class DispatchMixin:
             changes.append(f"open_steps:{checkpoint.open_step_count}->0")
         if changes:
             return ",".join(changes)
-        if open_step_count == 0 and checkpoint.idle_attempts < MAX_IDLE_DECIDE_RUNS:
+        stuck_steps = self._stuck_step_ids(project)
+        if stuck_steps:
+            # Nothing dispatchable is left, so waiting for a graph change would wait
+            # forever: ask Decide to re-route or abandon what keeps failing.
+            if checkpoint.unprompted_attempts < MAX_UNPROMPTED_DECIDE_RUNS:
+                return f"stuck:{','.join(stuck_steps)}"
+            return None
+        if open_step_count == 0 and checkpoint.unprompted_attempts < MAX_UNPROMPTED_DECIDE_RUNS:
             # Everything is terminal but the project is still active: give Decide a
             # bounded budget to declare completion, otherwise the graph stays a dead end.
-            return f"idle:{checkpoint.idle_attempts + 1}"
+            return f"idle:{checkpoint.unprompted_attempts + 1}"
         return None
+
+    def _stuck_step_ids(self, project: ProjectDetail) -> list[str]:
+        """Pending steps that burned their attempts while nothing healthy is left to run.
+
+        Returns an empty list while any pending step can still be executed: the failing
+        step is only the scheduler's problem once it is the last thing on the graph.
+        """
+        pending_steps = [
+            step for step in project.steps if step.kind == "action" and step.status == "pending"
+        ]
+        if not pending_steps:
+            return []
+        exhausted = [
+            step.id
+            for step in pending_steps
+            if self._step_attempts_exhausted(project.project.id, step.id)
+        ]
+        if len(exhausted) != len(pending_steps):
+            return []
+        return sorted(exhausted)
+
+    def _step_attempts_exhausted(self, project_id: str, step_id: str) -> bool:
+        failure = self.step_failures.get((project_id, step_id))
+        return failure is not None and failure.count >= MAX_STEP_EXECUTE_ATTEMPTS
+
+    def _forget_closed_step_failures(self, project: ProjectDetail) -> None:
+        """Drop counters for steps a Decide closed, so the map tracks only live steps."""
+        open_ids = {
+            step.id
+            for step in project.steps
+            if step.kind == "action" and step.status in ("pending", "running")
+        }
+        project_id = project.project.id
+        for key in [
+            key for key in self.step_failures if key[0] == project_id and key[1] not in open_ids
+        ]:
+            self.step_failures.pop(key, None)

@@ -12,6 +12,7 @@
 
 ```bash
 docker pull ghcr.io/astral-sh/uv:python3.13-trixie-slim
+docker build -t cairn-worker-container:latest ./container
 ```
 
 ```bash
