@@ -13,6 +13,23 @@ services:
       # Worker containers run with host networking and reach the command guard over
       # host loopback; binding 127.0.0.1 keeps it off the LAN. nginx owns :8000.
       - "127.0.0.1:8001:8000"
+    environment:
+      # Command reviewer (LLM judge). It runs here, not in the worker: the worker is
+      # the untrusted side, and a reviewer inside it could be rewritten by the model
+      # it is supposed to police. Values come from `.env` so no key is committed and
+      # none is mounted into the nginx container.
+      CAIRN_REVIEWER_ENABLED: "${CAIRN_REVIEWER_ENABLED:-0}"
+      CAIRN_REVIEWER_MODEL: "${CAIRN_REVIEWER_MODEL:-}"
+      CAIRN_REVIEWER_BASE_URL: "${CAIRN_REVIEWER_BASE_URL:-}"
+      CAIRN_REVIEWER_API_KEY: "${CAIRN_REVIEWER_API_KEY:-}"
+      CAIRN_REVIEWER_API: "${CAIRN_REVIEWER_API:-openai-completions}"
+      CAIRN_REVIEWER_TIMEOUT_SECONDS: "${CAIRN_REVIEWER_TIMEOUT_SECONDS:-15}"
+      CAIRN_REVIEWER_RETRY_COUNT: "${CAIRN_REVIEWER_RETRY_COUNT:-2}"
+      CAIRN_REVIEWER_FAIL_ACTION: "${CAIRN_REVIEWER_FAIL_ACTION:-ask}"
+      CAIRN_REVIEWER_ASK_TIMEOUT_SECONDS: "${CAIRN_REVIEWER_ASK_TIMEOUT_SECONDS:-300}"
+      CAIRN_REVIEWER_ASK_TIMEOUT_ACTION: "${CAIRN_REVIEWER_ASK_TIMEOUT_ACTION:-deny}"
+      CAIRN_REVIEWER_INCOMPLETE_SCRIPT_ACTION: "${CAIRN_REVIEWER_INCOMPLETE_SCRIPT_ACTION:-model}"
+      CAIRN_REVIEWER_CACHE_TTL_SECONDS: "${CAIRN_REVIEWER_CACHE_TTL_SECONDS:-86400}"
     volumes:
       - ./datas/cairn/:/root/.local/share/cairn/
     healthcheck:

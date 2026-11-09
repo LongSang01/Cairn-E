@@ -26,6 +26,24 @@ docker compose up --build
 
 只重建系统镜像时 `make app` 即可；只重建 worker 时 `make worker` 即可。
 
+### 命令审核（可选）
+
+worker 里每条 `bash` 都会先问服务端。确定性规则没命中时，可以交给一个 LLM 审核员判断「这一次
+调用是否会对目标生产资产造成不可逆破坏」——它只看当前调用、工作目录、脚本快照、项目 `scope`
+与 `constraints`，不看计划与历史。未配置审核员时行为不变（默认放行）。
+
+```bash
+# .env（docker compose 自动读取）。不要写进 dispatch.yaml：那份文件会被挂载进 nginx。
+CAIRN_REVIEWER_ENABLED=1
+CAIRN_REVIEWER_MODEL=<judge model>
+CAIRN_REVIEWER_BASE_URL=https://<endpoint>/v1
+CAIRN_REVIEWER_API_KEY=<key>
+# 失败策略：ask 转人工（默认），deny 宁停不停
+CAIRN_REVIEWER_FAIL_ACTION=ask
+```
+
+判定分级、D/A 条款与已知绕过路径见 `docs/specs/dispatcher-design.md` 的「命令审核」一节。
+
 ### 本地质量门
 
 不依赖 CI，一条命令跑完 lint、格式、类型、Python 测试与前端测试：

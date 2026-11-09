@@ -138,7 +138,7 @@ def test_healthz_exposes_contract_version(client: TestClient) -> None:
 
 def test_schema_migrations_are_registered() -> None:
     # 契约兼容性依赖迁移台账:新版本只能追加,不能改写已发布的迁移。
-    assert [version for version, _ in db._MIGRATIONS] == [1, 2, 3, 4, 5, 6, 7]
+    assert [version for version, _ in db._MIGRATIONS] == [1, 2, 3, 4, 5, 6, 7, 8]
 
 
 def test_boundary_request_bodies_are_frozen() -> None:

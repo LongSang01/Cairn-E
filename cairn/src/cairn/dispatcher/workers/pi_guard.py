@@ -28,7 +28,7 @@ CONFIG_FILE = "cairn-guard.json"
 # Plain TypeScript-compatible JavaScript: pi compiles it on load, and the syntax
 # stays simple enough to keep the failure modes obvious.
 EXTENSION_SOURCE = """\
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -36,6 +36,18 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const CFG = JSON.parse(readFileSync(join(HERE, "..", "cairn-guard.json"), "utf8"));
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// The reviewer runs on the server, which cannot see inside this container, so a
+// judgement on `bash ./poc.sh` needs the script body. Snapshots are bounded: a huge
+// file is truncated and flagged, which the server treats as incomplete evidence
+// rather than as proof of innocence.
+const MAX_SCRIPT_BYTES = 65536;
+const MAX_SCRIPTS = 5;
+const SCRIPT_PATTERNS = [
+  /(?:^|[\\s;&|()])(?:bash|sh|source|\\.)\\s+([^\\s;&|()<>]+\\.(?:sh|bash))/g,
+  /(?:^|[\\s;&|()])(?:python3?|node|perl|ruby|php)\\s+([^\\s;&|()<>]+\\.(?:py|js|mjs|pl|rb|php))/g,
+  /(?:^|[\\s;&|()])(\\.?\\/[^\\s;&|()<>]+\\.(?:sh|bash|py|js|mjs|pl|rb|php))/g,
+];
 
 async function call(path, body) {
   const response = await fetch(`${CFG.api_url}${path}`, {
@@ -45,6 +57,41 @@ async function call(path, body) {
   });
   if (!response.ok) throw new Error(`cairn guard http ${response.status}`);
   return response.json();
+}
+
+function scriptCandidates(command) {
+  const found = [];
+  for (const pattern of SCRIPT_PATTERNS) {
+    let match;
+    while ((match = pattern.exec(command)) !== null) {
+      if (!found.includes(match[1])) found.push(match[1]);
+    }
+  }
+  return found.slice(0, MAX_SCRIPTS);
+}
+
+function captureScripts(command, cwd) {
+  const scripts = [];
+  for (const candidate of scriptCandidates(command)) {
+    const path = candidate.startsWith("/") ? candidate : join(cwd, candidate);
+    try {
+      if (!statSync(path).isFile()) continue;
+      const raw = readFileSync(path);
+      const truncated = raw.length > MAX_SCRIPT_BYTES;
+      scripts.push({
+        path,
+        source: "file",
+        content: raw.subarray(0, MAX_SCRIPT_BYTES).toString("utf8"),
+        complete: !truncated,
+        truncated,
+      });
+    } catch {
+      // Referenced but unreadable: report it so the server can route to a human
+      // instead of judging a command whose body nobody has seen.
+      scripts.push({ path, source: "file", content: "", complete: false, truncated: false });
+    }
+  }
+  return scripts;
 }
 
 function blocked(reason) {
@@ -81,6 +128,7 @@ export default function (pi) {
     const command = event.input && event.input.command;
     if (!command) return undefined;
 
+    const cwd = typeof process !== "undefined" && process.cwd ? process.cwd() : "/";
     let verdict;
     try {
       verdict = await call(`/projects/${CFG.project_id}/tool-guard/check`, {
@@ -88,6 +136,9 @@ export default function (pi) {
         command,
         worker: CFG.worker,
         session: CFG.session_id,
+        arguments: event.input || { command },
+        working_directory: cwd,
+        script_files: captureScripts(command, cwd),
       });
     } catch (error) {
       if (CFG.fail_action === "deny") {

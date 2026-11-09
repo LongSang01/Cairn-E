@@ -376,3 +376,20 @@ def test_configure_upgrades_legacy_tool_rules_and_steers(tmp_path, monkeypatch) 
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_scope'"
         ).fetchone()
+
+
+def test_configure_creates_the_review_cache_and_audit_reason(tmp_path, monkeypatch) -> None:
+    """v8: reviewer verdict cache, plus the *why* behind each audit row."""
+    path = tmp_path / "cairn.db"
+    monkeypatch.setattr(db, "_db_path", None)
+    db.configure(path)
+
+    with db.get_conn() as conn:
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tool_review_cache'"
+        ).fetchone()
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index'"
+            " AND name = 'tool_review_cache_by_expiry'"
+        ).fetchone()
+        assert "reason" in db._table_columns(conn, "tool_audit")

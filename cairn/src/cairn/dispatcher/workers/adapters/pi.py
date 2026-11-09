@@ -112,7 +112,9 @@ class PiDriver(WorkerDriver):
 
     def _local_argv(self, worker: WorkerConfig, prompt: str, session: str | None) -> list[str]:
         # Native pi: no models.json injection and no --provider/--model overrides, so pi uses
-        # its own host configuration. A tiny sh wrapper just ensures the session dir exists.
+        # its own host configuration. The command guard is still loaded explicitly: local mode
+        # is not a trusted mode, and without `-e` the extension is never discovered, leaving
+        # every shell command unaudited while the dispatcher reports the guard as installed.
         session_dir = self._session_dir(worker)
         pi_argv = [
             "--mode",
@@ -130,8 +132,16 @@ class PiDriver(WorkerDriver):
         if session:
             pi_argv.extend(["--session", session])
         pi_argv.extend(["-p", prompt])
-        script = 'sdir="$1"\nshift\nmkdir -p "$sdir"\nexec pi "$@"\n'
-        return ["/bin/sh", "-lc", script, "--", session_dir, *pi_argv]
+        script = (
+            'guard="$1"\n'
+            "shift\n"
+            'mkdir -p "$(dirname "$guard")"\n'
+            'if [ -f "$guard" ]; then\n'
+            '  exec pi --no-extensions -e "$guard" "$@"\n'
+            "fi\n"
+            'exec pi --no-extensions "$@"\n'
+        )
+        return ["/bin/sh", "-lc", script, "--", str(self.guard_extension(worker)), *pi_argv]
 
     def extract_session(self, session: str | None, stdout: str, stderr: str) -> str | None:
         if session:

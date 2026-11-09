@@ -69,7 +69,9 @@ tool_guard:
   # worker 容器使用 host 网络，这里指向宿主 loopback 上映射的服务端端口
   # （docker-compose.yaml 里 127.0.0.1:8001 -> 8000）。
   api_url: "http://127.0.0.1:8001"
-  # 服务端不可达时的策略：allow 不阻塞任务，deny 宁停不停。
+  # 扩展连不上服务端时的策略：allow 不阻塞任务，deny 宁停不停。
+  # 注意这是「扩展 → 服务端」这一跳；服务端审核员的失败策略是独立的
+  # CAIRN_REVIEWER_FAIL_ACTION（默认 ask，转人工）。
   fail_action: "allow"
 
 container:

@@ -7,7 +7,7 @@ directly, which removes its dependency on ``cairn.server``.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -622,6 +622,25 @@ class CloseGoalRequest(BaseModel):
         return text
 
 
+MAX_REVIEW_SCRIPT_CHARS = 65_536
+MAX_REVIEW_SCRIPTS = 5
+
+
+class ToolGuardScriptFile(BaseModel):
+    """A bounded snapshot of a file the command references, captured in the worker.
+
+    The reviewer runs on the server, which cannot see inside the worker container;
+    the pi extension reads the referenced script and sends its text, so judging
+    `bash ./scan.sh` is not reduced to judging a file name.
+    """
+
+    path: str = Field(min_length=1, max_length=512)
+    source: Literal["file", "command"] = "file"
+    content: str = Field(default="", max_length=MAX_REVIEW_SCRIPT_CHARS)
+    complete: bool = True
+    truncated: bool = False
+
+
 class ToolGuardCheckRequest(BaseModel):
     """One shell command a worker is about to run."""
 
@@ -629,6 +648,13 @@ class ToolGuardCheckRequest(BaseModel):
     command: str
     worker: str | None = None
     session: str | None = None
+    # Full tool arguments and bounded evidence for the reviewer. Optional so an older
+    # extension that only sends `command` keeps working (it just reviews less).
+    arguments: dict[str, Any] | None = None
+    working_directory: str | None = Field(default=None, max_length=4096)
+    script_files: list[ToolGuardScriptFile] = Field(
+        default_factory=list, max_length=MAX_REVIEW_SCRIPTS
+    )
 
     @field_validator("command")
     @classmethod

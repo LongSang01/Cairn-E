@@ -77,3 +77,36 @@ def test_install_stamps_the_project_and_api_url() -> None:
     extension = backend.writes[1][1]
     assert 'pi.on("tool_call"' in extension
     assert "session: CFG.session_id" in extension
+
+
+def test_extension_sends_the_full_call_plus_script_snapshots() -> None:
+    """The reviewer cannot see inside the container, so the extension ships evidence."""
+    extension = pi_guard.EXTENSION_SOURCE
+
+    assert "arguments: event.input || { command }" in extension
+    assert "working_directory: cwd" in extension
+    assert "script_files: captureScripts(command, cwd)" in extension
+    assert "const MAX_SCRIPT_BYTES = 65536;" in extension
+    assert "const MAX_SCRIPTS = 5;" in extension
+
+
+def test_extension_marks_an_unreadable_script_as_incomplete() -> None:
+    extension = pi_guard.EXTENSION_SOURCE
+
+    assert "const truncated = raw.length > MAX_SCRIPT_BYTES;" in extension
+    assert "complete: !truncated" in extension
+    assert 'content: "", complete: false, truncated: false' in extension
+
+
+def test_local_mode_still_loads_the_command_guard() -> None:
+    """Local mode is not trusted: without `-e` the extension is never discovered."""
+    from cairn.dispatcher.workers.adapters.pi import PiDriver
+
+    argv = PiDriver(local=True).build_execute(_worker(), "prompt", None).argv
+
+    assert argv[0] == "/bin/sh"
+    assert "/tmp/cairn-pi/pi-test/extensions/cairn-guard.ts" in argv
+    script = argv[2]
+    assert 'if [ -f "$guard" ]' in script
+    assert 'exec pi --no-extensions -e "$guard" "$@"' in script
+    assert 'exec pi --no-extensions "$@"' in script

@@ -126,6 +126,9 @@ def check_command(project_id: str, body: ToolGuardCheckRequest):
             command=body.command,
             worker=body.worker,
             session_id=body.session,
+            arguments=body.arguments,
+            working_directory=body.working_directory,
+            scripts=[item.model_dump() for item in body.script_files],
         )
 
 
@@ -186,6 +189,7 @@ def read_audit(project_id: str, limit: int = 100):
                     "decision": row["decision"],
                     "decision_source": row["decision_source"],
                     "rule_id": row["rule_id"],
+                    "reason": row["reason"],
                     "actor": row["actor"],
                     "worker": row["worker"],
                     "session": row["session_id"],

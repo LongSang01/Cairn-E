@@ -535,6 +535,37 @@ def _migration_007_steer_replies_and_scope(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_008_reviewer(conn: sqlite3.Connection) -> None:
+    """Verdict cache for the command reviewer, plus the reason behind each decision.
+
+    ``tool_audit`` recorded *what* was decided but not *why*, which made a denied
+    command impossible to explain after the fact. The cache is keyed by the command
+    and the project's scope digest, so editing the authorized assets invalidates
+    every stale verdict instead of letting it survive a scope change.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tool_review_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            command_hash TEXT NOT NULL,
+            scope_digest TEXT NOT NULL,
+            decision TEXT NOT NULL CHECK (decision IN ('allow', 'deny')),
+            reason TEXT NOT NULL,
+            rule TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            UNIQUE (project_id, command_hash, scope_digest)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS tool_review_cache_by_expiry ON tool_review_cache (expires_at)"
+    )
+    if "reason" not in _table_columns(conn, "tool_audit"):
+        conn.execute("ALTER TABLE tool_audit ADD COLUMN reason TEXT")
+
+
 _MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (1, _migration_001_baseline),
     (2, _migration_002_idempotency),
@@ -543,6 +574,7 @@ _MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (5, _migration_005_token_budget),
     (6, _migration_006_project_tool_rules),
     (7, _migration_007_steer_replies_and_scope),
+    (8, _migration_008_reviewer),
 )
 
 

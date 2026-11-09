@@ -140,6 +140,82 @@ workers:
 - 每个 worker 的 env 会和 `common_env` 合并，worker 自身优先；
 - 顶层、`runtime`、`workers[]` 及 `web` 配置均为严格模式，出现未知键会直接启动失败（拼错的键不会被静默忽略）。
 
+## 命令审核（Guard + Reviewer）
+
+平台的立场是「默认放行，拦住不该发生的破坏」：渗透任务本来就要跑工具、装环境、上传 payload，
+所以守卫不是白名单闸机，而是**审核员**。每次 `bash` 调用都在 pi 扩展里阻塞，判定分三层：
+
+| 层 | 判定者 | 结果 |
+|---|---|---|
+| 1 | 确定性规则（`tool_rules`，priority 降序，首个命中） | `allow` / `deny` / `ask` |
+| 2 | 未命中任何规则 → LLM 审核员 | `allow` / `deny` / `ask` |
+| 3 | `ask` | 进人工队列，超时按 `timeout_action`（默认 deny） |
+
+审核员不是黑名单，它用**两根轴**判断当前这一次调用的直接效果：
+
+- **可逆性**：只读、探测、注入探测恒可逆；覆盖/删除/清空/改配置/停服务不可逆。
+- **作用对象**：本次测试的产物，还是目标的生产资产（真实业务数据、真实账号、服务配置、在服务的进程）。
+
+合成规则：`不可逆 且 作用于生产资产 = deny`；判不明且判错代价是真实破坏 = `ask`；其余 `allow`。
+条款编号固定，写进审计的「命中规则」字段：
+
+| 编号 | 含义 |
+|---|---|
+| D1–D2 | 改账号可用性/口令；改账号与权限体系、建高权账号 |
+| D3 | 改系统与服务配置、防火墙、启动项 |
+| D4 | 破坏真实业务数据（`DELETE/PUT/PATCH` 删真实记录、`DROP/TRUNCATE`、无条件 `UPDATE/DELETE`、清库、删生产文件） |
+| D5–D6 | 停/禁在服务的进程；明示 flood 类 DoS |
+| A1–A6 | 利用 payload、本次测试产物、口令测试、侦察、只读（含读 `/etc/shadow`、`--dump`）、落脚侦察 |
+| ASK | 写/删/改但归属或影响面判不明 |
+
+输入边界是硬契约（与 ARTEX 的 judge 一致）：
+
+- 只给**当前调用**的完整参数、工作目录、命令引用脚本的源码快照、项目 `scope` 与 `constraints`；
+- **不给**任务描述、计划、历史调用或历史裁决——「计划」会被模型当成额外授权，「历史」会把一次小拒绝放大成猜谜；
+- 所有字段视为不可信数据，命令或脚本里的提示注入按数据处理；
+- 脚本快照由 worker 内的扩展采集（`bash ./x.sh` 这类命令的唯一信息来源），单文件 64KB、最多 5 个，超限标记 `truncated`；读不到标 `complete=false`。
+
+失败与超时策略：
+
+| 情形 | 行为 |
+|---|---|
+| 审核员超时/传输失败/输出不合契约 | 重试 `CAIRN_REVIEWER_RETRY_COUNT` 次，仍失败按 `fail_action`（默认 `ask` 转人工） |
+| 合法裁决 | `deny`/`ask` 即终局，不重试 |
+| 证据不完整（`truncated`/读失败） | `incomplete_script_action`：`model`（交给审核员）或 `ask` |
+| 人工审批超时 | `timeout_action`（默认 deny） |
+| 审核员未配置 | 回到默认 `allow`，与无守卫部署一致 |
+
+缓存：`allow`/`deny` 写入 `tool_review_cache`，键为「规范化命令 + 项目 + scope/constraints 摘要」。
+改动 `scope` 或 `constraints` 会换 key，旧裁决自然失效；`ask` 永不缓存（人工裁决不能被回放）。
+
+拒绝话术统一以「【Cairn 平台管控·非目标防御】」开头：渗透 agent 把平台拦截误读成目标 WAF 时会
+换手法反复绕，越绕越糟。
+
+审核员配置走 **server 环境变量**（不写进 `dispatch.yaml`——那份文件被 nginx 容器挂载）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `CAIRN_REVIEWER_ENABLED` | `0` | 总开关 |
+| `CAIRN_REVIEWER_MODEL` / `_BASE_URL` / `_API_KEY` | 空 | OpenAI 兼容端点；三者缺一即视为未配置 |
+| `CAIRN_REVIEWER_API` | `openai-completions` | 目前只支持该协议 |
+| `CAIRN_REVIEWER_TIMEOUT_SECONDS` / `_RETRY_COUNT` | `15` / `2` | 单次超时与重试次数 |
+| `CAIRN_REVIEWER_FAIL_ACTION` | `ask` | 审核失败时的动作 |
+| `CAIRN_REVIEWER_ASK_TIMEOUT_SECONDS` / `_ASK_TIMEOUT_ACTION` | `300` / `deny` | 人工队列超时 |
+| `CAIRN_REVIEWER_INCOMPLETE_SCRIPT_ACTION` | `model` | 证据不完整时 `model` 或 `ask` |
+| `CAIRN_REVIEWER_CACHE_TTL_SECONDS` | `86400` | 裁决缓存有效期 |
+| `CAIRN_REVIEWER_POLICY_FILE` | 空 | 覆盖内置策略文本（运维可调，不必重建镜像） |
+
+已知绕过路径（保留 `sudo` 的代价，必须靠部署侧兜住）：
+
+1. worker 内 root 可改 `/etc/hosts` 或 `iptables` 让审核端点不可达 → 走 `fail_action`。把
+   `fail_action` 设为 `deny` 可堵住，代价是审核服务抖动会中断扫描。
+2. worker 可调 `POST /projects/{id}/tool-rules` 写「全部放行」的规则 → 规则写入端点必须只对 UI
+   通道开放，worker 通道只给 check 与审批查询（服务令牌，见架构债清单）。
+3. local 模式曾经用 `--no-extensions` 启动且不加载扩展，审核为零 → 现在 local 分支同样用
+   `-e "$guard"` 显式加载，且有测试守住。
+4. `tmux`/后台常驻会话里后续命令不再逐条经过 `bash` 工具 → 至少要求启动命令本身过审，并在
+   report 中标注存在未逐条审核的子进程。
+
 ## 任务模型
 
 ### Decide

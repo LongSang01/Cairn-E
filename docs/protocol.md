@@ -94,6 +94,8 @@
 - `POST .../scope/check` 请求体 `{"command": string}`（必填），返回 `decision / reason / hosts / out_of_scope / gate`。它是**纯干跑**：只算范围闸门，不写审批/审计，不会返回 `ask`。工具规则的裁决请用 `/tool-guard/check`。
 - `ProjectDetail.scope` 同步给 Decide/Execute 的 prompt。空范围表示闸门关闭；命令中出现范围外主机即 `deny`。主机提取要求 token 起始或 URL scheme，支持域名、IPv4 与**带方括号的 IPv6**（不带方括号的裸 IPv6 不识别），`cat /var/log/app.log` 之类带点文件名不会被误判。范围白名单与项目级 `tool_rules` host allow 同时存在时**两道闸门都要通过**。
 - 范围判定在命令层而非资产表层：Cairn 没有资产库，因此 `curl`/`nmap` 直连未登记主机同样会被拦，比资产层的可见性闸门更严。
+- `POST /projects/{id}/tool-guard/check` 请求体扩展为 `{tool, command, worker?, session?, arguments?, working_directory?, script_files?}`。`script_files[]` 是 worker 侧采集的脚本快照（`path / source / content / complete / truncated`，单文件 ≤64KB、最多 5 个），只在规则未命中且服务端配置了审核员时使用。规则未命中时的裁决来源：`reviewer`（LLM）、`cache`（命中裁决缓存）、`reviewer-fail`（重试后按失败策略）、`reviewer-incomplete`（证据不完整且策略为 `ask`）；未配置审核员时仍为默认 `allow`。
+- `GET .../tool-audit` 的每条记录新增 `reason`，保留裁决理由与「命中规则」编号（`D4`/`A5`/`ASK`/`DEFAULT`），用于事后解释一次允许或拒绝。
 - 四种导出（`yaml` / `timeline` / `findings` / `report`）中的 `yaml` 与 `timeline` 会带上约束、范围、指令及其答复，供复盘审计。
 
 ## 3. SSE 事件流
