@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from cairn.dispatcher.protocol.client import ApiResult, CairnClient
 from cairn.dispatcher.runtime.process import ExecProcess
 
-
 LOG = logging.getLogger(__name__)
 HEARTBEAT_FAILURE_GRACE_MULTIPLIER = 2
 
@@ -40,32 +39,32 @@ class HeartbeatLease:
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     @classmethod
-    def for_intent(
+    def for_step(
         cls,
         client: CairnClient,
         project_id: str,
-        intent_id: str,
+        step_id: str,
         worker_name: str,
         interval: int,
-    ) -> "HeartbeatLease":
+    ) -> HeartbeatLease:
         return cls(
-            heartbeat=lambda: client.heartbeat(project_id, intent_id, worker_name),
-            scope=f"project={project_id} intent={intent_id}",
+            heartbeat=lambda: client.heartbeat_step(project_id, step_id, worker_name),
+            scope=f"project={project_id} step={step_id}",
             worker_name=worker_name,
             interval=interval,
         )
 
     @classmethod
-    def for_reason(
+    def for_decide(
         cls,
         client: CairnClient,
         project_id: str,
         worker_name: str,
         interval: int,
-    ) -> "HeartbeatLease":
+    ) -> HeartbeatLease:
         return cls(
-            heartbeat=lambda: client.reason_heartbeat(project_id, worker_name),
-            scope=f"project={project_id} reason",
+            heartbeat=lambda: client.decide_heartbeat(project_id, worker_name),
+            scope=f"project={project_id} decide",
             worker_name=worker_name,
             interval=interval,
         )
@@ -95,7 +94,9 @@ class HeartbeatLease:
                 self._fail(result.status_code, result.text)
                 return
             elapsed = time.monotonic() - self._last_success_at
-            grace_seconds = max(float(self._interval), float(self._interval * HEARTBEAT_FAILURE_GRACE_MULTIPLIER))
+            grace_seconds = max(
+                float(self._interval), float(self._interval * HEARTBEAT_FAILURE_GRACE_MULTIPLIER)
+            )
             LOG.warning(
                 "heartbeat transient failure scope=%s worker=%s status=%s elapsed=%.1fs grace=%.1fs",
                 self._scope,

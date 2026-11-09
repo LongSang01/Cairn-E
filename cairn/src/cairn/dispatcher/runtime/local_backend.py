@@ -16,8 +16,8 @@ class LocalBackend:
 
     Each project gets an isolated working directory under ``workspace_root`` (defaulting
     to the directory the dispatcher was started in). Worker processes inherit the host
-    environment so the pre-configured ``claude`` / ``codex`` / ``pi`` CLIs and their
-    credentials are used as-is; no API keys are injected. There are no containers to
+    environment so the pre-configured ``pi`` CLI and its credentials are used as-is;
+    no API keys are injected. There are no containers to
     build or tear down, so the container-lifecycle methods are inert.
     """
 
@@ -71,15 +71,14 @@ class LocalBackend:
     def cleanup_completed(self, project_id: str) -> bool:
         if self._config.completed_action == "remove":
             project_dir = self._project_dir(project_id)
-            LOG.info("removing completed project workdir project=%s dir=%s", project_id, project_dir)
+            LOG.info(
+                "removing completed project workdir project=%s dir=%s", project_id, project_dir
+            )
             shutil.rmtree(project_dir, ignore_errors=True)
         return True
 
     def cleanup_stopped(self, project_id: str) -> bool:
         return True
-
-    def managed_container_names(self) -> list[str]:
-        return []
 
     def _project_dir(self, project_id: str) -> Path:
         return self._root / project_id.replace("/", "-")

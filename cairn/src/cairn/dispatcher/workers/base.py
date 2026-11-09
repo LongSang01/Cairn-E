@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import abc
-import re
-import uuid
 from dataclasses import dataclass
 
 from cairn.dispatcher.config import WorkerConfig
 from cairn.dispatcher.workers.health import HealthResult
+from cairn.dispatcher.workers.usage import Usage
 
 
 @dataclass(slots=True)
@@ -26,9 +25,6 @@ class WorkerDriver(abc.ABC):
 
         None means the driver has no host binary to verify (or is not used locally).
         """
-        return None
-
-    def prepare_session(self) -> str | None:
         return None
 
     @abc.abstractmethod
@@ -53,19 +49,10 @@ class WorkerDriver(abc.ABC):
     def extract_response_text(self, stdout: str, stderr: str) -> str:
         return stdout
 
+    def extract_usage(self, stdout: str, stderr: str) -> Usage | None:
+        """Token usage the CLI printed, if it reports any. Absent means unmeasured."""
+        return None
 
-class SeedSessionDriver(WorkerDriver):
     def prepare_session(self) -> str | None:
-        return str(uuid.uuid4())
-
-
-class RegexSessionDriver(WorkerDriver):
-    session_pattern = re.compile(r"session id:\s*([0-9a-fA-F-]+)")
-
-    def extract_session(self, session: str | None, stdout: str, stderr: str) -> str | None:
-        if session:
-            return session
-        match = self.session_pattern.search(stderr)
-        if match:
-            return match.group(1)
+        """A per-run session id the CLI will accept; None means the CLI assigns one."""
         return None

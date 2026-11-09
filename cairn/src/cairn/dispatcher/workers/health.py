@@ -29,11 +29,15 @@ def http_ping(
     instead of shelling a curl into a container.
     """
     try:
-        response = requests.post(url, headers=headers, json=json_body, timeout=timeout, proxies=proxies)
+        response = requests.post(
+            url, headers=headers, json=json_body, timeout=timeout, proxies=proxies
+        )
     except requests.RequestException as exc:
         return HealthResult(ok=False, status=None, detail=_clip(str(exc)))
     ok = 200 <= response.status_code < 300
-    return HealthResult(ok=ok, status=response.status_code, detail="" if ok else _clip(response.text))
+    return HealthResult(
+        ok=ok, status=response.status_code, detail="" if ok else _clip(response.text)
+    )
 
 
 def proxies_from_env(env: dict[str, str]) -> dict[str, str] | None:

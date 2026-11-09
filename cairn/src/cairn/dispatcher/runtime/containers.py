@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import io
 import logging
-from pathlib import PurePosixPath
 import tarfile
 import threading
+from pathlib import PurePosixPath
 
 import docker
 from docker.errors import APIError, DockerException, NotFound
@@ -43,10 +43,20 @@ class ContainerManager:
             LOG.debug("container already running project=%s container=%s", project_id, name)
             return name
         if state is not None:
-            LOG.info("starting existing container project=%s container=%s state=%s", project_id, name, state)
+            LOG.info(
+                "starting existing container project=%s container=%s state=%s",
+                project_id,
+                name,
+                state,
+            )
             self._start_existing(name)
             return name
-        LOG.info("creating container project=%s container=%s image=%s", project_id, name, self._config.image)
+        LOG.info(
+            "creating container project=%s container=%s image=%s",
+            project_id,
+            name,
+            self._config.image,
+        )
         try:
             self._client.containers.run(
                 self._config.image,
@@ -55,18 +65,30 @@ class ContainerManager:
                 name=name,
                 network_mode=self._config.network_mode,
                 cap_add=self._config.cap_add or None,
+                mem_limit=self._config.mem_limit,
+                nano_cpus=self._config.nano_cpus,
+                pids_limit=self._config.pids_limit,
             )
             LOG.info("created container project=%s container=%s", project_id, name)
             return name
         except APIError as exc:
             if not self._is_name_conflict(exc):
                 raise RuntimeError(f"failed to create container {name}: {exc}") from exc
-        LOG.info("container name conflict, reusing existing container project=%s container=%s", project_id, name)
+        LOG.info(
+            "container name conflict, reusing existing container project=%s container=%s",
+            project_id,
+            name,
+        )
         state = self.inspect_state(name)
         if state == "running":
             return name
         if state is not None:
-            LOG.info("starting conflicted existing container project=%s container=%s state=%s", project_id, name, state)
+            LOG.info(
+                "starting conflicted existing container project=%s container=%s state=%s",
+                project_id,
+                name,
+                state,
+            )
             self._start_existing(name)
             return name
         raise RuntimeError(f"failed to create container {name}")
@@ -97,7 +119,9 @@ class ContainerManager:
             return True
         container = self._require_container(name)
         if self._config.completed_action == "remove":
-            LOG.info("removing completed project container project=%s container=%s", project_id, name)
+            LOG.info(
+                "removing completed project container project=%s container=%s", project_id, name
+            )
             try:
                 container.remove(force=True)
             except NotFound:
@@ -106,8 +130,10 @@ class ContainerManager:
                 LOG.warning("failed to remove container=%s error=%s", name, exc)
                 return False
             return self.inspect_state(name) is None
-        elif state == "running":
-            LOG.info("stopping completed project container project=%s container=%s", project_id, name)
+        if state == "running":
+            LOG.info(
+                "stopping completed project container project=%s container=%s", project_id, name
+            )
             try:
                 container.stop(timeout=1)
             except NotFound:
@@ -134,29 +160,6 @@ class ContainerManager:
             return False
         return self.inspect_state(name) != "running"
 
-    def cleanup_orphan(self, name: str) -> bool:
-        state = self.inspect_state(name)
-        if state is None:
-            return True
-        LOG.info("removing orphan project container container=%s state=%s", name, state)
-        container = self._require_container(name)
-        try:
-            container.remove(force=True)
-        except NotFound:
-            return True
-        except DockerException as exc:
-            LOG.warning("failed to remove orphan container=%s error=%s", name, exc)
-            return False
-        return self.inspect_state(name) is None
-
-    def managed_container_names(self) -> list[str]:
-        try:
-            containers = self._client.containers.list(all=True)
-        except DockerException as exc:
-            LOG.warning("failed to list managed containers error=%s", exc)
-            return []
-        return sorted(container.name for container in containers if container.name.startswith(self._PREFIX))
-
     def needs_completed_cleanup(self, project_id: str) -> bool:
         name = self.container_name(project_id)
         state = self.inspect_state(name)
@@ -165,9 +168,6 @@ class ContainerManager:
         if self._config.completed_action == "remove":
             return True
         return state == "running"
-
-    def needs_orphan_cleanup(self, name: str) -> bool:
-        return self.inspect_state(name) is not None
 
     def needs_stopped_cleanup(self, project_id: str) -> bool:
         return self.inspect_state(self.container_name(project_id)) == "running"
@@ -243,6 +243,7 @@ class ContainerManager:
         parts = target.parts[1:]
         if not parts or any(part in ("", ".", "..") for part in parts):
             raise ValueError(f"invalid container file path: {path}")
+        archive_parts: tuple[str, ...]
         if len(parts) == 1:
             archive_path = "/"
             archive_parts = parts

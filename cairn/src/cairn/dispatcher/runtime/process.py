@@ -1,17 +1,21 @@
 from __future__ import annotations
 
-from contextlib import suppress
-from dataclasses import dataclass
 import logging
 import threading
 import time
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import Callable
+from contextlib import suppress
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from docker.errors import APIError, DockerException
-from docker.models.containers import Container
+if TYPE_CHECKING:
+    from docker.models.containers import Container
 
 LOG = logging.getLogger(__name__)
 EXEC_KILL_JOIN_TIMEOUT_SECONDS = 5.0
+
+# Receives stdout chunks as they arrive, so a live Session can stream the transcript.
+OutputCallback = Callable[[str], None]
 
 
 @dataclass(slots=True)
@@ -30,7 +34,10 @@ class ExecProcess(Protocol):
 
     Container mode uses ManagedProcess; local mode uses LocalProcess. Both expose this
     surface so the task runners, heartbeat lease and cancellation stay backend-agnostic.
+    Assigning `on_stdout` streams chunks to the caller while the process is still running.
     """
+
+    on_stdout: OutputCallback | None
 
     def start(self) -> None: ...
 
@@ -42,9 +49,16 @@ class ExecProcess(Protocol):
 
 
 class ManagedProcess:
-    def __init__(self, container: Container, command: list[str], env: dict[str, str]):
+    def __init__(
+        self,
+        container: Container,
+        command: list[str],
+        env: dict[str, str],
+        on_stdout: OutputCallback | None = None,
+    ):
         self.command = command
         self.env = env
+        self.on_stdout = on_stdout
         self._container = container
         self._api = container.client.api
         self._exec_id: str | None = None
@@ -95,12 +109,18 @@ class ManagedProcess:
         )
 
     def kill(self) -> None:
+        # Imported here so `execution: local` works without the optional `container`
+        # extra installed. Only the container path ever reaches this code.
+        from docker.errors import DockerException
+
         if self._exec_id is None:
             return
         try:
             details = self._api.exec_inspect(self._exec_id)
         except DockerException as exc:
-            LOG.warning("failed to inspect exec before kill exec_id=%s error=%s", self._exec_id, exc)
+            LOG.warning(
+                "failed to inspect exec before kill exec_id=%s error=%s", self._exec_id, exc
+            )
             return
         if not details.get("Running"):
             return
@@ -116,6 +136,8 @@ class ManagedProcess:
         self.kill()
 
     def _read_stream(self) -> None:
+        from docker.errors import DockerException
+
         assert self._exec_id is not None
         stream: Any | None = None
         try:
@@ -130,6 +152,7 @@ class ManagedProcess:
                 stdout, stderr = self._split_chunk(chunk)
                 if stdout:
                     self._stdout.append(stdout)
+                    self._emit(stdout)
                 if stderr:
                     self._stderr.append(stderr)
         except DockerException as exc:
@@ -154,6 +177,8 @@ class ManagedProcess:
                 response_close()
 
     def _resolve_exit_code(self) -> int:
+        from docker.errors import DockerException
+
         assert self._exec_id is not None
         deadline = time.monotonic() + EXEC_KILL_JOIN_TIMEOUT_SECONDS
         while True:
@@ -171,6 +196,8 @@ class ManagedProcess:
             time.sleep(0.1)
 
     def _kill_pid(self, pid: int) -> None:
+        from docker.errors import APIError
+
         last_error: str | None = None
         for command in (
             ["kill", "-KILL", str(pid)],
@@ -186,7 +213,21 @@ class ManagedProcess:
             if exit_code in (None, 0, 1):
                 return
         if last_error is not None:
-            LOG.warning("failed to kill container exec pid=%s container=%s error=%s", pid, self._container.name, last_error)
+            LOG.warning(
+                "failed to kill container exec pid=%s container=%s error=%s",
+                pid,
+                self._container.name,
+                last_error,
+            )
+
+    def _emit(self, stdout: str) -> None:
+        callback = self.on_stdout
+        if callback is None:
+            return
+        try:
+            callback(stdout)
+        except Exception:  # a broken observer must not kill the reader
+            LOG.warning("stdout callback failed", exc_info=True)
 
     @staticmethod
     def _split_chunk(chunk: Any) -> tuple[str, str]:
