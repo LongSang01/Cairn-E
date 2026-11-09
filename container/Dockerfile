@@ -11,7 +11,7 @@ FROM --platform=amd64 debian:trixie-slim
 # ---------------------------------------------------------------------------
 ARG APT_MIRROR=http://mirrors.ustc.edu.cn/debian
 ARG APT_SECURITY_MIRROR=http://mirrors.ustc.edu.cn/debian-security
-ARG PIP_INDEX=https://mirrors.ustc.edu.cn/pypi/simple
+ARG PIP_INDEX=https://mirrors.aliyun.com/pypi/simple
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 ARG GH_PROXY=https://gh-proxy.com/
 
@@ -39,7 +39,7 @@ RUN set -eux; \
     printf '%s\n' \
       '[global]' \
       "index-url = ${PIP_INDEX}" \
-      'trusted-host = mirrors.ustc.edu.cn' \
+      'trusted-host = mirrors.aliyun.com' \
       > /etc/pip.conf
 
 ENV TZ=Asia/Shanghai

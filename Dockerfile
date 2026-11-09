@@ -11,7 +11,7 @@
 #   docker build -t cairn-app .
 FROM --platform=amd64 ghcr.io/astral-sh/uv:python3.13-trixie-slim
 
-ARG PIP_INDEX=https://mirrors.ustc.edu.cn/pypi/simple
+ARG PIP_INDEX=https://mirrors.aliyun.com/pypi/simple
 
 COPY ./cairn/pyproject.toml /cairn/pyproject.toml
 COPY ./cairn/uv.lock /cairn/uv.lock
