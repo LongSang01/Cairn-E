@@ -53,11 +53,11 @@ def test_steer_can_be_answered_once_and_replied_text_is_stable(client: TestClien
     assert first.json()["answered_at"] is not None
 
     # Retried Decide runs must not overwrite the first answer.
-    second = client.post(
-        f"/projects/{pid}/steers/{sid}/answer", json={"text": "另一句回复"}
-    )
+    second = client.post(f"/projects/{pid}/steers/{sid}/answer", json={"text": "另一句回复"})
     assert second.json()["answer"] == "已停止该目标的探测。"
-    assert client.post(f"/projects/{pid}/steers/missing/answer", json={"text": "x"}).status_code == 404
+    assert (
+        client.post(f"/projects/{pid}/steers/missing/answer", json={"text": "x"}).status_code == 404
+    )
 
 
 def test_validation_accepts_steer_replies_in_any_payload_kind() -> None:
@@ -181,8 +181,16 @@ def test_scope_is_project_scoped_and_validated(client: TestClient) -> None:
     assert entry.status_code == 201
     assert _check(client, a, "curl 9.9.9.9")["decision"] == "deny"
     assert _check(client, b, "curl 9.9.9.9") == {"decision": "allow"}
-    assert client.post(f"/projects/{a}/scope", json={"kind": "cidr", "value": "broken"}).status_code == 422
-    assert client.post(f"/projects/{a}/scope", json={"kind": "domain", "value": "example.com"}).status_code == 409
+    assert (
+        client.post(f"/projects/{a}/scope", json={"kind": "cidr", "value": "broken"}).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            f"/projects/{a}/scope", json={"kind": "domain", "value": "example.com"}
+        ).status_code
+        == 409
+    )
     assert client.delete(f"/projects/{a}/scope/{entry.json()['id']}").status_code == 204
     assert _check(client, a, "curl 9.9.9.9") == {"decision": "allow"}
 
@@ -192,7 +200,12 @@ def test_scope_and_tool_rule_gates_both_apply(client: TestClient) -> None:
     client.post(f"/projects/{pid}/scope", json={"kind": "domain", "value": "example.com"})
     client.post(
         f"/projects/{pid}/tool-rules",
-        json={"target": "host", "match_type": "exact", "pattern": "api.example.com", "action": "allow"},
+        json={
+            "target": "host",
+            "match_type": "exact",
+            "pattern": "api.example.com",
+            "action": "allow",
+        },
     )
     assert _check(client, pid, "curl https://api.example.com/v1") == {"decision": "allow"}
     # Allowed by the scope domain suffix but not by the narrower tool rule.
@@ -324,9 +337,7 @@ def test_ipv6_targets_are_visible_to_the_scope_gate(client: TestClient) -> None:
 def test_scope_check_is_a_pure_dry_run(client: TestClient) -> None:
     pid = _project(client)
     client.post(f"/projects/{pid}/scope", json={"kind": "domain", "value": "example.com"})
-    result = client.post(
-        f"/projects/{pid}/scope/check", json={"command": "curl 9.9.9.9"}
-    ).json()
+    result = client.post(f"/projects/{pid}/scope/check", json={"command": "curl 9.9.9.9"}).json()
     assert result["decision"] == "deny"
     assert result["out_of_scope"] == ["9.9.9.9"]
     assert result["gate"] is True
@@ -344,14 +355,20 @@ def test_deleting_a_project_removes_its_task_rules(client: TestClient) -> None:
         json={"target": "command", "match_type": "contains", "pattern": "nmap", "action": "deny"},
     )
     with db.get_conn() as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) AS n FROM tool_rules WHERE project_id = ?", (pid,)
-        ).fetchone()["n"] == 1
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM tool_rules WHERE project_id = ?", (pid,)
+            ).fetchone()["n"]
+            == 1
+        )
     assert client.delete(f"/projects/{pid}").status_code in (200, 204)
     with db.get_conn() as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) AS n FROM tool_rules WHERE project_id = ?", (pid,)
-        ).fetchone()["n"] == 0
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM tool_rules WHERE project_id = ?", (pid,)
+            ).fetchone()["n"]
+            == 0
+        )
 
 
 def test_exports_carry_constraints_steers_replies_and_scope(client: TestClient) -> None:

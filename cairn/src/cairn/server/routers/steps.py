@@ -193,7 +193,9 @@ def conclude(project_id: str, step_id: str, body: ConcludeStepRequest):
         for submitted in body.submitted_facts():
             # Restating a known fact must not grow the graph: reuse the row and only
             # attach any new documents to it.
-            existing = find_fact_by_content(conn, project_id, submitted.title, submitted.description)
+            existing = find_fact_by_content(
+                conn, project_id, submitted.title, submitted.description
+            )
             if existing is not None:
                 fid = existing["id"]
             else:

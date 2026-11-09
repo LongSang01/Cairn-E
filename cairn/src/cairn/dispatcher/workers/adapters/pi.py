@@ -210,7 +210,7 @@ class PiDriver(WorkerDriver):
             'printf "%s" "$models_json" > "$agent_dir/models.json"\n'
             'if [ -f "$guard" ]; then\n'
             '  exec env PI_CODING_AGENT_DIR="$agent_dir" pi --no-extensions -e "$guard" "$@"\n'
-            'fi\n'
+            "fi\n"
             'exec env PI_CODING_AGENT_DIR="$agent_dir" pi --no-extensions "$@"\n'
         )
         argv = [

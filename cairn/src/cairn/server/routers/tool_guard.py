@@ -134,7 +134,9 @@ def list_pending(project_id: str):
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
         expire_tool_approvals(conn)
-        return {"approvals": [_approval_payload(row) for row in pending_approvals(conn, project_id)]}
+        return {
+            "approvals": [_approval_payload(row) for row in pending_approvals(conn, project_id)]
+        }
 
 
 @router.get("/projects/{project_id}/tool-approvals/{approval_id}")

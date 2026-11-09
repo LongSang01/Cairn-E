@@ -390,9 +390,7 @@ def validate_decide_payload(
                     # A planner kill only makes sense for a worker that is running.
                     # Anything else is a no-op that would silently drop a pending
                     # step without ever having started it.
-                    raise ValueError(
-                        f"steps.update[{index}] can only cancel a running step: {sid}"
-                    )
+                    raise ValueError(f"steps.update[{index}] can only cancel a running step: {sid}")
                 priority = item.get("priority")
                 note = _optional_text(item.get("note"), f"steps.update[{index}].note")
                 if priority is None and status is None and note is None:
@@ -418,9 +416,7 @@ def validate_decide_payload(
         if kind == "allow":
             # A model must never widen its own authorization: only a human may add
             # an allow rule. Tightening (deny) is always within its remit.
-            raise ValueError(
-                f"constraints.add[{index}].kind must be deny; only a human may allow"
-            )
+            raise ValueError(f"constraints.add[{index}].kind must be deny; only a human may allow")
         if kind != "deny":
             raise ValueError(f"constraints.add[{index}].kind must be deny")
         constraint_add.append({"kind": kind, "text": text})
@@ -517,9 +513,7 @@ def validate_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, An
                     "description": _text(item.get("description"), f"findings[{index}].description"),
                     "severity": _severity(item.get("severity"), f"findings[{index}].severity"),
                     "status": _finding_status(item.get("status"), f"findings[{index}].status"),
-                    "evidence": _evidence_list(
-                        item.get("evidence"), f"findings[{index}].evidence"
-                    ),
+                    "evidence": _evidence_list(item.get("evidence"), f"findings[{index}].evidence"),
                 }
             )
 

@@ -79,9 +79,7 @@ def test_host_allowlist_gates_out_of_scope_commands(client: TestClient) -> None:
     _rule(client, pid, target="host", action="allow", pattern="example.com", match_type="exact")
     _rule(client, pid, target="host", action="allow", pattern="10.0.0.5", match_type="exact")
 
-    assert _check(client, pid, "curl -i https://example.com/login").json() == {
-        "decision": "allow"
-    }
+    assert _check(client, pid, "curl -i https://example.com/login").json() == {"decision": "allow"}
     assert _check(client, pid, "nmap -sV 10.0.0.5").json() == {"decision": "allow"}
 
     out = _check(client, pid, "curl -i https://out-of-scope.example.org/").json()
@@ -97,9 +95,7 @@ def test_host_allowlist_gates_out_of_scope_commands(client: TestClient) -> None:
 def test_no_allowlist_means_no_host_gating(client: TestClient) -> None:
     pid = _project(client)
     _rule(client, pid, target="host", action="deny", pattern="bad.example.com")
-    assert _check(client, pid, "curl -i https://other.example.org/").json() == {
-        "decision": "allow"
-    }
+    assert _check(client, pid, "curl -i https://other.example.org/").json() == {"decision": "allow"}
     assert _check(client, pid, "curl -i https://bad.example.com/").json()["decision"] == "deny"
 
 
@@ -120,9 +116,12 @@ def test_project_rule_crud_and_global_rules_are_untouchable(client: TestClient) 
     # Deleting a platform-wide rule through a project route must never work.
     assert client.delete(f"/projects/{pid}/tool-rules/{global_id}").status_code == 404
     with db.get_conn() as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) AS n FROM tool_rules WHERE id = ?", (global_id,)
-        ).fetchone()["n"] == 1
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM tool_rules WHERE id = ?", (global_id,)
+            ).fetchone()["n"]
+            == 1
+        )
 
 
 def test_invalid_rule_request_is_rejected(client: TestClient) -> None:

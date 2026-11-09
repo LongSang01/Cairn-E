@@ -56,9 +56,7 @@ def _decide_kwargs(**overrides):
 
 def test_constraints_crud_reaches_project_detail(client: TestClient) -> None:
     pid = _project(client)
-    deny = client.post(
-        f"/projects/{pid}/constraints", json={"text": "不要进行增删改查"}
-    )
+    deny = client.post(f"/projects/{pid}/constraints", json={"text": "不要进行增删改查"})
     assert deny.status_code == 201
     assert deny.json()["kind"] == "deny"
     assert deny.json()["origin"] == "human"
@@ -96,9 +94,7 @@ def test_constraints_do_not_change_tool_rules(client: TestClient) -> None:
     """A constraint is prompt-level authorization, not a command rule."""
     pid = _project(client)
     assert (
-        client.post(
-            f"/projects/{pid}/constraints", json={"text": "禁止所有命令"}
-        ).status_code
+        client.post(f"/projects/{pid}/constraints", json={"text": "禁止所有命令"}).status_code
         == 201
     )
     response = client.post(
@@ -145,7 +141,10 @@ def test_render_constraints_block_orders_deny_first_and_bounds_text() -> None:
     assert f"规则{MAX_CONSTRAINTS - 1}" in many
     assert f"规则{MAX_CONSTRAINTS}" not in many
     assert render_constraints_block([]) == f"{HEADER}\n{EMPTY}"
-    assert len(render_constraints_block([{"kind": "deny", "text": "x" * 500}])) < len(HEADER) + MAX_CONSTRAINT_CHARS + 400
+    assert (
+        len(render_constraints_block([{"kind": "deny", "text": "x" * 500}]))
+        < len(HEADER) + MAX_CONSTRAINT_CHARS + 400
+    )
 
 
 # --- constraints: Decide action --------------------------------------------------
@@ -157,9 +156,7 @@ def test_decide_may_only_tighten_constraints() -> None:
         **_decide_kwargs(open_steps_empty=True),
     )
     assert kind == "actions"
-    assert data["constraints"]["add"] == [
-        {"kind": "deny", "text": "禁止访问支付系统"}
-    ]
+    assert data["constraints"]["add"] == [{"kind": "deny", "text": "禁止访问支付系统"}]
 
     with pytest.raises(ValueError, match="only a human may allow"):
         validate_decide_payload(
@@ -217,7 +214,9 @@ def test_cancelling_the_last_running_step_allows_completion() -> None:
             "accepted": True,
             "data": {
                 "complete": {"from": ["f001"], "description": "done"},
-                "steps": {"update": [{"id": "s001", "status": "cancelled", "note": "out of scope"}]},
+                "steps": {
+                    "update": [{"id": "s001", "status": "cancelled", "note": "out of scope"}]
+                },
             },
         },
         **_decide_kwargs(running_step_ids=["s001"]),
@@ -259,9 +258,7 @@ def test_cancel_running_step_kills_lease_and_discards_result(client: TestClient)
     assert cancelled.json()["worker"] == "executor"
     assert cancelled.json()["note"] == "crossed a constraint"
 
-    heartbeat = client.post(
-        f"/projects/{pid}/steps/{sid}/heartbeat", json={"worker": "executor"}
-    )
+    heartbeat = client.post(f"/projects/{pid}/steps/{sid}/heartbeat", json={"worker": "executor"})
     assert heartbeat.status_code == 409
 
     # No write-back: ARTEX's kill_work marks `stopped` without landing its result.
@@ -275,7 +272,12 @@ def test_cancel_running_step_kills_lease_and_discards_result(client: TestClient)
     )
     assert conclude.status_code == 409
     with db.get_conn() as conn:
-        assert conn.execute("SELECT COUNT(*) AS n FROM facts WHERE step_id = ?", (sid,)).fetchone()["n"] == 0
+        assert (
+            conn.execute("SELECT COUNT(*) AS n FROM facts WHERE step_id = ?", (sid,)).fetchone()[
+                "n"
+            ]
+            == 0
+        )
 
     # A cancelled step is closed: it must not keep the project from completing.
     assert client.get(f"/projects/{pid}").json()["steps"][0]["status"] == "cancelled"
@@ -308,9 +310,7 @@ def test_cancel_does_not_resurrect_or_cancel_pending_steps(client: TestClient) -
         json={"status": "cancelled", "note": "stop"},
     )
     # Abandon after a cancel is a no-op, not a resurrection of the step.
-    again = client.post(
-        f"/projects/{pid}/steps/{sid}/update", json={"status": "abandoned"}
-    )
+    again = client.post(f"/projects/{pid}/steps/{sid}/update", json={"status": "abandoned"})
     assert again.status_code == 200
     assert again.json()["status"] == "cancelled"
 
@@ -342,7 +342,10 @@ def test_steers_are_append_only_and_reach_project_detail(client: TestClient) -> 
 
 def test_render_steers_block_keeps_latest_last_and_bounds_history() -> None:
     assert render_steers_block([]) == "（无运行中指令）"
-    steers = [Steer(id=f"st{i:03d}", text=f"指令{i}", creator="Human", created_at="now") for i in range(12)]
+    steers = [
+        Steer(id=f"st{i:03d}", text=f"指令{i}", creator="Human", created_at="now")
+        for i in range(12)
+    ]
     block = render_steers_block(steers)
     assert "指令11" in block
     assert "指令3" not in block
@@ -391,9 +394,7 @@ def test_apply_actions_does_not_report_a_cancel_the_server_ignored() -> None:
         "goals": {"add": [], "close": []},
         "steps": {
             "add": [],
-            "update": [
-                {"id": "s001", "priority": None, "status": "cancelled", "note": "stop"}
-            ],
+            "update": [{"id": "s001", "priority": None, "status": "cancelled", "note": "stop"}],
         },
         "constraints": {"add": []},
     }

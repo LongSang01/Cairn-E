@@ -226,9 +226,7 @@ def exchange_evidence_id(session_id: str, seq: int, idx: int) -> str:
     return f"{session_id}:{seq}:{idx}"
 
 
-def get_exchange(
-    conn: sqlite3.Connection, project_id: str, session_id: str, seq: int, idx: int
-):
+def get_exchange(conn: sqlite3.Connection, project_id: str, session_id: str, seq: int, idx: int):
     return conn.execute(
         "SELECT * FROM http_exchanges WHERE project_id = ? AND session_id = ? AND seq = ?"
         " AND idx = ?",

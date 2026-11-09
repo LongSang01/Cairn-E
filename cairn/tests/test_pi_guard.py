@@ -39,7 +39,11 @@ def test_install_writes_config_before_the_extension() -> None:
     backend = _RecordingBackend()
 
     pi_guard.install(
-        backend, "c1", _worker(), "proj_001", ToolGuardConfig(enabled=True),
+        backend,
+        "c1",
+        _worker(),
+        "proj_001",
+        ToolGuardConfig(enabled=True),
         session_id="s001",
     )
 

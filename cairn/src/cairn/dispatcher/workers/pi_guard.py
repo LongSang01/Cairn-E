@@ -165,8 +165,6 @@ def install(
     backend.write_text_file(
         container_name,
         str(config_path(worker)),
-        config_json(
-            project_id=project_id, worker=worker, guard=guard, session_id=session_id
-        ),
+        config_json(project_id=project_id, worker=worker, guard=guard, session_id=session_id),
     )
     backend.write_text_file(container_name, str(extension_path(worker)), EXTENSION_SOURCE)

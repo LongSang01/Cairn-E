@@ -346,9 +346,7 @@ def run_decide_task(
                     project_id,
                     worker.name,
                 )
-                _settle_steers(
-                    client, project_id, project.steers, lookups, note="项目已停止。"
-                )
+                _settle_steers(client, project_id, project.steers, lookups, note="项目已停止。")
                 record("success")
                 return "success"
             if not response.ok:
@@ -512,8 +510,7 @@ def _apply_actions(
             # that did not happen must not be counted as applied (or surfaced as
             # "step adjusted" in the steer reply) when an executor won the race.
             if step["status"] == "cancelled" and (
-                not isinstance(response.data, dict)
-                or response.data.get("status") != "cancelled"
+                not isinstance(response.data, dict) or response.data.get("status") != "cancelled"
             ):
                 LOG.info(
                     "decide cancel skipped, step already terminal project=%s step=%s",
@@ -872,9 +869,7 @@ def _settle_steers(
         )
         if counts.get(key)
     ]
-    summary = note + (
-        "本轮：" + "、".join(parts) + "。" if parts else "本轮未改动图，维持原计划。"
-    )
+    summary = note + ("本轮：" + "、".join(parts) + "。" if parts else "本轮未改动图，维持原计划。")
     for steer in steers:
         if getattr(steer, "answer", None):
             continue

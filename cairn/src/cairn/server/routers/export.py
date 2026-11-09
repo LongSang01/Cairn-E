@@ -51,16 +51,14 @@ def _load_project_data(conn, project_id: str):
     # An export is the audit trail: the authorization boundary, the human's
     # in-flight instructions and the planner's replies must survive a replay.
     constraints = rows(
-        "SELECT kind, origin, text, created_at FROM constraints"
-        " WHERE project_id = ? ORDER BY rowid"
+        "SELECT kind, origin, text, created_at FROM constraints WHERE project_id = ? ORDER BY rowid"
     )
     steers = rows(
         "SELECT id, text, creator, created_at, answer, answered_at FROM steers"
         " WHERE project_id = ? ORDER BY rowid"
     )
     scope = rows(
-        "SELECT kind, value, source, created_at FROM project_scope"
-        " WHERE project_id = ? ORDER BY id"
+        "SELECT kind, value, source, created_at FROM project_scope WHERE project_id = ? ORDER BY id"
     )
 
     sources_by_step: dict[str, list[str]] = {}
@@ -429,7 +427,9 @@ def _export_report(conn, project_id: str) -> str:
     lines = [f"# {proj['title']} — 漏洞报告", ""]
     lines.append(f"- 项目 ID：`{project_id}`")
     lines.append(f"- 生成时间：{format_export_timestamp(datetime.now().isoformat())}")
-    lines.append(f"- 结论：{len(findings)} 条（confirmed {len(confirmed)} / tentative {len(tentative)}）")
+    lines.append(
+        f"- 结论：{len(findings)} 条（confirmed {len(confirmed)} / tentative {len(tentative)}）"
+    )
 
     lines.extend(["", "## 严重度分布", ""])
     if findings:
@@ -451,7 +451,9 @@ def _export_report(conn, project_id: str) -> str:
         )
 
     for item in confirmed:
-        lines.extend(["", "---", "", f"## {_SEVERITY_LABELS[item.severity]} · {item.id}（{item.kind}）", ""])
+        lines.extend(
+            ["", "---", "", f"## {_SEVERITY_LABELS[item.severity]} · {item.id}（{item.kind}）", ""]
+        )
         lines.extend([item.description, ""])
         if item.step:
             step_text = step_titles.get(item.step) or "（步骤已不存在）"
@@ -473,7 +475,9 @@ def _export_report(conn, project_id: str) -> str:
     if tentative:
         lines.extend(["", "---", "", "## 待验证条目（tentative）", ""])
         for item in tentative:
-            lines.append(f"- {_SEVERITY_LABELS[item.severity]} `{item.id}`（{item.kind}）：{item.description}")
+            lines.append(
+                f"- {_SEVERITY_LABELS[item.severity]} `{item.id}`（{item.kind}）：{item.description}"
+            )
 
     lines.extend(["", "---", "", "## 证据索引", ""])
     for item in findings:

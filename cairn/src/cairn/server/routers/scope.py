@@ -73,7 +73,9 @@ def add_scope_entry(project_id: str, body: CreateScopeEntryRequest):
             # Only a UNIQUE(project_id, kind, value) collision is a 409; a
             # locking or schema error must not be disguised as "already exists".
             raise HTTPException(409, "Scope entry already exists") from exc
-        row = conn.execute("SELECT * FROM project_scope WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM project_scope WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
         return _entry_from_row(row)
 
 

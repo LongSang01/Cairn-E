@@ -65,8 +65,7 @@ def _row_matches(row, tool: str, command: str) -> bool:
     target = row["target"]
     if target == "host":
         return any(
-            _matches(row["match_type"], row["pattern"], host)
-            for host in host_candidates(command)
+            _matches(row["match_type"], row["pattern"], host) for host in host_candidates(command)
         )
     if target not in ("tool", "command", "*"):
         return False
@@ -105,13 +104,11 @@ def evaluate(
         (project_id,),
     ).fetchall()
     global_hard = [
-        row for row in rows
-        if row["project_id"] is None and row["action"] in ("deny", "ask")
+        row for row in rows if row["project_id"] is None and row["action"] in ("deny", "ask")
     ]
     project_rules = [row for row in rows if row["project_id"] is not None]
     global_soft = [
-        row for row in rows
-        if row["project_id"] is None and row["action"] not in ("deny", "ask")
+        row for row in rows if row["project_id"] is None and row["action"] not in ("deny", "ask")
     ]
 
     # 1. Platform-wide prohibitions cannot be overridden by a project allow.
@@ -126,8 +123,7 @@ def evaluate(
     # an ordinary permission, not a gate: letting it open the gate here would
     # deny unlisted hosts in every project on the platform.
     allow_hosts = [
-        row for row in project_rules
-        if row["target"] == "host" and row["action"] == "allow"
+        row for row in project_rules if row["target"] == "host" and row["action"] == "allow"
     ]
     scope = load_scope(conn, project_id) if project_id else []
     if allow_hosts or scope:
@@ -213,9 +209,7 @@ def check(
     a worker that is already running rather than only the next Decide round.
     """
     decision = evaluate(conn, tool, command, project_id=project_id)
-    pending_steers = claim_steers(
-        conn, project_id=project_id, worker=worker, session_id=session_id
-    )
+    pending_steers = claim_steers(conn, project_id=project_id, worker=worker, session_id=session_id)
     extra = {"steers": pending_steers} if pending_steers else {}
     if decision.action == "allow":
         _audit(
@@ -381,9 +375,7 @@ def expire_due(conn: sqlite3.Connection, *, timeout_seconds: int = 60) -> int:
     return expired
 
 
-def list_audit(
-    conn: sqlite3.Connection, project_id: str, *, limit: int = 100
-) -> list[sqlite3.Row]:
+def list_audit(conn: sqlite3.Connection, project_id: str, *, limit: int = 100) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM tool_audit WHERE project_id = ? ORDER BY id DESC LIMIT ?",
         (project_id, limit),

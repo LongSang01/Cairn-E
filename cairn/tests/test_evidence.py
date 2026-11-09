@@ -281,7 +281,10 @@ def test_recall_covers_documents_and_exchanges(client: TestClient) -> None:
             "worker": "executor",
             "status": "done",
             "facts": [
-                {"description": "the login form leaks its backend", "documents": [{"title": "login form", "content": "PHP/7.4 behind nginx"}]}
+                {
+                    "description": "the login form leaks its backend",
+                    "documents": [{"title": "login form", "content": "PHP/7.4 behind nginx"}],
+                }
             ],
         },
     )

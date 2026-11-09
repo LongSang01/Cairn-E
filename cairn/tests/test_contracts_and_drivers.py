@@ -80,7 +80,7 @@ def test_decide_payload_collects_title_recall_and_doc_ids() -> None:
         "recall": ["redis", "kerberos"],
         "doc_ids": [{"id": "doc001", "from": 0}, {"id": "doc002", "from": 10}],
         "steer_replies": [],
-        }
+    }
     assert data["steps"]["add"][0]["title"] == "probe redis"
 
 

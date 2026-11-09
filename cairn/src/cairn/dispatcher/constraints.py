@@ -126,6 +126,7 @@ def render_constraints_block(constraints: Iterable[Any] | None) -> str:
     body = "\n".join([*deny, *allow])
     return f"{HEADER}\n{body}\n{TAIL}"
 
+
 def policy_blocks(project: Any) -> dict[str, str]:
     """The three authorization blocks shared by every Decide / Execute prompt.
 
