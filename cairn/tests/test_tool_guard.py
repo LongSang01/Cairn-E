@@ -208,12 +208,47 @@ def test_an_ask_rule_is_audited_before_a_human_decides(client: TestClient) -> No
 
     with db.get_conn() as conn:
         row = conn.execute(
-            "SELECT decision, decision_source FROM tool_audit WHERE project_id = ?"
+            "SELECT decision, decision_source, approval_id FROM tool_audit WHERE project_id = ?"
             " ORDER BY id DESC LIMIT 1",
             (project_id,),
         ).fetchone()
     assert row["decision"] == "ask"
     assert row["decision_source"] == "rule"
+    assert row["approval_id"]
+
+
+def test_the_audit_links_the_ask_to_the_human_verdict(client: TestClient) -> None:
+    """Two rows describe one command; the approval id is what pairs them up."""
+    project_id = _project(client)
+    _add_rule(action="ask", pattern="sqlmap", priority=200)
+
+    approval_id = _check(client, project_id, "sqlmap -u http://target/x").json()["approval_id"]
+    decided = client.post(
+        f"/projects/{project_id}/tool-approvals/{approval_id}/decide",
+        json={"approve": False, "actor": "alice"},
+    )
+    assert decided.status_code == 200
+
+    entries = client.get(f"/projects/{project_id}/tool-audit").json()["entries"]
+    linked = [item for item in entries if item["approval_id"] == approval_id]
+    assert [item["decision"] for item in linked] == ["deny", "ask"]
+    assert {item["decision_source"] for item in linked} == {"rule", "manual"}
+
+
+def test_a_url_after_an_equals_sign_is_still_a_target(client: TestClient) -> None:
+    """`--url=https://x.gov` is how many tools are actually invoked."""
+    project_id = _project(client)
+
+    body = _check(client, project_id, "curl --url=https://www.example.gov.cn/").json()
+
+    assert body["decision"] == "deny"
+
+
+def test_an_equals_sign_only_opens_a_url_not_a_file_name() -> None:
+    from cairn.server.services.hosts import host_candidates
+
+    assert host_candidates("curl --url=https://www.example.gov/") == ["www.example.gov"]
+    assert host_candidates("curl --output=report.txt http://example.com/") == ["example.com"]
 
 
 def test_expire_due_still_sweeps_a_row_with_a_short_budget(client: TestClient) -> None:

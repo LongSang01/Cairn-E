@@ -311,13 +311,14 @@ def _audit(
     actor: str | None,
     enforced: bool = True,
     reason: str | None = None,
+    approval_id: str | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT INTO tool_audit (
             project_id, session_id, worker, tool, command, digest, decision,
-            decision_source, rule_id, actor, enforced, created_at, reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            decision_source, rule_id, approval_id, actor, enforced, created_at, reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             project_id,
@@ -329,6 +330,7 @@ def _audit(
             decision,
             decision_source,
             rule_id,
+            approval_id,
             actor,
             1 if enforced else 0,
             utcnow(),
@@ -435,6 +437,7 @@ def check(
         rule_id=decision.rule_id,
         actor=actor,
         reason=decision.reason,
+        approval_id=approval_id,
     )
     return {
         "decision": "ask",
@@ -495,6 +498,7 @@ def decide(
         rule_id=row["rule_id"],
         actor=actor,
         reason=note or ("人工批准" if approve else "人工拒绝"),
+        approval_id=approval_id,
     )
     return get_approval(conn, project_id, approval_id)
 
@@ -561,6 +565,7 @@ def expire_due(conn: sqlite3.Connection, *, timeout_seconds: int = 60) -> int:
             rule_id=row["rule_id"],
             actor=None,
             reason=f"审批超时，按{'允许' if action == 'allow' else '拒绝'}处理",
+            approval_id=row["id"],
         )
         expired += 1
     return expired

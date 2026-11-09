@@ -8,9 +8,20 @@ from pathlib import Path
 
 DEFAULT_DB = Path.home() / ".local" / "share" / "cairn" / "cairn.db"
 
-# Bumped only when SCHEMA changes shape. There is no upgrade path: the database is
-# created in one shot, and an old file must be recreated.
-SCHEMA_VERSION = 2
+# Bumped only when SCHEMA changes shape. The number is recorded in ``PRAGMA
+# user_version``: a file from an older build is patched in place by
+# ``_patch_legacy_columns`` (additive columns only), and a file from a *newer* build
+# is refused instead of being half-read.
+SCHEMA_VERSION = 3
+
+# Columns that were added to an existing table after the first release. Every entry
+# is additive and carries a default, so an old file keeps working once the column is
+# there — without it the first request fails deep in SQLite (``no such column``) or
+# in the row lookup (``No item with that key``) instead of at startup.
+_LEGACY_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("steps", "exclusive", "INTEGER NOT NULL DEFAULT 0"),
+    ("tool_audit", "approval_id", "TEXT"),
+)
 
 _db_path: Path | None = None
 _db_generation = 0
@@ -362,6 +373,9 @@ CREATE TABLE IF NOT EXISTS tool_audit (
     decision TEXT NOT NULL,
     decision_source TEXT NOT NULL,
     rule_id INTEGER,
+    -- Set when the row is the `ask` queued for a human, or that approval's later
+    -- timeout/manual verdict: it is what ties the two entries together.
+    approval_id TEXT,
     actor TEXT,
     reason TEXT,
     enforced INTEGER NOT NULL DEFAULT 1,
@@ -369,6 +383,7 @@ CREATE TABLE IF NOT EXISTS tool_audit (
 );
 
 CREATE INDEX IF NOT EXISTS tool_audit_by_project ON tool_audit (project_id, created_at);
+CREATE INDEX IF NOT EXISTS tool_audit_by_approval ON tool_audit (approval_id);
 
 -- Reviewer verdicts are cached per (command, scope digest) so editing the authorized
 -- assets invalidates every stale verdict instead of letting it survive a scope change.
@@ -396,59 +411,139 @@ def configure(path: Path) -> None:
     _db_path = path
     _db_path.parent.mkdir(parents=True, exist_ok=True)
     _db_generation += 1
-    with get_conn() as conn:
-        conn.executescript(SCHEMA)
-        _seed_tool_rules(conn)
+    try:
+        with get_conn() as conn:
+            _refuse_newer_schema(conn, path)
+            # Before SCHEMA on purpose: the script creates indexes over the new
+            # columns, and on a table that predates them the index itself fails.
+            _patch_legacy_columns(conn)
+            conn.executescript(SCHEMA)
+            _seed_tool_rules(conn)
+            # Recorded so a later build can tell this file apart from one it predates.
+            conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
+    except Exception:
+        # A rejected file must not leave the module pointed at it: the caller that
+        # catches the error has to be able to choose another path.
+        _db_path = None
+        raise
+
+
+def _stored_schema_version(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+
+def _refuse_newer_schema(conn: sqlite3.Connection, path: Path) -> None:
+    """Fail loudly on a file written by a newer build.
+
+    A file with version 0 predates the check and is patched up by
+    ``_patch_legacy_columns``; anything above ``SCHEMA_VERSION`` was written by a
+    build that knows columns this one does not, so reading it would silently answer
+    from a half-understood schema.
+    """
+    stored = _stored_schema_version(conn)
+    if stored > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"database {path} uses schema version {stored}, this build expects "
+            f"{SCHEMA_VERSION}: upgrade Cairn or point it at a fresh file"
+        )
+
+
+def _patch_legacy_columns(conn: sqlite3.Connection) -> None:
+    """Add the columns an older DB file is missing, so it works instead of 500ing.
+
+    A table that does not exist yet is left alone: ``SCHEMA`` creates it with the
+    column already in place.
+    """
+    for table, column, ddl in _LEGACY_COLUMNS:
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone():
+            continue
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column in existing:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        except sqlite3.OperationalError as exc:
+            # The server and the dispatcher may configure the same file at once; the
+            # loser of that race finds the column already there.
+            if "duplicate column" not in str(exc):
+                raise
+
+
+_BUILTIN_TOOL_RULES = (
+    {
+        "target": "command",
+        "match_type": "regex",
+        "pattern": r"\brm\s+-(?:rf|fr)\s+/(?:\s|$)",
+        "message": "在容器内递归删除根目录，不属于任何测试步骤",
+        "priority": 100,
+    },
+    {
+        "target": "command",
+        "match_type": "regex",
+        "pattern": r"\b(?:DROP\s+(?:TABLE|DATABASE)|TRUNCATE\s+TABLE)\b",
+        "message": "对数据库执行不可逆的清空操作",
+        "priority": 95,
+    },
+    {
+        "target": "command",
+        "match_type": "contains",
+        "pattern": "curl -X DELETE",
+        "message": "使用 DELETE 动词删除远端数据，请改用只读验证",
+        "priority": 90,
+    },
+    {
+        "target": "host",
+        "match_type": "regex",
+        "pattern": r"\.(?:gov|edu)(?:\.[a-z]{2})?$",
+        "message": "目标属于禁止范围（政府/教育域名），需人工确认后由管理员处理",
+        "priority": 85,
+    },
+)
 
 
 def _seed_tool_rules(conn: sqlite3.Connection) -> None:
-    """Seed the built-in command deny rules into an empty rule table.
+    """Install the built-in platform rules, refreshing a table seeded by an older build.
+
+    Rules are matched by ``message``: it is the one field the application owns and
+    never varies, so a corrected target/pattern (the government/education rule moved
+    from the command text to the host name) reaches every deployment instead of only
+    a database whose rule table is still empty. Operator rules, project rules,
+    priorities and timeouts are left untouched — only the shipped target, match type
+    and pattern are rewritten.
 
     Deliberately short: rules only cover actions no legitimate task needs (wiping
     the filesystem, dropping databases, destructive HTTP verbs) plus the usual
     "never touch government/education infrastructure" scope line. Anything else is
     left to the operator, because over-blocking silently breaks legitimate testing.
     """
-    if conn.execute("SELECT COUNT(*) AS n FROM tool_rules").fetchone()["n"]:
-        return
-    conn.executemany(
-        """
-        INSERT INTO tool_rules (
-            target, match_type, pattern, action, message, priority, timeout_seconds,
-            timeout_action, enabled
-        ) VALUES (?, ?, ?, 'deny', ?, ?, 60, 'deny', 1)
-        """,
-        [
-            (
-                "command",
-                "regex",
-                r"\brm\s+-(?:rf|fr)\s+/(?:\s|$)",
-                "在容器内递归删除根目录，不属于任何测试步骤",
-                100,
-            ),
-            (
-                "command",
-                "regex",
-                r"\b(?:DROP\s+(?:TABLE|DATABASE)|TRUNCATE\s+TABLE)\b",
-                "对数据库执行不可逆的清空操作",
-                95,
-            ),
-            (
-                "command",
-                "contains",
-                "curl -X DELETE",
-                "使用 DELETE 动词删除远端数据，请改用只读验证",
-                90,
-            ),
-            (
-                "host",
-                "regex",
-                r"\.(?:gov|edu)(?:\.[a-z]{2})?$",
-                "目标属于禁止范围（政府/教育域名），需人工确认后由管理员处理",
-                85,
-            ),
-        ],
-    )
+    for rule in _BUILTIN_TOOL_RULES:
+        row = conn.execute(
+            "SELECT id FROM tool_rules WHERE project_id IS NULL AND message = ?",
+            (rule["message"],),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO tool_rules (
+                    target, match_type, pattern, action, message, priority,
+                    timeout_seconds, timeout_action, enabled
+                ) VALUES (?, ?, ?, 'deny', ?, ?, 60, 'deny', 1)
+                """,
+                (
+                    rule["target"],
+                    rule["match_type"],
+                    rule["pattern"],
+                    rule["message"],
+                    rule["priority"],
+                ),
+            )
+            continue
+        conn.execute(
+            "UPDATE tool_rules SET target = ?, match_type = ?, pattern = ? WHERE id = ?",
+            (rule["target"], rule["match_type"], rule["pattern"], row["id"]),
+        )
 
 
 _busy_lock = threading.Lock()

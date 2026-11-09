@@ -170,6 +170,7 @@ def _export_yaml(conn, project_id: str) -> str:
                 "from": sources_by_step.get(s["id"], []),
                 "goal": s["goal_id"],
                 "asset": s["asset"],
+                "exclusive": bool(s["exclusive"]),
                 "batch": s["batch"],
                 "kind": s["kind"],
                 "rationale": s["rationale"],

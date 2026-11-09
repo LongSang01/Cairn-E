@@ -659,3 +659,14 @@ def test_the_working_directory_is_part_of_the_cache_key() -> None:
     here = reviewer_service.command_hash("cat ./config.yml", {}, None, working_directory="/a")
     there = reviewer_service.command_hash("cat ./config.yml", {}, None, working_directory="/b")
     assert here != there
+
+
+def test_the_cache_sweep_is_rate_limited_to_every_fiftieth_write(monkeypatch) -> None:
+    """The counter is shared by every project and guarded, so a burst cannot slide it."""
+    monkeypatch.setattr(reviewer_service, "_writes_since_sweep", 0)
+
+    results = [reviewer_service._sweep_due() for _ in range(50)]
+
+    assert results.count(True) == 1
+    assert results[-1] is True
+    assert reviewer_service._writes_since_sweep == 0

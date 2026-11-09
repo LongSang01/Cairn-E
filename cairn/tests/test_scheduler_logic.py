@@ -743,6 +743,58 @@ def test_two_exclusive_steps_on_one_asset_do_not_start_together() -> None:
     assert dispatched == [("execute", "s003")]
 
 
+def test_a_competing_step_without_an_asset_still_waits() -> None:
+    """The planner should pair `exclusive` with an asset. When it does not, the net
+    cannot prove the two runs are apart, so it serializes them instead of guessing."""
+    running = make_step("s001", status="running", worker="w", batch="x001", description="扫目录")
+    candidate = make_step("s002", batch="x001", description="hydra 暴力破解")
+    project = make_project(steps=[running, candidate])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.config = make_config({"max_running_steps": 2})
+    loop.decide_checkpoints["proj_001"] = _checkpoint_matching(project)
+
+    loop._try_dispatch_project(_summary("proj_001", "active"))
+
+    assert dispatched == []
+
+
+def test_two_plain_steps_without_an_asset_still_run_in_parallel() -> None:
+    """Serializing unscoped runs is the exception, not the new default."""
+    running = make_step("s001", status="running", worker="w", batch="x001", description="扫目录")
+    candidate = make_step("s002", batch="x001", description="核对首页标题")
+    project = make_project(steps=[running, candidate])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.config = make_config({"max_running_steps": 2})
+    loop.decide_checkpoints["proj_001"] = _checkpoint_matching(project)
+
+    loop._try_dispatch_project(_summary("proj_001", "active"))
+
+    assert dispatched == [("execute", "s002")]
+
+
+def test_a_title_only_mention_of_brute_force_holds_the_asset() -> None:
+    """Planners often put the action in the title and the mechanics in the body."""
+    running = make_step("s001", status="running", worker="w", asset="10.0.0.1:8080", batch="x001")
+    candidate = make_step(
+        "s002",
+        asset="10.0.0.1:8080",
+        batch="x001",
+        title="暴力破解 admin 口令",
+        description="用 rockyou 字典逐个尝试",
+    )
+    project = make_project(steps=[running, candidate])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.config = make_config({"max_running_steps": 2})
+    loop.decide_checkpoints["proj_001"] = _checkpoint_matching(project)
+
+    loop._try_dispatch_project(_summary("proj_001", "active"))
+
+    assert dispatched == []
+
+
 def test_a_stuck_step_is_handed_back_to_decide_instead_of_being_rerun() -> None:
     """proj_009: s062 timed out four times because nothing capped the blind retries.
 

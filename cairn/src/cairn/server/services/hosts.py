@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import re
 
-# Requires whitespace, quote or @ before the token; stops before a port, path,
-# query, fragment or the next token.
+# Requires whitespace, quote, @ or ``=http(s)://`` before the token; stops before a
+# port, path, query, fragment or the next token. The ``=`` form is limited to a full
+# URL on purpose: ``--url=https://x`` is a target, while ``--output=report.txt`` is a
+# file name and must not become one.
 _HOST_RE = re.compile(
-    r"(?:^|[\s\"'@])(?:https?://)?"
+    r"(?:^|[\s\"'@]|=(?=https?://))(?:https?://)?"
     r"(\[[0-9a-fA-F:]+\]|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+|\d{1,3}(?:\.\d{1,3}){3})"
     r"(?=[:/?#\s\"']|$)"
 )

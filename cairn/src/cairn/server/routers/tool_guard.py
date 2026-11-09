@@ -232,6 +232,7 @@ def read_audit(project_id: str, limit: int = 100):
                     "decision": row["decision"],
                     "decision_source": row["decision_source"],
                     "rule_id": row["rule_id"],
+                    "approval_id": row["approval_id"],
                     "reason": row["reason"],
                     "actor": row["actor"],
                     "worker": row["worker"],

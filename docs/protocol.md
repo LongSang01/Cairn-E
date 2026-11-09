@@ -10,7 +10,7 @@
 - **additive-only**:1.x 内只允许新增可选字段/事件类型/路由;不删除、不改名、不改语义。
 - 字段变更必须同步:冻结测试、本文档、`CONTRACT_VERSION` 的版本决策。
 - 破坏性变更 ⇒ 升主版本号,并在过渡期内双写或提供迁移说明。
-- 数据库没有升级路径:`cairn/server/db.py` 的 `SCHEMA` 是一次性建表,旧文件需删除重建(`SCHEMA_VERSION` 随形状变更递增)。
+- 数据库只自动补列:`cairn/server/db.py` 的 `_LEGACY_COLUMNS` 会在启动时给旧文件补上新增的列(均为带默认值的加法变更),`SCHEMA_VERSION` 随形状变更递增并写入 `PRAGMA user_version`;读到由更新版本写出的文件(版本号更大)会直接拒绝启动,而不是半解析。
 
 ## 2. 资源面(REST)
 

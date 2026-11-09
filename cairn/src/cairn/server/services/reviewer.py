@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -42,10 +43,28 @@ MAX_COMMAND_CHARS = 8_000
 # runaway reply from being stored as a verdict.
 MAX_COMMENT_CHARS = 2_400
 CACHE_TTL_SECONDS = 86_400
-# Expired rows are swept on write, but only every Nth write: the delete is a full
-# table scan and a busy project would otherwise pay for it on every verdict.
+# Expired rows are swept on write, but only every Nth write: verdicts arrive in
+# bursts and the delete would otherwise take the write lock on every one of them.
+# The counter is process-wide on purpose — it rates the sweep, not any one project.
 CACHE_SWEEP_EVERY = 50
-_writes_until_sweep = 0
+_sweep_lock = threading.Lock()
+_writes_since_sweep = 0
+
+
+def _sweep_due() -> bool:
+    """True on the write that should also delete expired rows.
+
+    Guarded by a lock: the server answers guard checks from a thread pool, so a bare
+    ``+=`` could lose a count and slide the sweep.
+    """
+    global _writes_since_sweep
+    with _sweep_lock:
+        _writes_since_sweep += 1
+        if _writes_since_sweep < CACHE_SWEEP_EVERY:
+            return False
+        _writes_since_sweep = 0
+        return True
+
 
 INPUT_BOUNDARY = """# 审查输入边界
 输入为 JSON。待裁决对象是 tool_name 与 arguments（完整工具参数）；script_files 是平台在
@@ -603,13 +622,10 @@ def store_verdict(
     """Cache allow/deny only: an ``ask`` is a human decision and must not be replayed."""
     if verdict.action not in ("allow", "deny") or config.cache_ttl_seconds <= 0:
         return
-    global _writes_until_sweep
-    _writes_until_sweep += 1
-    if _writes_until_sweep >= CACHE_SWEEP_EVERY:
-        # Rates the full-table delete down to once per N writes; expired rows are
-        # already invisible to lookups because they filter on expires_at.
+    if _sweep_due():
+        # Rates the delete down to once per N writes; expired rows are already
+        # invisible to lookups because they filter on expires_at.
         conn.execute("DELETE FROM tool_review_cache WHERE expires_at <= ?", (utcnow(),))
-        _writes_until_sweep = 0
     expires = _future_stamp(config.cache_ttl_seconds)
     conn.execute(
         "INSERT INTO tool_review_cache (project_id, command_hash, scope_digest, decision,"

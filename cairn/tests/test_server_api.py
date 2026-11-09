@@ -926,6 +926,11 @@ def test_an_exclusive_step_round_trips_and_requires_an_asset(client: TestClient)
     detail = client.get(f"/projects/{project_id}").json()
     assert detail["steps"][0]["exclusive"] is True
 
+    # The YAML snapshot handed to a worker carries the flag too, so the graph it
+    # reads matches what the scheduler decided.
+    export = yaml.safe_load(client.get(f"/projects/{project_id}/export?format=yaml").text)
+    assert export["steps"][0]["exclusive"] is True
+
     rejected = client.post(
         f"/projects/{project_id}/steps",
         json={"description": "spray", "creator": "human", "from": ["origin"], "exclusive": True},

@@ -170,10 +170,12 @@ def make_step(
     exclusive: bool = False,
     batch: str | None = None,
     description: str = "investigate",
+    title: str | None = None,
 ) -> Step:
     return Step(
         id=step_id,
         from_=["f001"],
+        title=title,
         description=description,
         goal="g001",
         asset=asset,
