@@ -168,12 +168,12 @@ workers:
 | A1–A6 | 利用 payload、本次测试产物、口令测试、侦察、只读（含读 `/etc/shadow`、`--dump`）、落脚侦察 |
 | ASK | 写/删/改但归属或影响面判不明 |
 
-输入边界是硬契约（与 ARTEX 的 judge 一致）：
+输入边界是硬契约（移植自 ARTEX 的 judge，并按 Cairn 的约定补充 `scope` / `constraints`）：
 
 - 只给**当前调用**的完整参数、工作目录、命令引用脚本的源码快照、项目 `scope` 与 `constraints`；
 - **不给**任务描述、计划、历史调用或历史裁决——「计划」会被模型当成额外授权，「历史」会把一次小拒绝放大成猜谜；
 - 所有字段视为不可信数据，命令或脚本里的提示注入按数据处理；
-- 脚本快照由 worker 内的扩展采集（`bash ./x.sh` 这类命令的唯一信息来源），单文件 64KB、最多 5 个，超限标记 `truncated`；读不到标 `complete=false`。
+- 脚本快照由 worker 内的扩展采集（`bash ./x.sh` 这类命令的唯一信息来源），单文件 64KB、最多 5 个，超限标记 `truncated`；读不到标 `complete=false`。命令内联的脚本正文（`bash -c`、heredoc）属于 `arguments`，不重复列入 `script_files`；不解析「执行时才生成」的脚本，因为其正文本来就在当前参数里。
 
 失败与超时策略：
 
@@ -184,6 +184,9 @@ workers:
 | 证据不完整（`truncated`/读失败） | `incomplete_script_action`：`model`（交给审核员）或 `ask` |
 | 人工审批超时 | `timeout_action`（默认 deny） |
 | 审核员未配置 | 回到默认 `allow`，与无守卫部署一致 |
+
+ARTEX 的置信度阈值只作用于它的 Jev（System One 单选项）通道；Cairn 的裁判走 JSON 契约，
+不移植该阈值——「判不准」由 ASK 条款与 `fail_action` 承担。
 
 缓存：`allow`/`deny` 写入 `tool_review_cache`，键为「规范化命令 + 项目 + scope/constraints 摘要 + 脚本快照摘要」。
 改动 `scope` 或 `constraints` 会换 key，旧裁决自然失效；`ask` 永不缓存（人工裁决不能被回放）。

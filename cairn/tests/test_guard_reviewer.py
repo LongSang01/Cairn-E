@@ -477,33 +477,97 @@ def test_parse_verdict_rejects_an_overlong_comment() -> None:
     assert reviewer_service.parse_verdict(text) is None
 
 
-def test_default_policy_carries_the_ported_artex_clauses() -> None:
-    """Task contract: D1-D6 / A1-A6 / ASK, plus the two application sections."""
+POLICY_CLAUSES = {
+    "D1": "篡改账号可用性",
+    "D2": "篡改账号与权限体系",
+    "D3": "篡改服务器或服务配置",
+    "D4": "破坏真实业务数据",
+    "D5": "中断服务可用性",
+    "D6": "拒绝服务",
+    "A1": "漏洞探测与利用 payload",
+    "A2": "创建、修改或清理能确认属于本次测试的产物",
+    "A3": "口令类测试",
+    "A4": "信息收集",
+    "A5": "读取与查询",
+    "A6": "落脚后的无害侦察",
+}
+
+
+def test_default_policy_keeps_every_ported_clause() -> None:
+    """Golden check on the policy text: every clause keeps its id and meaning."""
     prompt = reviewer_service.effective_policy(reviewer_service.ReviewerConfig())
 
-    clauses = [f"D{i}" for i in range(1, 7)] + [f"A{i}" for i in range(1, 7)]
-    for clause in clauses:
-        assert clause in prompt
-    assert "ASK" in prompt
-    assert reviewer_service.INPUT_BOUNDARY.strip() in prompt
-    assert reviewer_service.OUTPUT_CONTRACT.strip() in prompt
-    assert prompt.index(reviewer_service.INPUT_BOUNDARY.strip()) < prompt.index(
-        reviewer_service.OUTPUT_CONTRACT.strip()
+    for clause, meaning in POLICY_CLAUSES.items():
+        assert f"{clause} {meaning}" in prompt
+    assert "# ask —— 仅当「判不准」且判错代价是真实破坏" in prompt
+    assert "# 判定流程（按序执行，命中即停）" in prompt
+    for part in ("实际操作：", "成功后的后果：", "命中规则："):
+        assert part in prompt
+    # The application-owned sections appear once each, boundary before contract.
+    assert prompt.count(reviewer_service.INPUT_BOUNDARY) == 1
+    assert prompt.count(reviewer_service.OUTPUT_CONTRACT) == 1
+    assert prompt.index(reviewer_service.INPUT_BOUNDARY) < prompt.index(
+        reviewer_service.OUTPUT_CONTRACT
     )
+
+
+RECORDED_VERDICTS = [
+    ("nmap -sV 10.0.0.5", "allow", "A4", "端口扫描"),
+    ("rm -rf /var/www/html", "deny", "D4", "删除站点目录"),
+    ("rm -rf /data/uploads/tmp", "ask", "ASK", "删除归属不明的文件"),
+]
+
+
+@pytest.mark.parametrize(("command", "decision", "rule", "operation"), RECORDED_VERDICTS)
+def test_recorded_verdict_reaches_the_guard_end_to_end(
+    client, monkeypatch, command: str, decision: str, rule: str, operation: str
+) -> None:
+    """Offline golden layer: recorded model replies over the real guard path.
+
+    It does not claim the model classifies correctly — the live sample test below
+    is the only thing that can say that. It pins what the guard does with each of
+    the three decisions: audit row, wording, cache/queue side effects.
+    """
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        reviewer_service,
+        "_call_model",
+        lambda config, messages: _reply(decision, rule=rule, operation=operation),
+    )
+    project_id = _project(client)
+
+    body = _check(client, project_id, command).json()
+
+    assert body["decision"] == decision
+    if decision == "ask":
+        # An ask is written to the approval queue; its audit row appears when a
+        # human (or the timeout) settles it.
+        assert body["approval_id"].startswith("appr_")
+        approval = _approvals(project_id)[-1]
+        assert approval["status"] == "pending"
+        assert approval["command"] == command
+        assert f"命中规则：{rule}" in approval["reason"]
+        return
+    row = _audit_rows(project_id)[-1]
+    assert row["decision"] == decision
+    assert row["decision_source"] == "reviewer"
+    assert f"命中规则：{rule}" in row["reason"]
+    if decision == "deny":
+        assert body["reason"].startswith("【Cairn 平台管控·非目标防御】")
 
 
 def test_an_embedded_boundary_is_not_appended_twice() -> None:
     """A custom policy file may already carry the boundary; keep a single copy."""
-    custom = "自定义策略。\n\n" + reviewer_service.INPUT_BOUNDARY.strip()
+    custom = "自定义策略。\n\n" + reviewer_service.INPUT_BOUNDARY
     config = reviewer_service.ReviewerConfig(
         enabled=True, model="m", base_url="http://reviewer.local/v1", policy=custom
     )
 
     prompt = reviewer_service.effective_policy(config)
 
-    assert prompt.count(reviewer_service.INPUT_BOUNDARY.strip()) == 1
+    assert prompt.count(reviewer_service.INPUT_BOUNDARY) == 1
     assert prompt.startswith("自定义策略。")
-    assert reviewer_service.OUTPUT_CONTRACT.strip() in prompt
+    assert reviewer_service.OUTPUT_CONTRACT in prompt
 
 
 def test_missing_configuration_disables_the_reviewer(monkeypatch) -> None:
