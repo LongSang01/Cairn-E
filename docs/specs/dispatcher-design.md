@@ -1,1181 +1,537 @@
 # Dispatcher
 
----
-
 ## 本质
 
-Dispatcher 是 Cairn 的客户端执行器。它负责：
+Dispatcher 是 FGS 图的**唯一写入者**。它观察图、选出该发生的活动、把活动交给 Agent 进程执行、再把 Agent 的结构化输出写回图。
 
-1. 协调项目容器生命周期
-2. 给 Agent 下发明确任务
-3. 代 Agent 调用 Cairn API 写回图
-
-Agent 不直接认领 Intent，不直接 heartbeat，不直接调用 Cairn API。Agent 只接收 Dispatcher 下发的任务，返回结构化结果；Dispatcher 再决定如何请求 Server。
-
----
+它不推理任务内容，也不保存任何跨会话记忆：图和配置就是它的全部状态。
 
 ## 设计要点
 
-1. Agent 的输出任务收敛成三类：`bootstrap`、`reason` 和 `explore`；`bootstrap` 只在项目初始态运行，让 Agent 直接尝试解决整个问题；主阶段只有在已解决时才返回，且必须同时给出关键 Fact 和 `complete`；若主阶段超时，再由 `bootstrap_conclude` 收尾产出 Fact；`reason` 负责读图判断是否完成或是否需要提出一个新 intent；`explore` 只负责执行一个已认领 intent 并产出一个 Fact 结论。
-2. Dispatcher 是唯一的协议写入者和控制面；Agent 不 claim、不 heartbeat、不直接调用 Cairn API。
-3. 超时策略按任务类型定义；`bootstrap` 和 `explore` 都支持“第一阶段执行 + timeout / parse-fail 后用同一 session 进入 conclude 收尾”的双阶段模式。
-4. Prompt 以 markdown 文件形式随代码分发；支持按 prompt 组切换；Worker 行为由 `claudecode`、`codex`、`mock` 等 driver 实现；`dispatch.yaml` 只描述运行期参数。
-5. 调度上，项目初始态按 `project.bootstrap_enabled` 和 Worker 能力决定优先 `bootstrap` 或直接 `reason`；非初始态出现新 Fact / Hint 等新态势时优先 `reason`，否则优先消费可认领的 `explore` intent；`reason` 的并发约束通过服务端的项目级 `project.reason` lease 表达为“单项目最多一个”，`bootstrap` 的并发约束是“单项目最多一个保留 bootstrap intent 且最多一个 bootstrap 任务”，跨项目允许并行；`runtime.interval` 被刻意复用为主循环节拍和带 claim 任务的 heartbeat 周期。
-6. Worker 按独立的 LLM 并发配额单元建模；同一个 key 不拆成多个 Worker，因此并发控制使用 `workers[].max_running` 即可。
-7. 运行日志按“状态变化优先”设计：稳定轮询、正常 heartbeat、重复 skip 原则上不刷屏；容器创建、任务派发、容器内新进程启动、健康检查、超时、收尾、释放 intent、worker 进入短暂不可选窗口等事件必须可见。
-8. 项目容器收尾不应阻塞主调度循环；多个已完成项目的容器 cleanup 可以并行进行。
-9. 项目切到非 `active` 后，Dispatcher 必须把它视为硬停止：不再派发新任务；对本地仍在运行的 `bootstrap`、`explore`、`reason` 任务立即发出取消；对已取消任务不再进入 conclude fallback；并在后续轮询中停止该项目容器，杀掉容器内仍在运行的 Agent 进程。
-10. 当前实现按“单 Dispatcher 实例”设计和测试；不支持多个 Dispatcher 同时连接同一服务端共同调度。
-11. 若项目曾 `completed` 后又被服务端显式 `reopen` 为 `active`，Dispatcher 不做特殊分支：它会把这视为普通 active 项目继续调度；同时若该项目容器仍处于已排队 cleanup 状态，Dispatcher 会先等待 cleanup 完成，避免与旧的 completed/stopped cleanup 竞态。
-12. 已知限制：当前协议只记录当前 claim 持有者，不保留 Intent 的 worker 历史；因此项目被 `stopped` 后，随着 open intent 的 `worker` 被服务端清空，Dispatcher/UI/API 都无法直接展示“停止前最后是谁在推进这个 intent”。后续若要补这部分可观测性，较合理的方向是在 Intent 上增加类似 `worker_history` 的历史字段，而不是改变当前 claim 语义。
-
-补充：
-
-- 项目被删除后，Dispatcher 会把它视为 `deleted`。这和 `stopped` 一样会先取消本地运行中的任务，但容器收尾语义不同：`deleted` 对应的 orphan 容器会被直接删除，而不是仅停止后保留。
-
----
+1. **Less is more**：调度活动只有两类（Decide / Execute）；旁路提问（Question）与背景摘要（Summary）走独立额度，不抢这两类槽位。没有固定角色、没有跨会话记忆、没有工具集成层。
+2. **外化记忆**：每次活动都从干净上下文重新开始，靠读取 FGS 图恢复状态。
+3. **单一写入者**：Agent 只输出结构化 JSON，Server 校验后写图，避免并发写冲突。
+4. **提示词极短且与任务领域解耦**：`decide.md` / `execute.md` 只描述图语法与输出契约，不含任何渗透测试术语。
+5. **失败不猜测**：契约校验失败、超时、心跳丢失都按失败处理并释放租约，由下一轮重新调度。
 
 ## 架构概览
 
-这个项目在架构上可以分成 4 个部分：
-
-1. Cairn Server
-2. Dispatcher
-3. 项目容器
-4. Worker / Agent CLI
-
-### 1. Cairn Server
-
-Server 是协议真相源。
-
-它负责：
-
-- 保存 Project / Fact / Intent / Hint
-- 提供协议接口
-- 维护 Intent 的认领、心跳、结论状态
-- 维护项目级 `reason` lease 的认领、心跳与释放状态
-
-### 2. Dispatcher
-
-Dispatcher 是这个工程要实现的核心。
-
-它负责：
-
-- 拉取项目图状态
-- 决定当前该派发哪一种任务
-- 选择哪个 Worker 来执行
-- 管理项目容器和 Worker 进程
-- 维护 session、超时、健康检查、收尾
-- 把结果写回 Cairn Server
-
-### 3. 项目容器
-
-每个项目对应一个运行容器。
-
-这个容器是该项目的执行环境，通常负责：
-
-- 提供工具链
-- 提供网络环境
-- 承载该项目下的 Worker 进程
-
-### 4. Worker / Agent CLI
-
-Worker 不是协议参与者本身，而是 Dispatcher 管理下的执行单元。
-
-例如：
-
-- Claude Code CLI
-- Codex CLI
-
-它们负责：
-
-- 接收 Dispatcher 渲染好的 prompt
-- 在当前容器内执行任务
-- 输出结构化 JSON
-
-### 组件关系
-
-```text
-                         +----------------------+
-                         |     Cairn Server     |
-                         |----------------------|
-                         | Projects / Facts     |
-                         | Intents / Hints      |
-                         | Protocol API         |
-                         +----------^-----------+
-                                    |
-                           read / write API
-                                    |
-+-----------------------------------------------------------+
-|                         Dispatcher                        |
-|-----------------------------------------------------------|
-| Scheduling / Task Dispatch / Session / Timeout / Health   |
-| Container Lifecycle / Protocol Writeback                  |
-+----------------------+----------------------+-------------+
-                       |                      |
-             manage container        manage container
-                       |                      |
-          +------------v-----------+  +------v-------------+
-          |   Project Container A  |  | Project Container B|
-          |------------------------|  |--------------------|
-          | Worker / Agent CLI     |  | Worker / Agent CLI |
-          | - Claude Code          |  | - Codex            |
-          | - Codex                |  | - ...              |
-          +------------------------+  +--------------------+
 ```
+┌──────────────┐   HTTP    ┌──────────────┐   exec    ┌──────────────────┐
+│ Cairn Server │◀─────────▶│  Dispatcher  │──────────▶│  Worker 容器/进程 │
+│   FGS 图     │           │ 调度 + 契约  │           │  Agent CLI       │
+└──────────────┘           └──────────────┘           └──────────────────┘
+```
+
+- **Cairn Server**：图的读写与一致性（见 `server-protocol.md`）。
+- **Dispatcher**：轮询项目摘要、抢占租约、构造提示词、执行 CLI、校验输出、写回图。
+- **Worker**：Pi / Mock；容器模式下每个项目一个容器，本地模式下直接跑在宿主机。
+
+### 模块结构
+
+`DispatcherLoop` 由单文件拆分为一组聚焦的 mixin，公共状态与跨 mixin 接口声明在
+`_base.py`（`LoopBase`），组合入口仍保持 `cairn.dispatcher.scheduler.loop.DispatcherLoop` 不变：
+
+```
+dispatcher/scheduler/
+  worker_select.py       按 priority / 当前负载挑选 worker
+  loop/
+    __init__.py          组合 DispatcherLoop，再导出 time / shutil 供测试 patch
+    _base.py             LoopBase：共享属性 + 跨 mixin 方法签名
+    _common.py           退避常量（DECIDE/UNHEALTHY/REJECTED）、预算常量、WorkerSelection
+    core.py              CoreMixin：__init__ / close / run 主循环 / 启动健康检查 / 设置校验
+    dispatch.py          DispatchMixin：全局与项目级派发入口
+    dispatch_decide.py   DecideDispatchMixin：Decide 触发判定与提交
+    dispatch_execute.py  ExecuteDispatchMixin：Execute 提交与 Step 尝试计数
+    scheduling.py        SchedulingMixin：worker 选择与在跑任务统计
+    questions.py         QuestionsMixin：旁路提问与背景摘要
+    reaper.py            ReaperMixin：Future 回收、退避记录、容器清理
+    checkpoints.py       CheckpointsMixin：Decide checkpoint 与项目运行集
+    log_state.py         LogStateMixin：抑制重复日志
+```
+
+新增 mixin 需要同时把状态或跨 mixin 方法补进 `_base.py`，否则 `mypy` 会因
+`attr-defined` 失败——这条约束替代了原先整包关闭 `attr-defined` 的妥协。
 
 ### 执行主链路
 
-Dispatcher 会同时读取两类数据：
-
-- 结构化接口：用于调度、状态判断、intent 选择、协议写回
-- `GET /projects/{project_id}/export?format=yaml`：仅用于构造 prompt 所需的图快照
-
-1. Dispatcher 从 Server 读取项目图
-2. Dispatcher 依据调度规则选择任务类型和 Worker
-3. Dispatcher 渲染 prompt 与命令占位符
-4. 如果是 `explore`，Dispatcher 先通过 `POST /projects/{project_id}/intents/{intent_id}/heartbeat` 认领目标 intent；如果是 `reason`，则先通过 `POST /projects/{project_id}/reason/claim` 认领项目级 reason lease
-5. Dispatcher 在项目容器内启动 Worker 进程
-6. Worker 输出结构化 JSON
-7. Dispatcher 解析结果，并调用 `POST /projects/{project_id}/complete`、`POST /projects/{project_id}/intents`、`POST /projects/{project_id}/intents/{intent_id}/conclude`、`POST /projects/{project_id}/intents/{intent_id}/release` 或 `POST /projects/{project_id}/reason/release`
-
-项目若被切到 `stopped`，这条主链路会在下一轮短路：Dispatcher 不再把该项目纳入 active 调度集合，会先取消本地仍在运行的任务，再转入容器 cleanup 流程并停止项目容器。对 `bootstrap` / `explore` 来说，被 `stopped` 取消后不会再进入 conclude fallback，因此不会再额外落 Fact。项目恢复为 `active` 后，Dispatcher 会重新读取图状态，再决定是继续 `explore`、进入 `reason`，还是在初始态依据 `project.bootstrap_enabled` 和 Worker 能力重新选择 `bootstrap` 或 `reason`。项目若在 `completed` 后被服务端 `reopen`，对 Dispatcher 来说也等价于“重新变成 active 且图上多了一个新 fact”；下一轮会按普通 active 项目继续调度。
-
-Worker 选择规则：
-
-1. 先按任务类型筛选
-2. 再过滤掉已达到 `max_running` 的 Worker
-3. 再过滤掉处于短暂不可选窗口内的不健康 Worker
-4. 在剩余 Worker 中，优先选择 `priority` 更小的
-5. 如果 `priority` 相同，则优先选择当前运行中任务数更少的
-6. 如果仍然相同，则随机选择
-7. 如果是 `explore`，Dispatcher 先通过 `POST /projects/{project_id}/intents/{intent_id}/heartbeat` claim 成功，再真正启动任务
-8. 如果是 `reason`，claim 成功后由 `POST /projects/{project_id}/reason/heartbeat` 维持 lease；当 `runtime.worker_healthcheck=startup_and_task` 时，真正启动前再对选中的 Worker 执行一次健康检查；如果失败，则本次任务作废；该 Worker 会进入一个短暂不可选窗口，等待后续轮次再尝试
-
----
+1. 定时 tick：`run_startup_healthchecks()`（仅首次），随后每轮先做一次设置校验（仅首次）。
+2. `list_projects()` 拉取项目摘要。
+3. 回收已完成任务的 Future，更新 Decide checkpoint 与失败退避。
+4. 取消非 `active` 项目的运行中任务，排队清理已结束项目的容器。
+5. 回收摘要 Future、派发待答旁路提问（各自独立线程池）。
+6. 选取项目：
+   - `active` 且没有运行中任务的项目优先；
+   - 受 `max_running_projects` 约束；
+   - 空闲项目按 project_cursor 轮转，避免饿死。
+7. 项目内选活动：
+   - Decide 可抢占且触发条件成立 → 先 Decide；
+   - 否则按 `priority` 从高到低填充 `max_running_steps` 个 Execute 槽位。
+8. 抢租约成功 → 提交线程池 → 任务结束后按结果更新 checkpoint 或冷却 worker。
 
 ## 配置模型
 
-Dispatcher 使用一个运行期配置文件：
-
-- `dispatch.yaml`
-
-也就是说：
-
-- 使用者只需要提供 `dispatch.yaml`
-- 任务 prompt 以 markdown 文件形式随代码分发，并通过 `runtime.prompt_group` 选择目录
-- Worker 的健康检查、命令模板、session 处理、二阶段收尾能力由对应 driver 实现
-- `runtime.execution` 选择执行后端：默认 `container`（每项目一个容器），或 `local`（worker 直接在 dispatcher 宿主机上以子进程运行，复用本机已配置好的 CLI，无需 Docker 与 API key）
-
-代码目录可以采用类似组织：
-
-```text
-dispatcher/
-  models.py
-  prompting.py
-  output_parser.py
-  contracts.py
-  prompts/
-    default/
-      bootstrap.md
-      bootstrap_conclude.md
-      reason.md
-      explore.md
-      explore_conclude.md
-    mock/
-      bootstrap.md
-      bootstrap_conclude.md
-      reason.md
-      explore.md
-      explore_conclude.md
-  workers/
-    base.py
-    registry.py
-    adapters/
-      claudecode.py
-      codex.py
-      mock.py
+```yaml
+server: "http://cairn-server:8000"
+common_env: {}
+runtime:
+  execution: container          # container | local
+  interval: 3
+  max_workers: 8
+  max_running_projects: 3
+  max_project_workers: 4
+  max_running_steps: 1          # 项目内并发的 Execute，1 = 串行；仅在 Step 互不抢资源时调大
+  healthcheck_timeout: 20
+  worker_healthcheck: startup_only   # startup_and_task | startup_only | disabled
+  prompt_group: default
+  max_questions: 1              # side questions answered in parallel with Decide/Execute
+  max_summaries: 1              # background summaries folded in after a Decide
+  context_budget:
+    enabled: true
+    context_window: 200000      # a worker's CONTEXT_WINDOW env overrides it
+    max_output_tokens: 16000
+    safety_ratio: 0.05
+    safety_min_tokens: 2000
+    safety_max_tokens: 18000
+    recent_items: 20
+    summary_max_calls: 1        # 0 disables the rolling summary
+    summary_timeout: 90
+    min_snapshot_tokens: 2000
+tasks:
+  decide:
+    timeout: 300
+    max_steps: 3
+  execute:
+    timeout: 600
+    conclude_timeout: 90
+  question:
+    timeout: 120
+container:
+  image: cairn-worker-container:latest
+  network_mode: host
+  completed_action: stop        # stop | remove
+  cap_add: []
+local:
+  workspace_root: null
+  completed_action: keep        # keep | remove
+tool_guard:                     # pi 扩展在 worker 内拦截 bash，dispatcher 只读配置
+  enabled: false
+  api_url: "http://127.0.0.1:8001"
+  fail_action: allow            # allow | deny：服务端不可达时的行为
+web:                            # 服务端 Basic Auth：server 读取并执行，dispatcher 只做校验
+  auth:
+    realm: Cairn
+    users: []
+workers:
+  - name: pi-a
+    type: pi                    # pi | mock
+    task_types: [decide, execute]
+    max_running: 2
+    priority: 0
+    env: {}
 ```
 
-本文档附录给出：
+约束：
 
-- `dispatch.example.yaml` 的示例内容
-- 上述 markdown prompt 的示例内容
+- worker 名字唯一；
+- `max_project_workers` 不得超过 `max_workers`；
+- `task_types` 只能取 `decide` / `execute`（Question 由具备 `decide` 能力的 worker 顺带作答）；
+- `max_running_steps >= 1`，默认 1 保持项目内串行；
+- 每个 worker 的 env 会和 `common_env` 合并，worker 自身优先；
+- 顶层、`runtime`、`workers[]` 及 `web` 配置均为严格模式，出现未知键会直接启动失败（拼错的键不会被静默忽略）。
 
----
+## 命令审核（Guard + Reviewer）
+
+平台的立场是「默认放行，拦住不该发生的破坏」：渗透任务本来就要跑工具、装环境、上传 payload，
+所以守卫不是白名单闸机，而是**审核员**。每次 `bash` 调用都在 pi 扩展里阻塞，判定分三层：
+
+| 层 | 判定者 | 结果 |
+|---|---|---|
+| 1 | 确定性规则（`tool_rules`，priority 降序，首个命中） | `allow` / `deny` / `ask` |
+| 2 | 未命中任何规则 → LLM 审核员 | `allow` / `deny` / `ask` |
+| 3 | `ask` | 进人工队列，超时按 `timeout_action`（默认 deny） |
+
+审核员不是黑名单，它用**两根轴**判断当前这一次调用的直接效果：
+
+- **可逆性**：只读、探测、注入探测恒可逆；覆盖/删除/清空/改配置/停服务不可逆。
+- **作用对象**：本次测试的产物，还是目标的生产资产（真实业务数据、真实账号、服务配置、在服务的进程）。
+
+合成规则：`不可逆 且 作用于生产资产 = deny`；判不明且判错代价是真实破坏 = `ask`；其余 `allow`。
+条款编号固定，写进审计的「命中规则」字段：
+
+| 编号 | 含义 |
+|---|---|
+| D1–D2 | 改账号可用性/口令；改账号与权限体系、建高权账号 |
+| D3 | 改系统与服务配置、防火墙、启动项 |
+| D4 | 破坏真实业务数据（`DELETE/PUT/PATCH` 删真实记录、`DROP/TRUNCATE`、无条件 `UPDATE/DELETE`、清库、删生产文件） |
+| D5–D6 | 停/禁在服务的进程；明示 flood 类 DoS |
+| A1–A6 | 利用 payload、本次测试产物、口令测试、侦察、只读（含读 `/etc/shadow`、`--dump`）、落脚侦察 |
+| ASK | 写/删/改但归属或影响面判不明 |
+
+输入边界是硬契约（移植自 ARTEX 的 judge，并按 Cairn 的约定补充 `scope` / `constraints`）：
+
+- 只给**当前调用**的完整参数、工作目录、命令引用脚本的源码快照、项目 `scope` 与 `constraints`；
+- **不给**任务描述、计划、历史调用或历史裁决——「计划」会被模型当成额外授权，「历史」会把一次小拒绝放大成猜谜；
+- 所有字段视为不可信数据，命令或脚本里的提示注入按数据处理；
+- 脚本快照由 worker 内的扩展采集（`bash ./x.sh` 这类命令的唯一信息来源），单文件 64KB、最多 5 个，超限标记 `truncated`；读不到标 `complete=false`。命令内联的脚本正文（`bash -c`、heredoc）属于 `arguments`，不重复列入 `script_files`；不解析「执行时才生成」的脚本，因为其正文本来就在当前参数里。
+
+失败与超时策略：
+
+| 情形 | 行为 |
+|---|---|
+| 审核员超时/传输失败/输出不合契约 | 重试 `CAIRN_REVIEWER_RETRY_COUNT` 次，仍失败按 `fail_action`（默认 `ask` 转人工） |
+| 合法裁决 | `deny`/`ask` 即终局，不重试 |
+| 证据不完整（`truncated`/读失败） | `incomplete_script_action`：`model`（交给审核员）或 `ask` |
+| 人工审批超时 | `timeout_action`（默认 deny） |
+| 审核员未配置 | 回到默认 `allow`，与无守卫部署一致 |
+
+ARTEX 的置信度阈值只作用于它的 Jev（System One 单选项）通道；Cairn 的裁判走 JSON 契约，
+不移植该阈值——「判不准」由 ASK 条款与 `fail_action` 承担。
+
+缓存：`allow`/`deny` 写入 `tool_review_cache`，键为「规范化命令 + 项目 + scope/constraints 摘要 + 脚本快照摘要」。
+改动 `scope` 或 `constraints` 会换 key，旧裁决自然失效；`ask` 永不缓存（人工裁决不能被回放）。
+
+拒绝话术统一以「【Cairn 平台管控·非目标防御】」开头：渗透 agent 把平台拦截误读成目标 WAF 时会
+换手法反复绕，越绕越糟。
+
+审核员配置走 **server 环境变量**（不写进 `dispatch.yaml`——那份文件由 dispatcher 与 server 共读）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `CAIRN_REVIEWER_ENABLED` | `0` | 总开关 |
+| `CAIRN_REVIEWER_MODEL` / `_BASE_URL` / `_API_KEY` | 空 | OpenAI 兼容端点；三者缺一即视为未配置 |
+| `CAIRN_REVIEWER_API` | `openai-completions` | 目前只支持该协议 |
+| `CAIRN_REVIEWER_TIMEOUT_SECONDS` / `_RETRY_COUNT` | `15` / `2` | 单次超时与重试次数 |
+| `CAIRN_REVIEWER_FAIL_ACTION` | `ask` | 审核失败时的动作 |
+| `CAIRN_REVIEWER_ASK_TIMEOUT_SECONDS` / `_ASK_TIMEOUT_ACTION` | `300` / `deny` | 人工队列超时 |
+| `CAIRN_REVIEWER_INCOMPLETE_SCRIPT_ACTION` | `model` | 证据不完整时 `model` 或 `ask` |
+| `CAIRN_REVIEWER_CACHE_TTL_SECONDS` | `86400` | 裁决缓存有效期 |
+| `CAIRN_REVIEWER_POLICY_FILE` | 空 | 覆盖内置策略文本（运维可调，不必重建镜像）；输入边界与输出契约仍由程序追加，策略文件不能移除 |
+
+### 通道隔离
+
+worker 与浏览器最终都到达同一个 FastAPI 进程：浏览器带 `Authorization: Basic`（`web.auth`，
+由服务端中间件校验），worker 经宿主回环端口只带 worker 令牌。网络路径分不出两者——被攻陷的
+worker 能调用回环上任何端点——所以用两套凭据区分：
+
+| 凭据 | 来源 | 保护对象 |
+|---|---|---|
+| `CAIRN_WORKER_TOKEN`（`x-cairn-worker-token`） | dispatcher 写进每个任务的 `cairn-guard.json` | `/internal/projects/*`：只允许 check 与审批查询 |
+| Basic Auth（`web.auth`） | 浏览器，服务端直接校验 | 全部页面与 API，包括能削弱审核的端点（写工具规则、批审批、改 scope） |
+
+未配置 `web.auth` 时 UI 不强制认证（现有部署不受影响），但非回环绑定会被 CLI 拒绝，除非显式
+`--allow-insecure`。worker 容器里只有 worker 令牌，即使目标拿到 shell 也读不到 UI 凭据，因此
+改不了规则、也批不了自己的待审命令。
+
+已知绕过路径（保留 `sudo` 的代价，必须靠部署侧兜住）：
+
+1. worker 内 root 可改 `/etc/hosts` 或 `iptables` 让审核端点不可达 → 走 `fail_action`。把
+   `fail_action` 设为 `deny` 可堵住，代价是审核服务抖动会中断扫描。
+2. local 模式曾经用 `--no-extensions` 启动且不加载扩展，审核为零 → 现在 local 分支同样用
+   `-e "$guard"` 显式加载，且有测试守住。
+3. `tmux`/后台常驻会话里后续命令不再逐条经过 `bash` 工具 → 至少要求启动命令本身过审，并在
+   report 中标注存在未逐条审核的子进程。
 
 ## 任务模型
 
-### 三类任务一览
+### Decide
 
-| 任务 | 触发条件 | 输入 | 输出 | 超时策略 |
-| --- | --- | --- | --- | --- |
-| `bootstrap` | 项目 `active`；`project.bootstrap_enabled=true`，且配置中存在支持 `bootstrap` 的 Worker 或项目已经存在保留 bootstrap intent；facts 只有 `origin` 和 `goal`；当前没有普通 intent；允许不存在 bootstrap intent，或只存在保留的 open `bootstrap` intent | `{origin}`、`{goal}`、`{hints}` | 主阶段成功时固定返回 `fact + complete`；收尾阶段只返回 `fact` | 双阶段：`timeout` 后可进入 `conclude_timeout` 收尾；两阶段都失败则 release 保留 intent，下轮仍按新项目重试 |
-| `reason` | 项目 `active`；当前项目无未认领 intent；当前项目内无其他 `reason`；首次触发或满足“新态势”重触发条件 | `{graph_yaml}`、`{fact_ids}`、`{open_intents}` | `complete` 对象；或 `intent` 对象；或空 `data` | 仅 `timeout`；超时或非法结果直接作废，不写图 |
-| `explore` | 项目 `active`；存在一个当前可认领的未结论 intent | `{graph_yaml}`、`{intent_id}`、`{intent_description}` | 一个 Fact 结论描述 | 单阶段：超时直接作废；双阶段：超时或输出解析失败时可进入 `conclude` 收尾 |
+#### 职责
 
-### `bootstrap`
+只读和修改图：评估 Step、添加 / 废弃 / 调整优先级、提出和关闭子 Goal、宣告根 Goal 达成。没有任何作用于世界的工具。
+
+权限边界由契约保证：Decide 的输出即使包含世界操作也会被忽略，Dispatcher 只应用图变更。若需要进程级隔离，可在驱动层进一步限制 CLI 可用工具（pi 提供 `--tools` 白名单），但这不属于协议要求。
 
 #### 触发条件
 
-- 当前项目仍然是 `active`
-- `project.bootstrap_enabled = true`，且配置中存在支持 `bootstrap` 的 Worker 或项目已经存在保留 bootstrap intent
-- facts 恰好只有 `origin` 和 `goal`
-- intents 为空，或只存在保留的 open `bootstrap` intent
-- 保留 `bootstrap` intent 的约定固定为：
-  - `description = "bootstrap"`
-  - `creator = "dispatcher.bootstrap"`
-  - `from = ["origin"]`
+`_decide_trigger` 命中任一即触发：
+
+| 触发 | 说明 |
+|------|------|
+| `initial` | 项目从未 Decide 过（没有 checkpoint） |
+| `facts:N->M` | 事实增加 |
+| `hints:N->M` | 提示增加 |
+| `findings:N->M` | Finding 增加 |
+| `open_steps:N->0` | 所有 Step 结束，需要重新规划 |
+| `stuck:s062,...` | 剩下的 pending Step 都已烧完 Execute 次数（`MAX_STEP_EXECUTE_ATTEMPTS`），必须换路线或 abandon |
+| `idle:1..3` | 图已全终结但项目仍 active，给 Decide 有界预算宣布完成 |
+
+`stuck:` / `idle:` 是"图本身没有要求"的 Decide：每个 checkpoint 只有
+`MAX_UNPROMPTED_DECIDE_RUNS` 次预算，且只在真正派发时扣减；图发生变化后预算重置。
+预算花完后调度器不再重跑这些 Step，只按 WARNING 记录卡住的 Step——宁可停在死局，
+也不要无限消耗 token。
+
+checkpoint 在 Decide 成功后**重新读取图**再写入，这样"Decide 只废弃了 Step"也会在 Step 清空时再次触发。
 
 #### 输入
 
-- `{origin}`
-- `{goal}`
-- `{hints}`
-
-其中：
-
-- `{hints}` 是 JSON 数组文本，便于 Worker 在项目起始阶段快速吸收策略信息
-- `bootstrap` 不读取图 YAML，不依赖普通 intent 图结构
+- `{graph_yaml}`：图快照的容器内路径（大图不直接塞进提示词）。
+- `{fact_ids}`：可引用的事实 id 列表。
+- `{open_steps}`：pending / running 的 Step 摘要。失败过的 Step 额外带
+  `failures: {count, last_error, last_at}`：这是调度器内存里该 Step 连续失败的 Execute
+  轮数与最近一次原因（超时、退出码、解析失败等）。这些失败不会进入图，模型否则只会看到
+  一个"还在 pending"的 Step 并原样重发同一条计划；`count >= 2` 时提示词要求换路线、拆小步
+  或带说明地 abandon。连续失败达到 `MAX_STEP_EXECUTE_ATTEMPTS`（3）后调度器**不再重派**
+  该 Step，并在它是图上最后一个可跑的 Step 时用 `stuck:` 触发 Decide。Step 成功或废弃、
+  项目离开 active 时计数清零（废弃的 Step 在下一轮派发前就被丢弃）。
+- `{max_steps}`：一次运行最多新增多少 Step。
 
 #### 输出契约
 
-`bootstrap` 使用独立输出契约：
-
-- 主阶段只有在已经解决问题时才返回
-- 主阶段返回时必须同时包含 `fact` 和 `complete`
-- 如果主阶段没有在超时前解决问题，就不会返回合法结果；Dispatcher 会终止它并进入 `bootstrap_conclude`
-- `bootstrap_conclude` 只负责收尾总结，因此只返回 `fact`
-
 ```json
-{
-  "accepted": true,
-  "data": {
-    "fact": {
-      "description": "拿到两个 flag，分别为 flag{...} 与 flag{...}；同时获得管理员 shell，权限证明见 /tmp/proofs/root.txt"
-    },
-    "complete": {
-      "description": "已拿到并验证完成 Goal 所需的全部关键结果，Goal 达成"
-    }
-  }
-}
+{"accepted": true, "data": {
+  "complete": {"from": ["f001"], "description": "为什么目标已达成"},
+  "goals": {"add": [{"description": "...", "parent": "g001"}],
+            "close": [{"id": "g002", "status": "achieved"}]},
+  "steps": {"add": [{"description": "...", "from": ["f001"], "goal": "g001",
+                     "priority": 3, "rationale": "..."}],
+            "update": [{"id": "s002", "priority": 7},
+                       {"id": "s003", "status": "abandoned"}]}
+}}
 ```
 
-约束：
+校验规则：
 
-- 主阶段返回时，`data.fact.description` 和 `data.complete.description` 都必须存在
-- 主阶段不允许只返回 `fact`
-- `bootstrap_conclude` 只允许返回 `fact`，不允许返回 `complete`
+- 只接受 `steps` / `goals` / `complete` 三个键；也允许 `steps` 直接是数组。
+- 所有 fact / goal / step 引用必须存在于图中，否则整次运行失败。
+- `complete.from` 非空。
+- 新增 Step 数不超过 `max_steps`（超出截断）。
+- `complete` 只有在没有任何 open Step、没有未关闭子 Goal 时才生效。同一 payload 里用
+  `steps.update` 废弃掉最后的 **pending** Step、用 `goals.close` 关掉最后的子 Goal 是正常收尾
+  （先落图操作，最后原子完成）。
+- `running` 的 Step 不能在这个 payload 里被关闭：它归执行它的 worker，服务端会拒绝废弃，
+  `complete` 也随之不生效——等它 `conclude` 出事实后下一轮 Decide 再完成。
+- 携带 `goals.add` / `steps.add` / 只改 `priority`、`note` 的 `steps.update` 时，图操作保留、
+  `complete` 丢弃；既没有任何图操作又有 open Step 的裸 `complete` → 失败。
+- 没有任何动作但仍有 open Step → **noop**：合法的“等待”（典型场景是所有 Step 都在跑），记 success、
+  不动图，只保存本轮的 recall / doc 请求。
+- 没有任何动作且当前没有 open Step → 失败（必须推进：加 Step、关 Goal 或 complete）。
+- `accepted: false` → 直接判定 rejected。
 
 #### 接口映射
 
-`bootstrap` 复用普通 intent 协议，但使用保留 intent：
-
-| 接口 | 用途 | 何时使用 |
-| --- | --- | --- |
-| `POST /projects/{project_id}/intents` | 创建保留 `bootstrap` intent | 初始态项目首次进入时，如尚不存在该 intent |
-| `POST /projects/{project_id}/intents/{intent_id}/heartbeat` | claim 并维持 `bootstrap` intent | 派发前先 claim；执行中按 `interval` 周期发送 |
-| `POST /projects/{project_id}/intents/{intent_id}/conclude` | 将 `bootstrap` 产出的关键结果写成 Fact | `bootstrap` 或 `bootstrap_conclude` 返回合法 `fact` 后调用 |
-| `POST /projects/{project_id}/complete` | 基于刚写入的 bootstrap fact 直接完成项目 | 仅当 `bootstrap` 主阶段成功返回 `fact + complete` 时调用 |
-| `POST /projects/{project_id}/intents/{intent_id}/release` | 放弃本次 bootstrap 尝试 | 两阶段都失败，或命令直接失败时调用 |
+| 契约字段 | 接口 |
+|----------|------|
+| `complete` | `POST /projects/{id}/complete` |
+| `goals.add[]` | `POST /projects/{id}/goals` |
+| `goals.close[]` | `POST /projects/{id}/goals/{gid}/close` |
+| `steps.add[]` | `POST /projects/{id}/steps` |
+| `steps.update[]` | `POST /projects/{id}/steps/{sid}/update` |
 
 #### 超时与失败
 
-- `bootstrap` 第一阶段使用 `timeout`
-- `bootstrap_conclude` 第二阶段使用 `conclude_timeout`
-- 主阶段如果在 `timeout` 内解决问题，就返回 `fact + complete`
-- 第一阶段超时、输出解析失败或返回了不满足契约的结果时，如果 Worker 支持 session / conclude，则进入 `bootstrap_conclude`
-- `bootstrap_conclude` 的 prompt 必须明确要求“不继续推进，不等待未完成任务，只总结当前最关键事实”，因此它只产出 `fact`
-- 如果 `bootstrap` 主阶段成功返回合法 JSON，则 Dispatcher 会先 conclude 写入 fact，再立即 complete
-- 如果 `bootstrap_conclude` 成功返回合法 JSON 且 conclude 写回成功，则保留 intent 被结论落定，项目不再视为初始态
-- 如果主阶段的 `complete` 写回失败，已写入的 fact 仍然保留，后续可由下一轮 `reason` 再完成项目
-- 如果两阶段都失败，或 conclude 写回失败，则 release 当前 `bootstrap` intent，不写 Fact；项目下轮仍然按新项目处理
+超时、命令失败、解析失败、契约失败 → `failed`，释放 Decide 租约，checkpoint 不更新，下一轮重试。无 conclude 兜底（Decide 不作用于世界，重来即可）。
 
-### `reason`
+### Execute
 
 #### 触发条件
 
-- 当前项目仍然是 `active`
-- 当前项目没有未认领 intent
-- 当前项目的 `project.reason` 为空，也就是当前没有其他 `reason` lease 正在运行
-- 首次触发只发生在“当前没有任何 open intent”时
-- 之后只有出现新的态势才重新触发；这里的“新态势”限定为：
-  - Fact 数量增加
-  - Hint 数量增加
-  - 项目从“存在 open intents”进入“没有 open intents”
-- 单次 `explore` 失败、掉心跳、释放但 intent 仍保持 open，不构成新的态势，不应触发新的 `reason`
+存在 `pending`、`worker` 为空、且本地没有在跑的 Step。按 `(priority, created_at, id)` 从大到小填充
+`runtime.max_running_steps` 个槽位（已有 `N` 个 Execute 在跑时只再派发 `max_running_steps - N` 个）。
 
 #### 输入
 
-- `{graph_yaml}`
-- `{fact_ids}`
-- `{open_intents}`
+- `{graph_yaml}`：图快照路径。
+- `{step_id}` / `{step_description}`：本次唯一的 Step。
 
-其中：
-
-- `{fact_ids}` 是 JSON 数组文本，用于显式列出当前合法的 Fact id
-- `{open_intents}` 是 JSON 数组文本，用于显式列出当前所有未结论的 intent；因此即使有别的 intent 正在 `explore`，只要出现了新的 Fact / Hint，`reason` 仍可能再次被触发
-- 这两个占位符都是 prompt 层辅助，不替代 server 的最终校验
+工具：read / bash / edit / write 等世界工具，以及 `submit_fact` / `submit_finding`（以输出契约形式提供）。
 
 #### 输出契约
 
-已完成：
-
 ```json
-{
-  "accepted": true,
-  "data": {
-    "complete": {
-      "from": ["f008"],
-      "description": "flag{abc} 满足 goal 要求"
-    }
-  }
-}
+{"accepted": true, "data": {
+  "facts": [{"description": "已确认的事实"}],
+  "findings": [{"kind": "任务自定义类型", "description": "搜索产物"}],
+  "status": "done",
+  "note": "可选"
+}}
 ```
 
-未完成，提出新 intent：
+校验规则：
 
-```json
-{
-  "accepted": true,
-  "data": {
-    "intent": {
-      "from": ["f003"],
-      "description": "尝试 SQL 注入"
-    }
-  }
-}
+- `status` ∈ `done` | `abandoned`。
+- `facts` 可以是字符串数组或 `{"description": ...}` 数组；也接受单个 `fact`。
+- `status=done` 时至少一条 fact。
+- `findings[].kind` 缺省为 `finding`。
+- 解析 / 校验失败 → 进入 conclude 兜底。
+
+#### 兜底与失败
+
+| 情况 | 处理 |
+|------|------|
+| 主阶段正常但输出无法解析 | 用同一 session 追加 `execute_conclude.md`，要求立即停止并汇报 |
+| 主阶段超时 | 同上 |
+| 兜底也失败 | 释放 Step，回到 pending |
+| 心跳冲突（租约被回收） | 立即结束，不写图 |
+| 写 conclude 时项目已非 active | 视为正常结束，只释放 Step |
+| 连续失败 | worker 进入 rejected 冷却（项目 + 任务类型维度，`REJECTED_RETRY_AFTER_SECONDS` = 5s） |
+| provider 拒绝（额度耗尽 / 凭证失效） | 失败原因带 `quota:` / `auth:` 前缀，按 worker 故障记 rejected 冷却，不计入 Step 的尝试次数 |
+| Decide 失败（解析失败 / 完成被拒 / 崩溃） | checkpoint 不推进，同一 trigger 会立刻再次触发；按项目冷却 `DECIDE_RETRY_AFTER_SECONDS`（10s）后再派发 |
+| 同一 trigger 连续失败达 `MAX_CONSECUTIVE_DECIDE_FAILURES`（5） | 不再派发该 trigger，直到图变化（trigger 字符串随之改变）；否则冷却只是把"无限重试"摊慢成每 10s 一次 |
+| Decide 成功但图没变（noop） | 记 success，不写图；下一轮由 open Step / facts 变化继续驱动 |
+| 调度循环单轮抛非 HTTP 异常 | `LOG.exception` 后 sleep 一个 interval 继续，不让整个 dispatcher 退出 |
+
+### Question（旁路提问）
+
+人类在任务进行中提的问题走独立通道：它不抢 Step、不写图，也不占用 Decide / Execute 的并发额度。
+
+- dispatcher 每轮先 `GET /questions/pending` 取最早的待答问题，`runtime.max_questions` 限制同时作答数（默认 1）。
+- 用 `decide` 能力的 worker 作答；抢占成功（`claim`）后才提交到独立的提问线程池。
+- 提示词模板 `question.md` 可以不含 `{graph_yaml}`（mock 组就没有），此时不写快照、不启动容器。
+- 答案只回写到 `questions` 表；问题被取消后提交的答案由服务端丢弃（`409`）。
+- 提问失败（超时、退出码非零、空输出）同样写 `failed` 与 `error`，不会中断调度循环。
+
+### 上下文预算
+
+`{graph_yaml}` 不再无条件塞进提示词。`runtime.context_budget` 按 worker 的窗口算预算：
+
+```
+input_budget    = context_window - max_output_tokens - safety_margin
+safety_margin   = clamp(window * safety_ratio, safety_min_tokens, safety_max_tokens)
+snapshot_tokens = max(min_snapshot_tokens, input_budget - overhead_tokens)
 ```
 
-未完成，不提新 intent：
+`overhead_tokens` 是模板本身加上其他 JSON 块（事实 id、开放 Step 等）的开销，先从预算里扣掉。
 
-```json
-{
-  "accepted": true,
-  "data": {}
-}
-```
+快照装不下时按层退化，三条历史通道各自有摘要兜底：
 
-约束：
+| 通道 | 保留原文 | 折叠后 | 摘要上限（level 1-2 / 3） |
+| --- | --- | --- | --- |
+| Facts | 最近 `recent_items` 条 | `older_fact_ids` + `confirmed_facts_summary` | 2400 / 1200 字符 |
+| 已关闭 Step | 最近 `recent_items` 条 | `older_step_ids` + `closed_steps_summary` | 1600 / 400 字符 |
+| Findings | 最近 `recent_items` 条 | `older_finding_ids` + `findings_summary` | 1200 / 300 字符 |
 
-- `data.complete` 存在时，它必须是对象，且 `complete.from` 和 `complete.description` 都必须存在
-- `data.complete` 存在时，不应再带 `intent`
-- 如果 `intent` 存在，则 `intent.from` 和 `intent.description` 都必须存在
-- 如果 `{open_intents}` 为空，说明当前图里没有任何进行中的探索；此时若没有 `data.complete`，则必须返回 `intent`
-- 如果 `{open_intents}` 非空，且没有 `data.complete`，则允许不返回 `intent`
+没有摘要时三条通道都会生成确定性的逐条兜底文本，所以 `older_*_ids` 始终可引用。三层都装不下才硬截断并在 YAML 尾部留标记。
 
-#### 接口映射
-
-`reason` 启动前，Dispatcher 必须先 claim 项目级 reason lease，并在执行期间持续 heartbeat；这一状态会直接出现在 `GET /projects` 和 `GET /projects/{project_id}` 的 `project.reason` 字段中，供前端和其他消费者观察。
-
-| `reason` 输出 | Dispatcher 动作 | 备注 |
-| --- | --- | --- |
-| `data.complete` 存在 | 调用 `POST /projects/{project_id}/complete` | `worker` 使用当前执行该任务的 `workers[].name` |
-| `data.complete` 不存在，且带 `intent` | 调用 `POST /projects/{project_id}/intents` | `creator` 使用当前 Worker 名；`worker` 固定写 `null` |
-| `data` 为空对象 | 不写图 | 不写 Fact / Intent / Complete |
-
-写回失败的日志语义：
-
-- 如果 `POST /projects/{project_id}/complete` 或 `POST /projects/{project_id}/intents` 返回 `403`，通常表示项目已不再是 `active`，本次任务直接作废，记 `info`
-- 其他写入失败也直接作废，不做立即重试，只记日志
-- 无论本轮是否写图，只要项目仍是 `active` 且 reason lease 仍在自己手里，Dispatcher 都会在收尾时调用 `POST /projects/{project_id}/reason/release`；如果项目已 `completed` 或 `stopped`，则由服务端直接清空该 lease
-
-#### 超时与失败
-
-- `reason` 只使用 `timeout`
-- 超时直接作废
-- `accepted: false` 直接作废，记 `warn`
-- 其他执行错误也直接作废，例如：
-  - 命令退出码非 `0`
-  - 输出不是合法 JSON
-  - JSON 缺少必要字段
-- 以上情况都不写 Fact / Intent / Complete，只记日志
-
-### `explore`
-
-#### 触发条件
-
-- 当前项目仍然是 `active`
-- 存在一个当前可认领的、尚无结论的 intent
-
-#### 输入
-
-- `{graph_yaml}`
-- `{intent_id}`
-- `{intent_description}`
-
-#### 输出契约
-
-正常返回：
-
-```json
-{
-  "accepted": true,
-  "data": {
-    "description": "发现 /search 参数存在报错注入"
-  }
-}
-```
-
-即使没有打出漏洞，也应返回一个客观探索结论，而不是空响应。例如：
-
-```json
-{
-  "accepted": true,
-  "data": {
-    "description": "对 /search 参数测试常见 SQL 注入 payload，未发现可利用注入迹象"
-  }
-}
-```
-
-约束：
-
-- `data.description` 必须存在，且必须是客观事实结论
-- 不允许输出“我拒绝帮助渗透”“这不安全”等文本作为 `description`
-
-#### 接口映射
-
-`explore` 会涉及三类协议接口：
-
-| 接口 | 用途 | 何时使用 |
-| --- | --- | --- |
-| `POST /projects/{project_id}/intents/{intent_id}/heartbeat` | claim 并维持持有 | 派发前先 claim；执行中按 `interval` 周期发送 |
-| `POST /projects/{project_id}/intents/{intent_id}/conclude` | 产出 Fact 并结论落定 Intent | `execute` 或 `conclude` 返回合法结论后调用 |
-| `POST /projects/{project_id}/intents/{intent_id}/release` | 放弃当前尝试 | 失败路径使用 |
-
-派发顺序要求固定为：
-
-1. Dispatcher 先选中一个可认领 intent
-2. Dispatcher 先调用一次 `POST /projects/{project_id}/intents/{intent_id}/heartbeat` 作为 claim
-3. 只有 heartbeat 成功后，才真正启动 `explore` 对应的 Worker
-
-#### 超时与失败
-
-`explore` 要兼容两种模式：
-
-1. 单阶段模式：只有 `execute`
-2. 双阶段模式：`execute + session + conclude`
-
-其中 `conclude` 是附加收尾阶段，不是主流程必经阶段。
-
-第一阶段使用 `timeout`。
-如果是双阶段模式，第二阶段使用 `conclude_timeout`。
-
-正常完成：
-
-- 如果 `execute` 在 `timeout` 内正常返回合法 JSON，且 `accepted: true`
-- Dispatcher 直接调用 `POST /projects/{project_id}/intents/{intent_id}/conclude`
-- `POST /projects/{project_id}/intents/{intent_id}/conclude` 成功即完成结论落定，无需额外 `release`
-- 如果 `POST /projects/{project_id}/intents/{intent_id}/conclude` 写入失败，本次任务直接作废，不做立即重试，释放当前 intent，只记日志
-
-可进入二阶段收尾的异常：
-
-- 这类异常只在“双阶段 Worker”上进入 `conclude`
-- 适用异常只有两种：
-  - 执行超时
-  - Dispatcher 无法从第一阶段输出里正确提取并解析结果，例如：
-    - 输出不是合法 JSON
-    - JSON 缺少必要字段
-    - `accepted: true` 但 `data` 结构不符合当前任务要求
-- 这类异常在“单阶段 Worker”上不进入 `conclude`
-
-双阶段收尾流程固定为：
-
-1. Dispatcher 杀掉当前进程
-2. 保留这次任务对应的 session id
-3. 在保持 heartbeat 的前提下，用同一个 session 直接进入 `conclude`
-4. `conclude` 的 prompt 必须明确要求“不要继续探索，只总结截至目前已经完成的探索与结论”
-5. 如果 `conclude` 在 `conclude_timeout` 内返回合法 JSON，且 `accepted: true`：
-   - Dispatcher 调用 `POST /projects/{project_id}/intents/{intent_id}/conclude`
-   - 成功则结束
-6. 如果 `conclude` 再次超时，或输出不合法，或返回 `accepted: false`，或 `POST /projects/{project_id}/intents/{intent_id}/conclude` 写入失败：
-   - 整次探索作废
-   - 不写任何图数据
-   - 释放当前 intent
-   - 只记日志
-
-单阶段 Worker 的异常处理：
-
-- 如果当前 Worker 不支持 `session` 或 `conclude`，则它属于单阶段模式
-- 这时第一阶段一旦出现“超时”或“输出解析 / 结构校验失败”，直接按失败处理
-- 处理方式是：杀进程、整次探索作废、不写任何图数据、释放当前 intent、记 `warn`
-
-直接失败，不进入 `conclude`：
-
-- 第一阶段返回 `accepted: false`
-- 命令退出码非 `0`
-- Worker 进程根本没有产生可读取结果
-- Dispatcher 在进入结果解析前就已经确定本次执行失败
-
-以上情况都：
-
-- 不进入 `conclude`
-- 不写任何图数据
-- 释放当前 intent
-- 清理本地任务状态
-- 只记日志
-
----
+**摘要不阻塞 Decide。** Decide 只把本轮装不下的历史（`SummaryRequest`）交给调度器的摘要线程池（`runtime.max_summaries`，默认 1），本轮继续用上一版摘要；摘要任务完成后写入服务端，下一轮 Decide / Execute / 提问自动用上。服务端按通道做单调合并（覆盖数不小于已存值才替换），因此晚到的旧摘要不会覆盖新摘要。同一项目在途的摘要请求会被去重。
 
 ## 调度策略
 
-### 全局调度
+### 全局
 
-核心规则：
+- 每个 tick 先回收 Future、取消非 active 项目任务、处理容器清理。
+- 先调度"已有运行中任务"的项目，再调度空闲项目，保证长任务的项目仍然推进。
+- 空闲项目通过 `project_cursor` 轮转。
+- 运行中项目数受 `max_running_projects` 限制。
 
-1. 已运行项目优先，但只优先可立即派发的任务
-2. 如果某个运行中项目处于初始态且可执行 `bootstrap`，优先继续它
-3. 否则如果某个运行中项目存在可执行的 `explore`，优先继续探索它
-4. 如果所有运行中项目都暂时没有可派发任务，且 `runtime.max_running_projects` 还有余量，就启动一个未开始的新项目
+### 项目内
 
-`runtime.interval` 的设计约定：
-
-- `runtime.interval` 不只是一个普通轮询间隔
-- 它被刻意复用为两个地方的统一节拍：
-  - Dispatcher 主循环间隔
-  - 带 claim 任务（`bootstrap` / `explore`）的 heartbeat 周期
-- 这样做的目标是减少额外时序参数，先保持实现简单
-- 这是一项明确设计决策，不是偶然耦合
-
-调度伪代码可以保持成下面这种粒度：
-
-```text
-for project in running_projects_round_robin:
-  if has_dispatchable_bootstrap(project):
-    dispatch_bootstrap(project)
-    continue
-  if has_dispatchable_reason(project):
-    dispatch_reason(project)
-    continue
-  if has_dispatchable_explore(project):
-    dispatch_explore(project)
-    continue
-
-if running_project_count < runtime.max_running_projects:
-  maybe_start_one_new_project()
-```
-
-### 项目内调度
-
-对于单个项目，Dispatcher 读完整项目状态后，按下面顺序调度：
-
-1. 如果项目仍处于初始态，先按 `project.bootstrap_enabled` 和 Worker 能力决定路径：未开启或没有支持 `bootstrap` 的 Worker 时直接 `reason`，否则执行 `bootstrap`；若已经存在保留 bootstrap intent，则继续该阶段
-2. 如果满足“新态势”重触发条件，优先派发 `reason`
-3. 否则如果存在未认领 intent，派发 `explore`
-4. `reason` 的去重按“态势”做，而不是按总图变化做：首次只有在当前没有任何 open intent 时才触发；之后只有当前 Fact / Hint 数量增加，或项目从“存在 open intents”进入“没有 open intents”时，才重新触发
-5. 如果 `reason` 返回 `data.complete`，Dispatcher 调用 `POST /projects/{project_id}/complete`
-6. 如果 `reason` 没有返回 `data.complete` 且带 `intent`，Dispatcher 调用 `POST /projects/{project_id}/intents`
-7. 如果 `reason` 既没有返回 `data.complete`，也没有返回 `intent`，则本轮不写图
-
-另外：
-
-- 初始态项目里，如果选择了 `bootstrap` 路径且 bootstrap intent 已被 claim，则这一轮不再派发 `reason` 或普通 `explore`
-- 即使同一项目里已经有进行中的 `explore`，也允许继续派发一个 `reason` 任务
-- 但前提不是“刚新增了 intent”，而是“确实出现了新的 Fact / Hint 等新态势”；仅仅因为上一个 `reason` 刚创建了新的 intent，不应该立刻再次 `reason`
-- 仍然要求当前没有未认领 intent、当前项目内没有其他 `reason` 任务在运行、且没有超过 `runtime.max_project_workers`
-
-`reason` 的去重规则建议保持简单：
-
-- 记录该项目上次成功完成 `reason` 时的 Fact 数量、Hint 数量，以及当时是否仍存在 open intents
-- Dispatcher 对“当前已观察到、且已有 open intents、但尚无 checkpoint 的 active 项目”建立基线 checkpoint；启动时已有项目和运行中晚到项目都适用，不应吞掉运行过程中第一次新增的 Fact / Hint
-- 首次没有历史记录且当前没有 open intents 时，直接触发
-- 之后只有 Fact / Hint 数量增加，或项目从“有 open intents”变为“无 open intents”时，才再次触发 `reason`
-- 不把“总 intent 数量增加”当作重触发条件；因为这通常只是上一次 `reason` 刚创建了新 intent，并不代表出现了新的态势
-- `explore` 的执行失败、掉心跳、临时 release 只会让 intent 重新等待被探索，不会额外触发 `reason`
+1. 若 `max_project_workers` 已满 → 跳过。
+2. 若本地已有 Decide 在跑，或租约占不到 → 跳过 Decide。
+3. Decide 优先于 Execute：图刚变化时先评估，再执行。
+4. Execute 只挑本地没有在跑的 pending Step。
 
 ### 并发约束
 
-- 当前设计下，只支持一个 Dispatcher 实例连接同一服务端执行调度
-- 如果同时运行多个 Dispatcher，本地维护的 admission、Worker 健康状态、并发计数、容器清理和 bootstrap 去重都不会跨进程协调，因此不属于支持场景
-- 单个项目内，同一时刻最多只能有一个 `bootstrap` 任务在运行
-- Dispatcher 会尽力让单个项目在初始态时只保留一个 open `bootstrap` intent
-- 单个项目内，同一时刻最多只能有一个 `reason` 任务在运行
-- 跨项目允许并行运行多个 `reason`
-- `reason` 也计入对应项目的 `runtime.max_project_workers`
-- `runtime.max_workers`：Dispatcher 同时运行中的任务总数上限
-- `runtime.max_running_projects`：当前 dispatcher 运行期内已接手且仍为 `active` 的项目 admission 上限；项目即使暂时没有可派发任务，只要仍为 `active`，也继续占用该名额，直到其退出 active
-- `runtime.max_project_workers`：单个项目内同时运行的任务上限，统一计入 `bootstrap`、`reason` 和 `explore`
-- `workers[].max_running`：单个 Worker 自身的并发上限；达到上限后，这个 Worker 暂时不再参与派发
+| 约束 | 来源 |
+|------|------|
+| 全局并发 | `runtime.max_workers` |
+| 项目并发 | `runtime.max_project_workers` |
+| 项目内 Execute 并发 | `runtime.max_running_steps` |
+| 单 worker 并发 | `workers[].max_running` |
+| 项目内 Decide 串行 | Server 的 decide 租约 |
+| 单 Step 独占 | Server 的 step 租约 |
+| 旁路提问并发 | `runtime.max_questions`（不计入上面的额度） |
 
----
+## Worker
 
-## Worker 配置
+### 字段
 
-### 字段定义
-
-Dispatcher 固定从 `stdout` 取全文作为模型正文输出。
-
-`dispatch.yaml` 中与 Worker 相关的运行期字段如下：
-
-| 字段 | 含义 | 说明 |
-| --- | --- | --- |
-| `name` | Worker 静态标识 | 协议写回时作为 `creator` 或 `worker` |
-| `type` | Worker driver 名 | 支持 `claudecode`、`codex`、`mock` |
-| `task_types` | 支持的任务类型 | `bootstrap`、`reason`、`explore` |
-| `max_running` | Worker 并发上限 | 达到上限后暂不派发 |
-| `priority` | 选择优先级 | 数字越小越优先 |
-| `env` | 运行时环境变量 | 由对应 driver 使用；`mock` 的 phase 耗时和结果概率也通过这里配置 |
-
-系统提供三类 Worker driver：
-
-- `claudecode`
-- `codex`
-- `mock`
-
-也就是说：
-
-- `dispatch.yaml` 负责声明“用哪个 driver、能跑什么任务、并发多少、环境变量是什么”；如果是 `mock`，各 phase 的模拟分布也放在 `env`
-- 具体怎么健康检查、怎么启动命令、怎么提取 session、怎么恢复 `conclude`，都由 driver 代码负责
+| 字段 | 说明 |
+|------|------|
+| `name` | 唯一名称，出现在租约与日志里 |
+| `type` | `pi` / `mock` |
+| `task_types` | 该 worker 可承担的活动 |
+| `max_running` | 该 worker 并发上限 |
+| `priority` | 越小越优先；同优先级看当前负载 |
+| `env` | 驱动所需环境变量，与 `common_env` 合并 |
 
 ### Driver 接口
 
-每个 Agent / CLI 工具在代码里对应一个独立 driver 文件，并实现统一接口。
+```python
+prepare_session() -> str | None
+build_execute(worker, prompt, session) -> DriverResult
+build_conclude(worker, prompt, session) -> list[str]
+extract_session(session, stdout, stderr) -> str | None
+extract_response_text(stdout, stderr) -> str
+extract_usage(stdout, stderr) -> Usage | None
+supports_conclude() -> bool
+local_binary() -> str | None          # 本地模式启动时要检查的宿主机 CLI
+check_health(worker, *, timeout) -> HealthResult
+describe_health(worker) -> str        # 健康检查结果里打印的端点
+```
 
-统一接口至少应覆盖这些能力：
-
-- `check_health(worker, *, timeout)`：进程内发起一次 HTTP 探活，返回 `HealthResult`
-- `prepare_session()`：需要时预先生成 session id
-- `build_execute(worker, prompt, session)`：构造第一阶段执行命令
-- `extract_session(session, stderr)`：需要时从 `stderr` 提取 session id，或继续使用预生成 session
-- `build_conclude(worker, prompt, session)`：在双阶段 `explore` 中恢复同一 session 做收尾
-- `supports_conclude()`：声明该 driver 是否支持双阶段 `explore`
-
-这些 driver 的能力约定是：
-
-- `claudecode` 支持双阶段 `explore`
-- `codex` 支持双阶段 `explore`
-- `mock` 支持双阶段 `explore`
-
-并发建模约定：
-
-- 一个 Worker 应代表一个独立的 LLM 并发配额单元
-- 不考虑“多个 Worker 共用同一个 key”的情况
-- 并发控制使用 `workers[].max_running`
+`build_execute` 返回 argv 与 session；session 用于把 conclude 兜底续接到同一次对话。
 
 ### 健康检查
 
-健康检查由 driver 的 `check_health` 实现，Dispatcher 在自己进程内直接发起（用 `requests`），而不是在容器里执行 curl。
-
-目标不是验证“容器活着”，而是验证某个具体 Worker 的 LLM 配置真的可用：
-
-- base URL 可达
-- API key 有效
-- model 可调用
-
-driver 按各自 provider 的协议构造请求：`claudecode` 打 `{base}/v1/messages`，`codex` 打 `{base}/responses`，`pi` 按 `PI_PROVIDER_API` 选择 `/chat/completions`、`/responses` 或 `/v1/messages`。请求会带上 worker 环境里的 `http(s)_proxy`，从而与 worker 实际出网路径一致。
-
-执行规则：
-
-- 每次准备启动某个 Worker 进程前，都先执行一次健康检查
-- `explore` 进入 timeout / parse-fail 后的 `explore_conclude` fallback 不再重复执行健康检查，而是直接尝试 conclude，并继续依赖 JSON / schema 校验决定是否写回
-- HTTP 2xx 视为健康
-- 非 2xx / 连接失败 / 超时（`requests` 超时由 `runtime.healthcheck_timeout` 控制）视为不健康
-- 如果这次失败，本次任务直接作废，并将这个 Worker 放入一个短暂不可选窗口
-- 窗口结束后，后续轮次再次选择到这个 Worker 时重新检查
-- Dispatcher 内部会为最近失败的 Worker 记录一个本地 `retry_after`，在这之前不再派发给它
-
-Dispatcher 只看 HTTP 状态码，不解析响应体。`local` 模式下不打 API（本机 CLI 自带鉴权），改为启动时对各 CLI 执行 `--help` 探测。
+- `startup_and_task`：启动时检查一次，每个任务前再检查；任务返回 `unhealthy` 时该 worker 冷却 `UNHEALTHY_RETRY_AFTER_SECONDS`（5s）。
+- `startup_only`：只在启动时检查。
+- `disabled`：完全跳过自动检查（默认值是 `startup_only`；`dispatch.local.example.yaml` 显式设为 `disabled`）。
+- 本地模式启动时改为检查每个 worker 的 CLI 是否在 PATH 上（`local_binary()`），一个都没装则启动失败，部分缺失只告警。
 
 ### CLI 接入约定
 
-#### `claudecode` driver
+Agent CLI 只需满足三点：
 
-依赖环境变量：
+1. 能从 argv 接收完整提示词；
+2. 最终把结构化 JSON 打到 stdout（允许夹杂文本 / markdown 代码块）；
+3. 最好以流式 JSON 输出过程事件（`pi --mode json`），否则 Session 里只留得下最终回答。
 
-- `ANTHROPIC_MODEL`
-- `ANTHROPIC_BASE_URL`
-- `ANTHROPIC_AUTH_TOKEN`
+Dispatcher 负责从输出中提取最终回答（`extract_response_text`），并把事件流展开成对话记录（`session.build_messages`）。降级路径始终保留：拿不到结构化事件时，原始 stdout / stderr 会作为一条 `tool` 消息写入 Session。
 
-健康检查等价于下面这条请求（实现为 Dispatcher 进程内的 HTTP 调用，不再在容器里执行 curl）：
+## 提示词资源
 
-```bash
-curl -sS --fail -o /dev/null \
-  "$ANTHROPIC_BASE_URL/v1/messages" \
-  -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" \
-  -H "content-type: application/json" \
-  -d "{\"model\":\"$ANTHROPIC_MODEL\",\"max_tokens\":10,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"
+```
+cairn/src/cairn/dispatcher/prompts/
+  default/decide.md
+  default/execute.md
+  default/execute_conclude.md
+  default/question.md
+  mock/decide.md
+  mock/execute.md
+  mock/execute_conclude.md
+  mock/question.md
+  mock/summary.md
 ```
 
-已知行为：
+- `prompt_group` 选择目录。
+- 加载时校验必需占位符，缺一即启动失败（`default` 组还额外要求 `{constraints}` / `{steers}` / `{scope}` / `{opsec}`）。
+- default 组与安全任务解耦：只描述 Fact / Goal / Step 与输出契约。
+- `default/` 下没有 `summary.md`：背景摘要任务会在读取失败时回退到内置模板；`mock/` 组提供了 `summary.md` 方便端到端验证。
 
-- driver 预先生成 session id
-- 首轮可以预先指定 session id
-- 如果该 id 已存在，命令会报错，不会复用旧会话
-- Dispatcher 固定从 `stdout` 取全文作为结果正文
+## Mock 驱动
 
-第一阶段执行：
+用于无 LLM 的端到端验证。每个阶段通过环境变量配置行为：
 
-```bash
-claude --session-id "{session}" --dangerously-skip-permissions -p -- "{prompt}"
-```
+| 环境变量 | 阶段 | 可选结果 |
+|----------|------|----------|
+| `MOCK_HEALTHCHECK` | 健康检查 | `ok` / `fail` |
+| `MOCK_DECIDE` | Decide | `complete` / `steps` / `noop` / `rejected` / `invalid_json` / `invalid_payload` / `command_fail` |
+| `MOCK_EXECUTE` | Execute | `facts` / `rejected` / `invalid_json` / `invalid_payload` / `command_fail` |
+| `MOCK_EXECUTE_CONCLUDE` | 兜底 | 同上 |
+| `MOCK_QUESTION` | 旁路提问 | `answer` / `invalid_json` / `command_fail` |
+| `MOCK_SUMMARY` | 背景摘要 | `answer` / `invalid_json` / `command_fail` |
 
-二阶段收尾：
+支持按提示词内容设置规则，例如：
 
-```bash
-claude -r "{session}" --dangerously-skip-permissions -p -- "{prompt}"
-```
-
-#### `codex` driver
-
-依赖环境变量：
-
-- `CODEX_MODEL`
-- `CODEX_BASE_URL`
-- `OPENAI_API_KEY`
-
-健康检查等价于下面这条请求（实现为 Dispatcher 进程内的 HTTP 调用，不再在容器里执行 curl）：
-
-```bash
-curl -sS --fail -o /dev/null \
-  "$CODEX_BASE_URL/v1/chat/completions" \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -H "content-type: application/json" \
-  -d "{\"model\":\"$CODEX_MODEL\",\"max_tokens\":10,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"
-```
-
-已知行为：
-
-- 首轮 session id 会打印在 `stderr`
-- 可以用正则 `session id:\s*([0-9a-fA-F-]+)` 提取
-- Dispatcher 固定从 `stdout` 取全文作为结果正文
-
-第一阶段执行：
-
-```bash
-codex exec --dangerously-bypass-approvals-and-sandbox --model "{env.CODEX_MODEL}" \
-  -c 'model_provider="cairn"' \
-  -c 'model_providers.cairn.name="cairn"' \
-  -c 'model_providers.cairn.wire_api="responses"' \
-  -c 'model_reasoning_effort="high"' \
-  -c 'model_providers.cairn.base_url="{env.CODEX_BASE_URL}"' \
-  -c 'model_providers.cairn.env_key="OPENAI_API_KEY"' \
-  -- "{prompt}"
-```
-
-二阶段收尾：
-
-```bash
-codex exec resume "{session}" --dangerously-bypass-approvals-and-sandbox --model "{env.CODEX_MODEL}" \
-  -c 'model_provider="cairn"' \
-  -c 'model_providers.cairn.name="cairn"' \
-  -c 'model_providers.cairn.wire_api="responses"' \
-  -c 'model_reasoning_effort="high"' \
-  -c 'model_providers.cairn.base_url="{env.CODEX_BASE_URL}"' \
-  -c 'model_providers.cairn.env_key="OPENAI_API_KEY"' \
-  -- "{prompt}"
-```
-
-#### `mock` driver
-
-`mock` driver 用于本地观察 dispatcher 的成功、失败和超时路径。
-
-行为约定：
-
-- `runtime.prompt_group: "mock"` 时，prompt 本身是结构化 JSON，不再依赖自然语言说明
-- `reason` prompt 最少包含 `phase`、`fact_ids`、`open_intents`
-- `explore` / `conclude` prompt 最少包含 `phase`、`intent_id`
-- `bootstrap` / `bootstrap_conclude` prompt 最少包含 `phase`、`origin`、`goal`、`hints`
-- driver 会先解析 prompt 里的 `phase` 字段，再读取对应的 `MOCK_<PHASE>` JSON 环境变量选择当前 phase 的模拟结果
-- 每个 phase 都在自己的 JSON 里配置 `delay: [min, max]`；单位是秒，支持小数；随机耗时超过 Dispatcher 外层 timeout 时，就会自然表现为超时
-- `reason.noop` 只会在 `open_intents` 非空时参与抽样；mock 会自动避开当前上下文下不合法的结果
-
-`mock` 支持六个 phase：
-
-- `healthcheck`
-- `bootstrap`
-- `bootstrap_conclude`
-- `reason`
-- `explore_execute`
-- `explore_conclude`
-
-支持的结果如下：
-
-- `healthcheck.outcomes`: `ok`、`fail`
-- `bootstrap.outcomes`: `fact`、`rejected`、`invalid_json`、`invalid_payload`、`command_fail`
-- `bootstrap_conclude.outcomes`: `fact`、`rejected`、`invalid_json`、`invalid_payload`、`command_fail`
-- `reason.outcomes`: `complete`、`intent`、`noop`、`rejected`、`invalid_json`、`invalid_payload`、`command_fail`
-- `explore_execute.outcomes`: `fact`、`rejected`、`invalid_json`、`invalid_payload`、`command_fail`
-- `explore_conclude.outcomes`: `fact`、`rejected`、`invalid_json`、`invalid_payload`、`command_fail`
-
-命名约定：
-
-- 每个 phase 一个变量：`MOCK_<PHASE>`，例如 `MOCK_REASON`
-- 变量值必须是 JSON 对象，结构为：`{"delay":[min,max],"outcomes":{...}}`
-- `delay` 必须是两个非负数字，单位是秒
-- 每个 phase 的所有结果概率都使用 `0` 到 `1` 的小数，并且总和必须严格等于 `1.0`
-
-### 配置校验规则
-
-#### 加载时校验
-
-启动 Dispatcher 时，应完成静态校验：
-
-- `dispatch.yaml` 必须存在且可读取
-- `runtime.max_workers` 必须存在
-- `runtime.max_running_projects` 必须存在
-- `runtime.max_project_workers` 必须存在
-- `runtime.interval` 必须存在
-- `runtime.healthcheck_timeout` 必须存在
-- `runtime.worker_healthcheck` 如果存在，只允许 `startup_and_task`、`startup_only`、`disabled`
-- `runtime.prompt_group` 必须存在
-- `tasks.bootstrap.timeout` 必须存在
-- `tasks.bootstrap.conclude_timeout` 必须存在
-- `tasks.reason.timeout` 必须存在
-- `tasks.explore.timeout` 必须存在
-- `tasks.explore.conclude_timeout` 必须存在
-- 每个 Worker 都必须有 `type`
-- 每个 Worker 都必须有 `max_running`
-- `task_types` 只允许 `bootstrap`、`reason`、`explore`
-- `type` 只允许 `claudecode`、`codex`、`mock`
-- `max_running` 必须是正整数
-- `claudecode`、`codex`、`mock` 都支持双阶段 `explore`
-- `runtime.prompt_group` 对应的 prompt 目录必须存在
-- 代码工程中的 prompt 资源必须存在
-- 默认 prompt 组下，`reason.md` 必须至少覆盖 `{graph_yaml}`、`{fact_ids}`、`{open_intents}`
-- 默认 prompt 组下，`explore.md` 必须至少覆盖 `{graph_yaml}`、`{intent_id}`、`{intent_description}`
-- 默认 prompt 组下，`bootstrap.md` 和 `bootstrap_conclude.md` 必须至少覆盖 `{origin}`、`{goal}`、`{hints}`
-- `mock` prompt 组下，`reason.md` 必须至少覆盖 `{fact_ids}`、`{open_intents}`
-- `mock` prompt 组下，`explore.md` 和 `explore_conclude.md` 必须至少覆盖 `{intent_id}`
-- `mock` prompt 组下，`bootstrap.md` 和 `bootstrap_conclude.md` 必须至少覆盖 `{origin}`、`{goal}`、`{hints}`
-- `mock` worker 的 `MOCK_*` 变量名只能使用系统支持的 phase
-- `mock` worker 每个 phase 的概率都必须在 `0` 到 `1` 之间，且总和必须严格等于 `1.0`
-
-#### 运行时校验
-
-任务真正派发时，还需要做运行时校验：
-
-- driver 必须存在且支持该任务类型
-- 当 `runtime.worker_healthcheck=startup_and_task` 时，真正启动任务前，driver 的健康检查必须能成功执行；退出码 `0` 才算健康
-- `explore` 进入 timeout / parse-fail 后的 `explore_conclude` fallback，不再重复执行健康检查，而是直接尝试 conclude 并继续走结果校验
-- 只有支持当前任务类型的 Worker 才能被选中
-- 只有当前运行中任务数小于 `max_running` 的 Worker 才能被选中
-- 处于本地 `retry_after` 窗口内的不健康 Worker 不参与派发
-- `bootstrap` 和 `explore` 都必须先完成 claim，成功后才真正启动任务线程
-- 如果要走双阶段 `explore`，则第一阶段必须成功拿到 session id，才能进入 `conclude`
-- 如果要走双阶段 `bootstrap`，则第一阶段必须成功拿到 session id，才能进入 `bootstrap_conclude`
-- Dispatcher 必须对 `stdout` 全文做 JSON 解析和任务级结构校验
-- `accepted: false`、JSON 非法、字段缺失、接口写回失败等情况都必须记日志，且不做立即重试
-
----
-
-## 配置字段速查
-
-### `dispatch.yaml`
-
-| 字段 | 必填 | 含义 |
-| --- | --- | --- |
-| `server` | 是 | Cairn Server 的 base URL |
-
-### `runtime.*`
-
-| 字段 | 必填 | 含义 |
-| --- | --- | --- |
-| `runtime.max_workers` | 是 | Dispatcher 同时运行中的任务总数上限 |
-| `runtime.max_running_projects` | 是 | 当前 dispatcher 运行期内已接手且仍为 `active` 的项目上限，不受历史遗留容器影响 |
-| `runtime.max_project_workers` | 是 | 单个项目内同时运行的任务上限，统一计入 `bootstrap`、`reason` 和 `explore` |
-| `runtime.interval` | 是 | 统一节拍配置；既是 Dispatcher 主循环间隔，也是带 claim 任务的 heartbeat 周期 |
-| `runtime.healthcheck_timeout` | 是 | Worker 健康检查的统一外层 watchdog 超时 |
-| `runtime.worker_healthcheck` | 否 | Worker 健康检查模式：`startup_and_task`、`startup_only` 或 `disabled`；默认 `startup_only` |
-| `runtime.execution` | 否 | 执行后端：`container`（默认）或 `local`；`local` 时 worker 在 dispatcher 宿主机上以子进程运行，复用本机 CLI，启动时校验各 CLI 是否已安装可用 |
-| `runtime.prompt_group` | 是 | 当前使用的 prompt 组目录名 |
-
-### `container.*`
-
-仅 `runtime.execution: container`（默认）时必填。
-
-| 字段 | 必填 | 含义 |
-| --- | --- | --- |
-| `container.image` | 是 | 项目容器镜像 |
-| `container.network_mode` | 是 | 项目容器网络模式 |
-| `container.completed_action` | 是 | 项目 completed 后对容器的处理方式 |
-
-`container.completed_action` 可选值：
-
-- `remove`：项目 completed 后删除容器
-- `stop`：项目 completed 后只停止容器，保留现场
-
-实现约定：
-
-- completed project 的容器 cleanup 可以异步并行进行，不要求阻塞主调度循环
-- 如果项目已从 Server 删除，Dispatcher 会把找不到对应项目的 `cairn-dispatch-*` 容器视为 orphan，并执行 stop 清理
-
-### `local.*`
-
-仅 `runtime.execution: local` 时生效，`container` 模式下忽略。此时无需 `container.*`，worker 也不需要任何 LLM 环境变量；启动时 Dispatcher 会对每个已配置 worker 的 CLI 执行 `--help` 探测，全部缺失则报错退出。
-
-| 字段 | 必填 | 含义 |
-| --- | --- | --- |
-| `local.workspace_root` | 否 | 每项目工作目录的根；不填则取 dispatcher 启动时的当前目录，每项目分到隔离子目录 `<root>/<project_id>/` 作为 worker 进程的工作目录 |
-| `local.completed_action` | 否 | 项目 completed 后对工作目录的处理：`keep`（默认，保留现场）或 `remove` |
-
-### `tasks.*`
-
-| 字段 | 必填 | 含义 |
-| --- | --- | --- |
-| `tasks.bootstrap.timeout` | 是 | `bootstrap` 第一阶段超时 |
-| `tasks.bootstrap.conclude_timeout` | 是 | `bootstrap` 双阶段收尾超时 |
-| `tasks.reason.timeout` | 是 | `reason` 的超时 |
-| `tasks.explore.timeout` | 是 | `explore` 第一阶段超时 |
-| `tasks.explore.conclude_timeout` | 是 | `explore` 双阶段收尾超时 |
-
-### `workers.*`
-
-| 字段 | 必填 | 含义 |
-| --- | --- | --- |
-| `name` | 是 | Worker 静态标识；协议写回时使用这个值作为 `creator` 或 `worker` |
-| `type` | 是 | Worker driver 名；支持 `claudecode`、`codex`、`mock` |
-| `task_types` | 是 | 该 Worker 支持的任务类型列表 |
-| `max_running` | 是 | 该 Worker 自身的并发上限 |
-| `priority` | 是 | 当前任务类型的候选 Worker 中，数字越小优先级越高 |
-| `env` | 是 | 该 Worker 的变量表；具体必需 key 由对应 driver 决定并在启动时校验 |
-
-补充：
-
-- Worker 选择顺序是：先过滤任务类型、`max_running` 和处于本地 `retry_after` 窗口内的 Worker，再按 `priority`，同优先级优先选当前运行数更少的，最后随机；`bootstrap` 和 `explore` 都会先 claim，再启动任务；当 `runtime.worker_healthcheck=startup_and_task` 时，真正启动前会做一次健康检查，失败的 Worker 会进入短暂不可选窗口；进入 `bootstrap_conclude` / `explore_conclude` fallback 时不再重复健康检查
-- 健康检查、执行命令、session 提取、二阶段 `conclude` 都由对应 driver 代码负责
-- prompt 内容从代码工程里的 markdown 资源加载
-
----
-
-## 附录：示例配置与 Prompt 内容
-
-### `dispatch.example.yaml`
-
-```yaml
-server: "http://127.0.0.1:8000"
-
-runtime:
-  max_workers: 5  # total running tasks
-  max_running_projects: 3  # total active projects admitted by this dispatcher runtime
-  max_project_workers: 2  # per-project running tasks, including bootstrap + reason + explore
-  interval: 3  # intentional shared cadence: scheduler loop interval + claim-task heartbeat interval, in seconds
-  healthcheck_timeout: 15  # shared watchdog for all worker healthchecks, in seconds
-  worker_healthcheck: "startup_only"  # startup_and_task | startup_only | disabled
-  prompt_group: "default"  # selects prompts/<group>/
-
-tasks:
-  bootstrap:
-    timeout: 120
-    conclude_timeout: 30
-  reason:
-    timeout: 45
-  explore:
-    timeout: 600
-    conclude_timeout: 120
-
-container:
-  image: "tmp:latest"
-  network_mode: "host"
-  completed_action: "stop"  # options: "remove" | "stop"
-
-common_env:
-  TSEC_BASE_URL: "http://<SERVER_HOST>/api"
-  TSEC_AGENT_TOKEN: "..."
-
-workers:
-  # 同一模型拆成多个 Worker 的原因，应是它们使用不同的 API key，
-  # 从而拥有彼此独立的并发配额。
-  - name: "claude-sonnet-thinker"
-    type: "claudecode"
-    task_types: [bootstrap, reason]
-    max_running: 1
-    priority: 0  # lower number wins; ties prefer fewer running tasks, then choose randomly
-    env:
-      ANTHROPIC_MODEL: "claude-sonnet-4-6"
-      ANTHROPIC_BASE_URL: "https://api.example.com"
-      ANTHROPIC_AUTH_TOKEN: "sk-ant-worker-a"
-
-  - name: "claude-sonnet-doer"
-    type: "claudecode"
-    task_types: [bootstrap, explore]
-    max_running: 1
-    priority: 1
-    env:
-      ANTHROPIC_MODEL: "claude-sonnet-4-6"
-      ANTHROPIC_BASE_URL: "https://api.example.com"
-      ANTHROPIC_AUTH_TOKEN: "sk-ant-worker-b"
-
-  - name: "codex-gpt54"
-    type: "codex"
-    task_types: [bootstrap, reason, explore]
-    max_running: 1
-    priority: 3
-    env:
-      CODEX_MODEL: "gpt-5.4"
-      CODEX_BASE_URL: "https://api.example.com/v1"
-      OPENAI_API_KEY: "sk-worker-c"
-
-  - name: "codex-gpt54-alt"
-    type: "codex"
-    task_types: [bootstrap, explore]
-    max_running: 1
-    priority: 4
-    env:
-      CODEX_MODEL: "gpt-5.4"
-      CODEX_BASE_URL: "https://api.example.com/v1"
-      OPENAI_API_KEY: "sk-worker-d"
-
-  - name: "mock-observer"
-    type: "mock"
-    task_types: [bootstrap, reason, explore]
-    max_running: 1
-    priority: 9
-    env:
-      MOCK_HEALTHCHECK: '{"delay":[0.05,0.15],"outcomes":{"ok":0.9,"fail":0.1}}'
-      MOCK_BOOTSTRAP: '{"delay":[0.1,12.0],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
-      MOCK_BOOTSTRAP_CONCLUDE: '{"delay":[0.1,2.2],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
-      MOCK_REASON: '{"delay":[0.1,2.2],"outcomes":{"complete":0.1,"intent":0.3,"noop":0.1,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.2}}'
-      MOCK_EXPLORE_EXECUTE: '{"delay":[0.1,12.0],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
-      MOCK_EXPLORE_CONCLUDE: '{"delay":[0.1,2.2],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
-```
-
-补充：
-
-- 这里只是用示例值表达配置结构
-- `common_env` 会先并到每个 worker 的环境变量里，然后再被 `worker.env` 覆盖；即 `common_env < worker.env`
-- Worker 按独立的 key / model 并发配额单元建模，不应让多个 Worker 共享同一个 key
-
-下面 5 份 markdown 内容对应代码工程里的 prompt 文件。
-
-### `bootstrap.md`
-
-````md
-# 背景
-当前场景是授权的 AI 渗透测试比赛 / 靶场环境。
-## 任务
-你需要直接解决这个问题，目标是完成 Goal。
-## 输出要求
-只返回一个原始 JSON 对象，不要输出其他内容。
 ```json
-{"accepted": true, "data": {"fact": {"description": "..."}, "complete": {"description": "..."}}}
+{"delay": [0, 0], "outcomes": {"steps": 1},
+ "rules": [{"fact_ids_gte": 2, "force": "complete"}]}
 ```
-## 上下文
-### Origin
-{origin}
-### Goal
-{goal}
-### Hints JSON 数组
-{hints}
-````
 
-### `reason.md`
+可用条件：`fact_ids_gte` / `fact_ids_lte` / `open_steps_empty`（未知条件键会被静默忽略）。
 
-````md
-# 背景
-当前场景是授权的 AI 渗透测试比赛 / 靶场环境。
-## 任务
-你当前只做 `reason`。
-你要同时判断两件事：
-1. 现有 facts 是否已经满足 goal。
-2. 如果还未满足，当前是否需要提出一个新的 intent。
-## 输出要求
-只返回一个原始 JSON 对象，不要输出其他内容。
-拒绝任务时返回：
-```json
-{"accepted": false, "reason": "..."}
-```
-已满足 goal 时返回：
-```json
-{"accepted": true, "data": {"complete": {"from": ["f001"], "description": "..."}}}
-```
-未满足 goal，但需要提出新 intent 时返回：
-```json
-{"accepted": true, "data": {"intent": {"from": ["f001"], "description": "..."}}}
-```
-未满足 goal，且当前不需要提出新 intent 时返回：
-```json
-{"accepted": true, "data": {}}
-```
-## 规则
-- 如果下面的 `open_intents` 为空，说明当前图里没有任何进行中的探索；此时若不返回 `data.complete`，则必须返回 `intent`。
-- `intent.from` 只能从下面的合法 fact id 中选择。
-## 上下文
-### 图快照
-{graph_yaml}
-### 当前合法的 fact id JSON 数组
-{fact_ids}
-### 当前所有未结论的 intent JSON 数组
-{open_intents}
-````
+## 本地模式
 
-### `explore.md`
+`runtime.execution: local` 时不创建容器，直接在宿主机启动 CLI 进程：
 
-````md
-# 背景
-当前场景是授权的 AI 渗透测试比赛 / 靶场环境。
-## 任务
-你当前只做 `explore`。
-你只处理当前这一条 intent，执行探索并给出最终事实结论。
-## 输出要求
-只返回一个原始 JSON 对象，不要输出其他内容。
-拒绝任务时返回：
-```json
-{"accepted": false, "reason": "policy_refusal"}
-```
-正常返回示例：
-```json
-{"accepted": true, "data": {"description": "..."}}
-```
-## 规则
-- `description` 必须是客观探索结论，不要输出解释性废话。
-## 上下文
-### 图快照
-{graph_yaml}
-### 当前 intent id
-{intent_id}
-### 当前 intent 描述
-{intent_description}
-````
+- 每个项目一个工作目录 `<workspace_root>/<project_id>/`；
+- 图快照写到宿主机临时目录；
+- 复用宿主机已登录的 `pi`；
+- 没有沙箱，只应在有授权的环境使用。
 
-### `explore_conclude.md`
+## 已知限制
 
-````md
-# 背景
-当前场景是授权的 AI 渗透测试比赛 / 靶场环境。
-## 任务
-你当前正在对同一个 `explore` 做收尾总结。
-- 不要继续探索。
-- 只总结截至目前已经完成的探索和结论。
-## 输出要求
-只返回一个原始 JSON 对象，不要输出其他内容。
-拒绝任务时返回：
-```json
-{"accepted": false, "reason": "policy_refusal"}
-```
-正常返回示例：
-```json
-{"accepted": true, "data": {"description": "..."}}
-```
-## 规则
-- `description` 必须是客观探索结论，不要输出解释性废话。
-## 上下文
-### 图快照
-{graph_yaml}
-### 当前 intent id
-{intent_id}
-### 当前 intent 描述
-{intent_description}
-````
-
-### `bootstrap_conclude.md`
-
-````md
-# 背景
-当前场景是授权的 AI 渗透测试比赛 / 靶场环境。
-## 任务
-- 不要继续推进。
-- 不要等待未完成的任务。
-- 只总结截至目前已经确认、且对达到 goal 最有帮助的关键事实。
-## 输出要求
-只返回一个原始 JSON 对象，不要输出其他内容。
-```json
-{"accepted": true, "data": {"fact": {"description": "..."}}}
-```
-## 上下文
-### Origin
-{origin}
-### Goal
-{goal}
-### Hints JSON 数组
-{hints}
-````
+- **硬截断仍可能截断结构**：预算极端时 `_hard_cut` 会在字符边界截断，YAML 可能不完整（尾部有截断标记，`context.note` 也会说明历史被压缩）。真实的错误信息在 `older_*_ids` 与摘要里，需要细节时应重新导出图。
+- **SSE 仍是轮询式**：`sessions/stream` 与 `questions/stream` 已改成 `async def` + `asyncio.sleep`，不再占用线程池，但每个连接仍按秒查询 SQLite；连接数极高时可以改成事件推送（写库时通知）。

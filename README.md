@@ -1,224 +1,72 @@
-<div align="center">
+## Cairn-E
 
-<img src="./README/banner.png" alt="Cairn Banner"/>
+基于 **[Cairn](https://github.com/astral-sh/cairn)** 二开的版本
 
-# Cairn
-### More Than Just AI Penetration Testing — Towards General State-Space Search
+使用多个AI调整实现，姑且能用，生产一些电子垃圾
 
-<p>
-  <a href="https://zc.tencent.com/hackathon" target="_blank" rel="noopener noreferrer">
-    <img src="./README/tencent.png" alt="Tencent" height="55" />
-  </a>
-  <a href="https://zc.tencent.com/hackathon" target="_blank" rel="noopener noreferrer">
-    <img src="./README/tch.png" alt="TCH" height="55" />
-  </a>
-  <a href="https://wiki.chainreactors.red" target="_blank" rel="noopener noreferrer">
-    <img src="./README/c.png" alt="ChainReactors" height="45" />
-  </a>
-</p>
+基于原作者 **[l3yx](https://l3yx.github.io/)** 对于 `Cairn_Y`的设计思路让模型进行实现，同时吸取 **`Autumn-27/ARTEX`(已删库)** 的设计进行优化
 
-Cairn is a general-purpose problem-solving engine. <br/>It defines no roles, no workflows. Given an origin and a goal, it searches for a path through an unknown state space. <br/>AI Penetration Testing is one such problem — and a proven one.
+仅测试在`docker`下的部署
 
-<p>
-  <a href="https://discord.gg/nDSy4NZVP" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/Discord-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord" />
-  </a>
-  <a href="https://x.com/le1xia0" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/X-000000?style=flat-square&logo=x&logoColor=white" alt="X" />
-  </a>
-</p>
-
-</div>
-
-<p align="center">
-  <a href="https://www.bilibili.com/video/BV1a8R5BhEVi/" target="_blank" rel="noopener noreferrer">
-    <img src="./README/cairn.png" alt="Cairn runtime screenshot" width="900" />
-  </a>
-</p>
-
-## What is Cairn?
-
-Penetration testing is fundamentally a **directed search through a near-infinite state space**:
-
-- **Origin**: known (target IP, target system)
-- **Goal**: defined (get a shell, capture the flag)
-- **Path**: unknown
-
-This structure is not unique to penetration testing. Vulnerability research, mathematical proof, CTF challenges — any problem with a clear starting point, a clear success condition, and an unknown path in between shares the same shape.
-
-Cairn is built for this class of problems. Penetration testing is the first domain it has been validated on.
-
-The engine is built on a **Blackboard Architecture** with an explicit fact-intent graph. Three primitives are all it needs:
-
-| Concept | Meaning |
-|---------|---------|
-| **Fact** | A confirmed, objective finding written to the board |
-| **Intent** | A declared direction of exploration, not yet executed |
-| **Hint** | Human judgment injected at any time; absorbed by agents on the next read |
-
-The graph grows from `origin` toward `goal`. Every new Fact is a stepping stone; every Intent is a step into the unknown.
-
-Agent Workers run an OODA loop — Observe the full graph, Orient to the current state, Decide on next intents, Act to explore — and write their findings back as new Facts. Workers have no fixed roles. Tasks are generated at runtime from the graph's current state, not from predefined job descriptions.
-
-Agents coordinate exclusively through the shared board (Stigmergy). No direct communication. No information silos.
-
-## Cairn in Action
-
-https://github.com/user-attachments/assets/e557b1ac-dda4-41cb-87dd-9d56dbf05133
-
-
-## How It Works
-
-Three task types, all executed by the same Worker:
-
-| Task | What it does | Output |
-|------|-------------|--------|
-| **Bootstrap** | At project start, attempts to solve the problem directly | Fact + possible Complete |
-| **Reason** | Reads the full graph: is the goal met? What should be explored next? | Complete / new Intents / no-op |
-| **Explore** | Claims one Intent, executes the exploration, reports findings | One Fact |
-
-System architecture:
-
-```
-          ┌──────────────────────────────────┐
-          │           Cairn Server           │
-          │    Facts + Intents + Hints       │
-          └─────────────────┬────────────────┘
-                            │
-                     Read / Write API
-                            │
-          ┌─────────────────┴────────────────┐
-          │             Dispatcher           │
-          │   Schedules tasks, manages       │
-          │   containers, writes protocol    │
-          └──────────┬───────────────┬───────┘
-                     │               │
-     ┌───────────────┴──┐     ┌──────┴──────────────┐
-     │  Worker Container│     │  Worker Container   │
-     │   (Project A)    │     │   (Project B)       │
-     │  ┌────┐  ┌────┐  │     │  ┌────┐  ┌────┐     │
-     │  │ W. │  │ W. │  │     │  │ W. │  │ W. │     │
-     │  └────┘  └────┘  │     │  └────┘  └────┘     │
-     └──────────────────┘     └─────────────────────┘
-```
-
-**Cairn Server** maintains graph consistency only.
-
-**Cairn Dispatcher** reads the graph, schedules tasks, spins up and tears down worker containers, and is the sole writer to the protocol. Each project gets its own Worker Container; multiple Agent Workers run concurrently inside it. Agent Workers only receive a prompt and return structured output.
-
-Workers can also run directly on the dispatcher host instead of in per-project containers — **local mode**, no Docker required. See [Local mode](#local-mode-no-docker) below.
-
-Supported worker backends: **Claude Code**, **Codex**, and **Pi**.
-
-## Results
-
-**Tencent Cloud Hackathon · AI Penetration Testing Challenge · 2nd Edition**
-
-610 teams · 1,345 participants · top universities and security firms across China
-
-| Metric | Value |
-|--------|-------|
-| Problems solved | **54 / 54 — only team to AK** |
-| Final ranking | 3rd |
-
-> The system had never been tested before the competition. The full pipeline came online for the first time at 4 AM on race day. No training, no tuning, no domain-specific tooling. Zero MCP tools, zero RAG, zero predefined agent roles.
-
-## Further Reading
-
-- <a href="https://mp.weixin.qq.com/s/DlpEH7bVr0xi0VawPJs3XA" target="_blank" rel="noopener noreferrer">The Strongest AI Penetration Testing Agent: Postmortem of the Only Team to Achieve AK at the TCH Tencent Cloud Hackathon Intelligent Penetration Testing Challenge (2nd Edition)</a>
-- <a href="https://mp.weixin.qq.com/s/2rEqFLvkxvYWM3gW170C2w" target="_blank" rel="noopener noreferrer">The Pathless Path: Cairn AI from Penetration Testing to General Problem Solving</a>
-
-## Getting Started
-
-**Prerequisites**
- 
-- macOS or Linux
-- Python ≥ 3.12
-- Docker (container execution only — not needed for local mode)
-
-
-### Pull required images
- 
-Both setup methods require the worker container image:
- 
-```bash
-docker pull --platform=linux/amd64 ghcr.io/oritera/cairn-worker-container:latest
-```
-
-Create your local dispatcher configuration and fill in your LLM endpoints and API keys:
+### Docker Compose (已验证)
 
 ```bash
-cp dispatch.example.yaml dispatch.yaml
-```
- 
-### Docker Compose (recommended)
- 
-Pull the base image used to build Cairn:
- 
-```bash
-docker pull ghcr.io/astral-sh/uv:python3.13-trixie
-```
- 
-```bash
+make all
 docker compose up --build
 ```
- 
-This starts `cairn-server` on port `8000` and `cairn-dispatcher` once the server passes its health check. The dispatcher mounts `dispatch.yaml` from the project root and connects to Docker via the host socket. Data is persisted to `./datas/cairn/`.
- 
-### Manual
- 
-```bash
-# Start the server
-uv run --project cairn cairn serve
- 
-# Run the dispatcher
-uv run --project cairn cairn dispatch --config dispatch.yaml
- 
-# Run startup health checks only
-uv run --project cairn cairn dispatch --config dispatch.yaml --startup-healthcheck-only
-```
 
-### Local mode (no Docker)
+只重建系统镜像时 `make app` 即可；只重建 worker 时 `make worker` 即可。
 
-Instead of one container per project, workers can run directly on the dispatcher host, reusing the machine's already-configured `claude` / `codex` / `pi` CLIs — no Docker, and no API keys in the config.
+### 命令审核（可选）
 
 ```bash
-cp dispatch.local.example.yaml dispatch.yaml
+CAIRN_REVIEWER_ENABLED=1
+CAIRN_REVIEWER_MODEL=<model_id>
+CAIRN_REVIEWER_BASE_URL=https://<endpoint>/v1
+CAIRN_REVIEWER_API_KEY=<key>
+# 失败策略：ask 转人工（默认)
+CAIRN_REVIEWER_FAIL_ACTION=ask
 
-# Start the server
-uv run --project cairn cairn serve
-
-# Run the dispatcher on the same host, where the CLIs are installed and logged in
-uv run --project cairn cairn dispatch --config dispatch.yaml
+# 通道隔离（可选；留空则不强制）。建议用随机串：
+CAIRN_WORKER_TOKEN=<random>
 ```
 
-Local mode is selected by `runtime.execution: local` (see `dispatch.local.example.yaml`). On startup the dispatcher checks each configured worker CLI is installed and runnable, and reminds you they must already be logged in. Each project gets an isolated working directory under `local.workspace_root` (default: the dispatcher's current directory). Run the dispatcher directly on the host — not inside Docker — since the agents run with your user's permissions and no sandbox.
+浏览器侧认证在服务端完成，写在 `dispatch.yaml`：
 
-### Tests
+```yaml
+web:
+  auth:
+    realm: Cairn
+    users:
+      - name: admin
+        password: "<password>"
+```
 
-Run the fast regression suite without Docker or live model endpoints:
+配置后所有页面、API 与 SSE 都要求 Basic Auth；`/healthz` 与 worker 的 `/internal/*` 除外（后者
+仍由 `CAIRN_WORKER_TOKEN` 保护）。未配置 `web.auth` 时服务端拒绝绑定非回环地址，除非显式加
+`--allow-insecure`。
+
+判定分级、D/A 条款与已知绕过路径见 `docs/specs/dispatcher-design.md` 的「命令审核」一节。
+
+### 本地质量门
+
+不依赖 CI，一条命令跑完 lint、格式、类型、Python 测试与前端测试：
 
 ```bash
-uv run --project cairn --group dev pytest
+make check
 ```
 
-## Disclaimer
+它会依次执行（需已安装 `ruff` / `mypy` / `pytest`，并执行过 `npm install`）：
 
-Cairn is a general-purpose problem-solving engine. Although it supports penetration testing, CTF solving, security assessment, and vulnerability research workflows, it is intended to be used only in environments where you have explicit authorization to operate.
+1. `cd cairn && python -m ruff check src tests`
+2. `cd cairn && python -m ruff format --check src tests`
+3. `cd cairn && python -m mypy src`
+4. `cd cairn && python -m pytest -q`
+5. `npm run test` 与 `npm run format:check`（vitest / prettier）
 
-You are solely responsible for how you use this project. Do not use Cairn against systems, networks, applications, or data without clear prior permission from the owner or operator. Unauthorized security testing, exploitation, or data access may be illegal and may cause harm.
+只跑 Python 测试时，注意 pytest 需要从 `cairn/` 目录执行（`pythonpath = ["src"]`）：
 
-The developers and contributors of this project do not endorse or accept responsibility for any misuse, abuse, damage, loss, or legal consequences arising from its use. By using this project, you agree to ensure that your activities comply with all applicable laws, regulations, contractual obligations, and professional or organizational policies in your jurisdiction.
-
-## Star History
-
-<a href="https://www.star-history.com/#oritera/Cairn&Date" target="_blank" rel="noopener noreferrer">
-  <img src="https://api.star-history.com/svg?repos=oritera/Cairn&type=Date" alt="Star History Chart" />
-</a>
-
-## ⚖️ License
-This project is licensed under **GNU AGPLv3** for personal and educational use.
-
-**Commercial Use**: If you wish to use this project in a commercial or proprietary environment without the AGPL-3.0 open-source obligations, **please contact me to obtain a commercial license.**
-
-**Contributions**: By submitting a Pull Request, you agree that your contributions may be used under both the AGPL-3.0 and the project's commercial license.
+```bash
+cd cairn && python -m pytest
+cd cairn && python -m pytest --cov=src/cairn --cov-report=term-missing   # 覆盖率
+```

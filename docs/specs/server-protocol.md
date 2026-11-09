@@ -1,864 +1,708 @@
 # Cairn 协作探索协议
 
----
-
 ## 本质
 
-衍迹（Cairn）将目标导向的探索过程建模为一张有向无环图：从已知事实出发，不断探索产出新事实，直到某些事实共同满足终点。名称取自登山者用石头垒起的路标——每个 Fact 是一块石头，Agent 沿着前人的 cairn 继续探索，同时垒新的 cairn 给后来者。
+这是一个面向目标的状态空间搜索的显式协作协议。
 
-这套 API 管理这张图的生长过程。多个消费者（人或 Agent）并发读取完整图，各自声明探索意图，各自产出新事实，最终由某个消费者判断终点已达成。对于一些很简单的问题，消费者也可以在项目最初阶段直接围绕起点和终点做一次快速推进，而不必先拆成多轮显式规划；这种“起步即做”的过程仍通过 Intent/Fact 正常落图。
-
-图仍然是知识与因果关系的唯一表达；但协议也允许少量**项目级协调状态**，用于消费者之间做互斥和可见性协作。这类状态不是事实，不属于图，不参与因果推理。当前唯一内置的项目级协调状态是 `Project.reason`，用于标识“某个消费者正在对整个项目做一次 `reason` 判断”。
-
-系统不做任何推理和决策，只负责图的一致性维护。
+把渗透测试、代码审计、CTF 这类任务建模为一次搜索后，搜索的全部状态被外化成一张**只追加的 FGS 图**（Fact-Goal-Step）。Server 只负责保证图的一致性，不推理、不调度、不关心任务语义。
 
 ### 设计渊源
 
-这套协议是**黑板架构**（Blackboard Architecture）的现代化重构。1970 年代 CMU 的 Hearsay-II 系统提出了同样的范式：多个专家围绕一块共享黑板工作，各自读取当前状态，各自贡献新知识，没有中央调度。Fact 对应黑板上的内容，Intent 对应专家的行动记录，Hint 对应旁注。区别在于：经典黑板只有"当前状态"，本协议通过 Intent 保留了完整的因果链，使得图同时是知识库和推理路径的审计日志。
-
-协调机制上，这套设计等价于蚁群的**信息素机制**（stigmergy）——个体之间不直接通信，而是通过改变共享环境间接协调。Agent 读图、写 Fact，就是在环境上留下信息素，其他 Agent 据此决策。
-
-每个消费者的工作循环（读图→判断→声明意图→执行→产出事实）构成一个独立的 **OODA 循环**（Observe-Orient-Decide-Act），多个循环通过共享图间接同步。这与军事指挥中的**任务式指挥**（Mission Command）同构——上级只下达目标（goal），各单位根据态势自主决策，Hint 扮演"指挥官意图"的角色。核心优势：决策速度不受中心调度瓶颈限制。
-
-### 状态变化的表达
-
-Fact 只增不改，状态变化通过追加新 Fact 表达。例如在多层网络渗透中：
-
-- `f003`: "获得 host-A 的 root shell"
-- `f007`: "通过 host-A 跳板发现内网 10.0.2.0/24"
-- `f025`: "host-A shell 已断开"
-
-"shell 断了"本身就是一个新的客观事实。Agent 读图时看到 f003 和 f025，自行判断当前可达性，从 f025 出发声明新的探索意图（重建 shell、换跳板）。不需要修改历史 Fact，不需要标记失效——事实的时序本身就携带了状态变化的信息。
-
----
+- **Blackboard Architecture**：所有参与者只读写同一块黑板，不做点对点通信。
+- **Stigmergy**：协作通过共享环境的状态变化发生，而不是通过对话。
+- **只追加**：事实一旦确认就不再修改；Step / Goal 只改变状态，不删除（唯一例外是 reopen 撤回完成声明）。
 
 ## 核心概念
 
-### Project
-
-一个有明确起点和终点的问题实例，包含完整的图数据。
-
-三种状态：
-
-- `active`：进行中，接受探索写操作
-- `stopped`：硬停止，不接受探索写操作，可恢复为 `active`
-- `completed`：当前已完成，不接受探索写操作；若外部确认之前的完成判断有误，可显式调用 `reopen` 撤销完成态并继续
-
 ### Fact
 
-图中的节点，代表一个已确认的客观事实。只有描述文本，没有状态标记。只增不改，永久保留。
+已经确认的世界状态。事实只能追加，不能修改或删除。`origin` 是保留 id，表示项目初始状态，也是一个普通事实。
 
-描述文本应是探索结论的提炼，而非原始数据。当原始输出较大时（如扫描结果），描述应包含关键洞见和原始数据的文件引用，例如："nmap 全端口扫描发现 22/80/443/8080 开放，80 和 8080 均为 HTTP 服务，详细结果见 /tmp/scans/nmap_192.168.1.10.xml"。这保证图保持轻量，同时原始数据仍可追溯。
+### Goal
 
-每个 Project 有两个特殊 Fact，在 Project 创建时写入：
+项目的完成条件，即搜索的终止条件。Goal 构成一棵树：
 
-- `origin`：起点
-- `goal`：终点
+- 根 Goal 在创建项目时写入，描述项目目标。
+- 子 Goal 可以被 Decide 动态提出或关闭（`achieved` / `abandoned`），用于阶段性推进。
+- 根 Goal 只能通过 `POST /projects/{id}/complete` 关闭。
 
-普通 Fact 由系统生成 id，如 `f001`。
+### Step
 
-### Intent
+下一步要做什么，以及如何从已有事实产生新的事实：
 
-图中的边，代表从一个或多个 Fact 出发的探索过程。有三种状态：
+- `from` 引用的都是已存在的 Fact id。
+- `to` 是它产出的事实 id（执行完成后才有值）。
+- `goal` 表示它服务于哪个 Goal。
+- `priority` 决定执行顺序，`0`（最低）到 `9`（最高）。
+- `rationale` 可选，记录"为什么这一步能推进"。
 
-- **进行中**：Intent 已被某个消费者认领，`worker` 不为 null
-- **未认领**：Intent 尚无结论，且当前 `worker` 为 null，等待消费者接手
-- **已结论**：`to` 不为 null，探索已完成，产出了结论 Fact
-
-未结论的 Intent（`to=null`）表示这个探索方向已声明但尚未有结论。声明时可只写下方向而不认领，也可同时认领。已结论的 Intent 不可修改。
-
-协议本身不区分 Intent 的“类型”，所有 Intent 在服务端都一视同仁；但消费者可以约定某些**保留语义**。例如可约定一条：
-
-- `from = ["origin"]`
-- `description = "bootstrap"`
-
-的 open Intent 表示“项目最初阶段的一次直接推进尝试”。这类保留 intent 仍然走同样的 heartbeat / release / conclude 生命周期，不需要额外接口；区别只在于消费者会把它解释为“先自己分析并执行，先把关键证明性事实落图；若该事实已足以满足 goal，再继续声明 complete”，而不是普通的细分探索方向。
-
-这个约定适合那些可能很快完成、或至少很快得到首个关键突破的问题。这样项目在前端和审计记录中仍然是可见、可理解的：读者能明确看到系统先做过一次 `bootstrap` 尝试，产出了什么关键事实；像 flag、shell、权限证明这类对后续系统有价值的结果，不会因为直接完成项目而绕开事实图。
-
-**超边语义：** `from` 允许多个 Fact id。`from` 包含多个 id 时，这条 Intent 在图中等价于一条超边——多个源节点共同指向同一个目标节点，共享同一个 description、creator 和 worker：
+状态机：
 
 ```
-f002 ──┐
-       ├──(intent)──→ f006
-f004 ──┘
+pending ──claim──▶ running ──conclude──▶ done
+   ▲                  │
+   └────release───────┘
+pending ──Decide abandon──▶ abandoned
+running ──Decide cancel───▶ cancelled
 ```
 
-这完整保留了"多个已知事实共同支撑一次探索"的因果关系，而不是被迫选一个主 Fact 丢失其余上下文。
+`running` 的 Step 由持有它的 worker 收尾（`conclude`），Decide 不能废弃它：中途废弃会丢掉已经跑完的结果（见 `/steps/{id}/update`）。租约过期（`step_timeout`）后 Step 回到 `pending`，此时才可以被废弃。但 Decide 可以**取消** `running` 步骤：该步骤立即转为终态，worker 的下一次心跳与迟到的 `conclude` 都得到 `409`，进程由租约失败路径终止，未提交的结果被丢弃。这是有意的强制终止，不是等待结果。
+
+`kind` 为 `action` 的 Step 是普通动作；`kind` 为 `completion` 的 Step 是完成声明，由 `complete` 接口原子写入。
+
+### Finding
+
+搜索过程的结构化产物。Finding 的定义由任务决定（例如漏洞挖掘任务里就是各类漏洞），所以 `kind` 是自由字符串，不做枚举。Finding 通过 Execute 的 `conclude` 写入，并记录产生它的 Step。
+
+`severity` 是统一的分级，取 `critical` | `high` | `medium` | `low` | `info`（默认 `info`）。不管任务自定义了多少种 `kind`，严重度都用这一套，报告和界面才能跨项目汇总。
 
 ### Hint
 
-图外输入，策略建议或补充说明。不属于事实图，不影响因果关系，供消费者读图时参考。
+人类判断，任何时刻都可以注入，下一次 Decide / Execute 读取图时自然吸收。
 
-Hint 代表外部补充的高纬输入，不属于探索执行本身。因此项目处于 `stopped` 或 `completed` 时，仍允许继续补充 Hint。`stopped` 项目恢复为 `active` 后，后续消费者会在下一次读图时看到这些新增提示；`completed` 项目上的新 Hint 会被保留，若之后需要继续处理该项目，仍应通过 `reopen` 回到 `active`。
+### 授权边界与运行中干预
 
-除了人工补充的策略提示，Hint 也适合用于消费者之间传递**态势评估**。随着图增长，大量已排除的方向会稀释有效信息。消费者在完成一轮探索后，可将对当前局势的判断写为 Hint（如"SSH 和 SQL 注入方向均已排除，攻击面集中在文件上传功能"），帮助后续消费者快速定位重点，降低每轮读图的认知成本。
+图本身只描述「探索到哪一步」，不描述「允许探索到哪里」。以下四类资源是外挂在图上的边界，端点与字段见 `docs/protocol.md` §2.5–2.7：
 
----
+| 资源 | 层次 | 语义 |
+|---|---|---|
+| `Constraint` | 提示级 | `allow` / `deny` 规则，渲染在目标之前；Decide 只能追加 `deny` |
+| `Steer` | 对话级 | 运行中人类指令 + 主 agent 答复；同时经 pi 扩展在下一次工具调用前注入运行中的 worker |
+| `project_scope` | 命令级硬闸门 | host / IP / CIDR / domain 白名单；空范围 = 不启用 |
+| 任务级 `tool_rules` | 命令级硬闸门 | 只对该项目生效；平台级 `deny/ask` 不可被项目 `allow` 解除 |
+
+约束与指令**不派生**任何拦截规则：软约束与硬拦截必须分别显式配置，避免提示内容（或其中的注入文字）改写平台策略。Decide 对 `running` 步骤的 `cancelled` 是唯一的「主 agent 强制结束子 agent」动作。
 
 ## 数据结构
 
 ### Project
 
-```
-id
-title           # 项目名称
-status          # "active" | "stopped" | "completed"
-bootstrap_enabled  # 是否允许消费者在初始态运行 bootstrap，默认 true
-created_at
-reason          # 当前项目级 reason lease，null 表示当前无人执行 reason
+```json
+{
+  "id": "proj_001",
+  "title": "internal network",
+  "status": "active",
+  "created_at": "2026-01-01T00:00:00Z",
+  "decide": null
+}
 ```
 
-### Project.reason
+`status` ∈ `active` | `stopped` | `completed`。
 
+### Project.decide
+
+```json
+{
+  "worker": "decider-a",
+  "trigger": "facts:3->4",
+  "started_at": "2026-01-01T00:00:10Z",
+  "last_heartbeat_at": "2026-01-01T00:00:20Z"
+}
 ```
-worker             # 当前执行 reason 的消费者
-trigger            # 本次 reason 的触发原因，由消费者定义
-started_at         # 本次 reason 开始时间
-last_heartbeat_at  # 最近一次 reason 心跳时间
+
+Decide 的项目级串行租约。租约过期由 server 自动回收。
+
+### ProjectSummary
+
+```json
+{
+  "id": "proj_001", "title": "internal network", "status": "active",
+  "created_at": "...", "decide": null,
+  "fact_count": 4, "goal_count": 2, "open_goal_count": 1,
+  "step_count": 5, "running_step_count": 1, "pending_step_count": 2,
+  "finding_count": 2, "hint_count": 1
+}
 ```
 
 ### Fact
 
-```
-id              # "origin" | "goal" | 系统生成（如 f001）
-description     # 客观事实描述
-```
-
-### Intent
-
-```
-id
-from            # 出发 Fact 的 id 数组，至少一个
-to              # 结论 Fact 的 id，null 表示尚无结论
-description     # 意图描述
-creator         # 声明意图的消费者，创建时写入，不可变
-worker          # 执行者标识，语义随状态变化（见下方说明）
-last_heartbeat_at  # 最后一次心跳时间，仅尚无结论时有意义，永久保留，不清空
-created_at
-concluded_at    # 结论时间，null 表示尚无结论
+```json
+{"id": "f001", "description": "22/tcp open ssh"}
 ```
 
-`creator` 在创建时写入，标识谁洞察局势提出了这个探索方向，不可变。`worker` 可为空；若创建时同时认领，则 `worker` 必须等于 `creator`，并写入首个 `last_heartbeat_at`。
+### Goal
 
-请求体里的文本字段（如 `title`、`content`、`description`、`creator`、`worker`、`trigger`）以及 `from` 中的 Fact id，服务端都会先做首尾空白裁剪；裁剪后若为空，则返回 `422`。
+```json
+{
+  "id": "g002",
+  "parent": "g001",
+  "description": "获得任意一个 Web 入口",
+  "status": "active",
+  "creator": "decider-a",
+  "created_at": "2026-01-01T00:00:05Z",
+  "closed_at": null
+}
+```
 
-如果消费者采用 `bootstrap` 约定，常见做法是使用固定 `creator`，例如 `dispatcher.bootstrap`，以便在图上与普通探索 intent 清晰区分；这只是消费者约定，不是服务端约束。
+### Step
 
-**worker 字段语义：**
+```json
+{
+  "id": "s001",
+  "from": ["origin"],
+  "to": null,
+  "goal": "g001",
+  "kind": "action",
+  "description": "枚举 10.0.0.1 的开放端口",
+  "rationale": "拿到端口列表后才能确定攻击面",
+  "priority": 5,
+  "status": "pending",
+  "creator": "decider-a",
+  "worker": null,
+  "last_heartbeat_at": null,
+  "created_at": "2026-01-01T00:00:06Z",
+  "concluded_at": null,
+  "note": null
+}
+```
 
-| Intent 状态           | worker 含义                      |
-| --------------------- | -------------------------------- |
-| 尚无结论，worker=null | 当前无人处理，等待认领           |
-| 尚无结论，worker 有值 | 有消费者正在处理                 |
-| 尚无结论，worker 超时 | worker 清空为 null，等待重新认领 |
-| 已结论                | 产出结论的消费者，永久保留       |
+### ProjectDetail
 
-超时清空 worker 只针对尚无结论的 Intent。已结论的 Intent 不参与超时逻辑，worker 永久保留为产出结论的消费者标识。
+```json
+{
+  "project": {},
+  "facts": [],
+  "goals": [],
+  "steps": [],
+  "findings": [],
+  "hints": []
+}
+```
+
+### Finding
+
+```json
+{
+  "id": "d001",
+  "kind": "sqli",
+  "severity": "high",
+  "description": "登录接口存在报错注入",
+  "step": "s003",
+  "creator": "executor-a",
+  "created_at": "2026-01-01T00:01:00Z"
+}
+```
 
 ### Hint
 
-```
-id
-content
-creator         # 提示的作者
-created_at
+```json
+{"id": "h001", "content": "留意 8080", "creator": "human", "created_at": "..."}
 ```
 
 ### Settings
 
-```
-intent_timeout  # 单位秒，超过此时间无心跳则 worker 清空为 null
-reason_timeout  # 单位秒，超过此时间无心跳则 Project.reason 清空为 null
+```json
+{"step_timeout": 20, "decide_timeout": 20}
 ```
 
----
+两个超时都以秒为单位，用于回收失效的执行租约。
 
 ## 接口列表
+
+所有写接口在项目不处于 `active` 时返回 `403`（hint 写入与 reopen 除外）。引用了不存在的 fact / goal / step 返回 `404`，状态冲突返回 `409`。
+
+`GET /projects` 与 `GET /projects/{id}` 返回 `ETag` 与 `Cache-Control: no-cache`。请求带上 `If-None-Match`（浏览器在轮询时自动携带）且内容未变化时返回 `304`，不传输响应体；图或项目数据发生变化后 tag 随之改变，返回完整的 `200`。
+
+### 健康检查
+
+#### GET /healthz
+
+供进程管理与容器探针使用。数据库不可达时返回 `503`：
+
+```json
+{
+  "status": "ok",
+  "version": "0.2.1",
+  "database": "ok",
+  "schema_version": 1
+}
+```
 
 ### 全局设置
 
 #### GET /settings
 
-返回全局配置。
-
-响应：
-
 ```json
-{
-  "intent_timeout": 5,
-  "reason_timeout": 5
-}
+{"step_timeout": 20, "decide_timeout": 20}
 ```
-
----
 
 #### PUT /settings
 
-更新全局配置。
-
-Body：
-
 ```json
-{
-  "intent_timeout": 5,
-  "reason_timeout": 5
-}
+{"step_timeout": 30, "decide_timeout": 45}
 ```
 
----
+要求两个值都 ≥ 5。
 
 ### Projects
 
 #### GET /projects
 
-返回所有项目列表，含元信息和统计摘要，不含图数据。
-
-响应：
-
-```json
-[
-  {
-    "id": "proj_001",
-    "title": "xx渗透测试",
-    "status": "active",
-    "bootstrap_enabled": true,
-    "created_at": "2026-03-21T10:00:00Z",
-    "reason": {
-      "worker": "dispatcher-worker-A",
-      "trigger": "new_facts",
-      "started_at": "2026-03-21T10:06:00Z",
-      "last_heartbeat_at": "2026-03-21T10:06:03Z"
-    },
-    "fact_count": 8,
-    "intent_count": 5,
-    "working_intent_count": 2,
-    "unclaimed_intent_count": 1,
-    "hint_count": 3
-  }
-]
-```
-
----
+返回 `ProjectSummary[]`，按创建时间升序。
 
 #### POST /projects
 
-创建新项目。`origin` 和 `goal` 写入 `facts` 作为特殊 Fact。`hints` 可选。`bootstrap_enabled` 可选，默认为 `true`；为 `false` 时消费者跳过 bootstrap。即使为 `true`，消费者没有 bootstrap 能力时也可直接进入 reason。
-
-Body：
-
 ```json
 {
-  "title": "xx渗透测试",
-  "origin": "目标 http://192.168.1.10",
-  "goal": "拿到 flag",
-  "bootstrap_enabled": true,
-  "hints": [
-    { "content": "优先看 web 服务", "creator": "human" },
-    { "content": "注意 80 端口", "creator": "human" }
-  ]
+  "title": "internal network",
+  "origin": "目标 10.0.0.1",
+  "goal": "拿到域控权限",
+  "hints": [{"content": "先看 8080", "creator": "human"}]
 }
 ```
 
----
+原子写入：项目、`origin` 事实、根 Goal（`g001`）与若干 Hint。返回 `ProjectDetail`。
 
 #### GET /projects/{project_id}
 
-返回项目完整数据，包含 facts、intents、hints。
-
-响应：
-
-```json
-{
-  "project": {
-    "id": "proj_001",
-    "title": "xx渗透测试",
-    "status": "active",
-    "bootstrap_enabled": true,
-    "created_at": "2026-03-21T10:00:00Z",
-    "reason": {
-      "worker": "dispatcher-worker-A",
-      "trigger": "new_facts",
-      "started_at": "2026-03-21T10:06:00Z",
-      "last_heartbeat_at": "2026-03-21T10:06:03Z"
-    }
-  },
-  "facts": [
-    { "id": "origin", "description": "目标 http://192.168.1.10" },
-    { "id": "goal",   "description": "拿到 flag" },
-    { "id": "f001",   "description": "发现开放端口 22/80/443" }
-  ],
-  "intents": [
-    {
-      "id": "i001",
-      "from": ["origin"],
-      "to": "f001",
-      "description": "nmap 全端口扫描",
-      "creator": "agent-A",
-      "worker": "agent-A",
-      "last_heartbeat_at": "2026-03-21T10:02:00Z",
-      "created_at": "2026-03-21T10:01:00Z",
-      "concluded_at": "2026-03-21T10:02:00Z"
-    },
-    {
-      "id": "i002",
-      "from": ["f001"],
-      "to": null,
-      "description": "http 服务探测与目录扫描",
-      "creator": "agent-A",
-      "worker": "agent-B",
-      "last_heartbeat_at": "2026-03-21T10:04:00Z",
-      "created_at": "2026-03-21T10:03:00Z",
-      "concluded_at": null
-    }
-  ],
-  "hints": [
-    { "id": "h001", "content": "优先看 web 服务", "creator": "human", "created_at": "2026-03-21T10:00:00Z" },
-    { "id": "h002", "content": "注意 80 端口", "creator": "human", "created_at": "2026-03-21T10:00:00Z" }
-  ]
-}
-```
-
----
+返回 `ProjectDetail`。读取前会回收过期的 step / decide 租约。
 
 #### DELETE /projects/{project_id}
 
-删除项目及其所有数据。
-
-如果某个 Dispatcher 仍持有该项目对应的运行容器，容器不由 Server 直接管理；Dispatcher 在后续轮询中发现项目已不存在后，会把该项目视为 `deleted`，取消本地仍在运行的任务，并删除对应的 orphan 容器。
-
----
+级联删除图。
 
 #### PUT /projects/{project_id}/title
 
-修改项目标题。该操作不改变项目图，也不影响 `reason` lease、open intent claim 或项目状态；无论项目当前是 `active`、`stopped` 还是 `completed`，都允许修改标题。
-
-Body：
-
 ```json
-{
-  "title": "xx渗透测试（复盘）"
-}
+{"title": "new title"}
 ```
-
-响应：
-
-```json
-{
-  "id": "proj_001",
-  "title": "xx渗透测试（复盘）",
-  "status": "completed",
-  "created_at": "2026-03-21T10:00:00Z",
-  "reason": null
-}
-```
-
----
 
 #### PUT /projects/{project_id}/status
 
-更新项目状态。仅允许 `active` 和 `stopped` 之间切换。`completed` 项目不可通过该接口再次变更状态；若需要撤销完成态，必须调用专用的 `reopen` 接口。该接口属于项目管理操作，不属于探索写操作。
-
-当项目切到 `stopped` 时，Server 会立即把所有尚无结论的 Intent 的 `worker` 清空为 `null`，并把 `project.reason` 清空，使这些 claim 立刻失效。这样项目恢复后可以马上重新认领，不必等待超时。`stopped` 的语义是硬停止：Server 负责拒绝后续探索写操作并清空 open intent claim / reason lease；消费者拿到这个信号后应立刻取消本地仍在运行的任务，并停止对应项目容器。
-
-已知问题：当前协议里，Intent 级只保存“当前 claim 持有者”这一份信息，也就是 `intent.worker`。因此项目一旦被切到 `stopped`，这些 open intent 的 `worker` 会被立即清空；停止后从项目详情里将无法直接看出“该 intent 在停止前最后是由哪个 worker 在推进”。后续可以考虑增加类似 `worker_history` 的 Intent 级历史字段来保留这部分可见性，但当前版本尚未实现。
-
-Body：
-
 ```json
-{
-  "status": "stopped"
-}
+{"status": "stopped"}
 ```
 
-响应：
+`active` ↔ `stopped`。转 `stopped` 时释放所有 running Step 与 Decide 租约。`completed` 项目不可改状态。
+
+#### POST /projects/{project_id}/decide/claim
 
 ```json
-{
-  "id": "proj_001",
-  "title": "xx渗透测试",
-  "status": "stopped",
-  "created_at": "2026-03-21T10:00:00Z",
-  "reason": null
-}
+{"worker": "decider-a", "trigger": "facts:3->4"}
 ```
 
----
+抢占项目级 Decide 租约；已被其他 worker 持有时返回 `409`。同一 worker 重复 claim 幂等成功。
 
-#### POST /projects/{project_id}/reason/claim
-
-认领项目级 `reason` lease。它不属于图，不产生 Intent/Fact，只表示“当前有人正在对整个项目做一次 `reason` 判断”。单个项目同一时刻最多只能有一个 `reason` lease。
-
-若当前 `project.reason` 为空，则 claim 成功并写入 `worker`、`trigger`、`started_at`、`last_heartbeat_at`。若当前已被其他消费者占用且未超时，返回 409。若当前已被同一 `worker` 占用，则幂等返回当前状态。该接口属于探索写操作，仅 `active` 项目允许；`stopped` 或 `completed` 返回 403。
-
-Body：
+#### POST /projects/{project_id}/decide/heartbeat
 
 ```json
-{
-  "worker": "dispatcher-worker-A",
-  "trigger": "new_facts"
-}
+{"worker": "decider-a"}
 ```
 
-响应：
+续租；租约不属于该 worker 时返回 `409`。
+
+#### POST /projects/{project_id}/decide/release
 
 ```json
-{
-  "id": "proj_001",
-  "title": "xx渗透测试",
-  "status": "active",
-  "created_at": "2026-03-21T10:00:00Z",
-  "reason": {
-    "worker": "dispatcher-worker-A",
-    "trigger": "new_facts",
-    "started_at": "2026-03-21T10:06:00Z",
-    "last_heartbeat_at": "2026-03-21T10:06:00Z"
-  }
-}
+{"worker": "decider-a"}
 ```
 
----
-
-#### POST /projects/{project_id}/reason/heartbeat
-
-当前 `worker` 对项目级 `reason` lease 续约，更新 `last_heartbeat_at`。仅当前持有该 lease 的 `worker` 可以续约；若当前无人持有，返回 409；若被其他消费者占用且未超时，返回 409。该接口属于探索写操作，仅 `active` 项目允许；`stopped` 或 `completed` 返回 403。
-
-Body：
-
-```json
-{
-  "worker": "dispatcher-worker-A"
-}
-```
-
----
-
-#### POST /projects/{project_id}/reason/release
-
-当前 `worker` 主动释放项目级 `reason` lease，使其立刻回到无人执行 `reason` 的状态。仅当前持有者本人可以释放；若当前已为空，则幂等返回当前状态；若被其他消费者占用且未超时，返回 409。该接口属于探索写操作，仅 `active` 项目允许；`stopped` 或 `completed` 返回 403。
-
-Body：
-
-```json
-{
-  "worker": "dispatcher-worker-A"
-}
-```
-
----
+释放租约，幂等。
 
 ### Hints
 
 #### POST /projects/{project_id}/hints
 
-向项目补充一条策略提示。Hint 属于图外输入写操作，`active`、`stopped` 和 `completed` 项目均允许。
-
-Body：
-
 ```json
-{
-  "content": "尝试文件上传绕过",
-  "creator": "agent-A"
-}
+{"content": "人类补充", "creator": "human"}
 ```
 
----
+项目处于 `stopped` 时仍可写入。
 
-### Intents
+### Goals
 
-#### POST /projects/{project_id}/intents
+#### POST /projects/{project_id}/goals
 
-从某个 Fact 出发声明探索意图，产生一条尚无结论的 Intent。可选择只声明，或声明并同时认领。Intent 属于探索写操作，仅 `active` 项目允许；`stopped` 或 `completed` 返回 403。
+```json
+{"description": "获得任意一个 Web 入口", "parent": "g001", "creator": "decider-a"}
+```
 
-Body：
+省略 `parent` 时挂到根 Goal 下。
+
+#### POST /projects/{project_id}/goals/{goal_id}/close
+
+```json
+{"status": "achieved", "worker": "decider-a", "note": "已拿到 shell"}
+```
+
+`status` ∈ `achieved` | `abandoned`。根 Goal 必须通过 `complete` 关闭，直接关闭返回 `409`。
+
+### Steps
+
+#### POST /projects/{project_id}/steps
 
 ```json
 {
   "from": ["f001"],
-  "description": "http 服务探测与目录扫描",
-  "creator": "agent-A",
+  "goal": "g001",
+  "description": "枚举端口",
+  "rationale": "确定攻击面",
+  "priority": 5,
+  "creator": "decider-a",
   "worker": null
 }
 ```
 
-`from` 为数组，至少包含一个 Fact id。`worker` 可为 `null` 或等于 `creator`；`null` 表示只声明不认领，等于 `creator` 表示声明并立即认领。多个 Fact 共同驱动同一次探索时，全部列入 `from`，完整保留因果关系。例如：
+`creator` 必须等于 `worker` 或 `worker` 为 `null`，否则 `400`。`from` 为空表示从零开始的一步。
 
-`from` 不能包含 `goal`。
+#### POST /projects/{project_id}/steps/{step_id}/heartbeat
 
-服务端不校验 `description` 的业务语义，因此像 `description = "bootstrap"` 这样的保留 intent 也只是普通 Intent。是否把它解释为“项目最初阶段的直接推进尝试”，由消费者自己约定。
+```json
+{"worker": "executor-a"}
+```
+
+抢占 / 续租一个 Step。已结束（`done` / `abandoned`）返回 `409`，被其他 worker 持有也返回 `409`。
+
+#### POST /projects/{project_id}/steps/{step_id}/release
+
+```json
+{"worker": "executor-a"}
+```
+
+把 Step 放回 `pending`，幂等。
+
+#### POST /projects/{project_id}/steps/{step_id}/update
+
+Decide 专用：调整优先级或废弃。
+
+```json
+{"priority": 9}
+{"status": "abandoned", "note": "方向已被事实否定"}
+```
+
+Step 不会被删除，废弃只改变状态。`running` 的 Step 返回 `409`：它归执行它的 worker 所有，必须由该 worker `conclude` 收尾，否则跑完的结果会被丢弃、Step 也拿不到事实。
+
+#### POST /projects/{project_id}/steps/{step_id}/conclude
+
+Execute 的 `submit_fact` / `submit_finding` 与 Step 收尾，原子完成：
 
 ```json
 {
-  "from": ["f002", "f004"],
-  "description": "用 f004 获取的凭据登录 f002 发现的后台",
-  "creator": "agent-A",
-  "worker": "agent-A"
+  "worker": "executor-a",
+  "status": "done",
+  "facts": [{"description": "22/tcp open ssh"}],
+  "findings": [{"kind": "weak-credential", "severity": "high", "description": "admin:admin 可登录"}],
+  "note": "可选"
 }
 ```
 
-响应：新创建的 Intent 对象。
+`severity` 可省略，缺省为 `info`；大小写与首尾空白会被归一化，未知取值返回 `422`。
 
----
-
-#### POST /projects/{project_id}/intents/{intent_id}/heartbeat
-
-消费者上报存活，更新 `worker` 和 `last_heartbeat_at`。仅对尚无结论的 Intent 有效。该接口用于续约，或在某条 Intent 已超时变为未认领后重新接手。若当前 `worker` 为 `null`，任意消费者可通过 heartbeat 认领；若当前 `worker` 已被其他消费者占用且未超时，返回 409。Heartbeat 属于探索写操作，仅 `active` 项目允许；`stopped` 或 `completed` 返回 403。
-
-消费者通常会按固定心跳周期继续 heartbeat 或轮询项目；项目进入 `stopped` 或 `completed` 后，继续 heartbeat 会返回 403，而轮询读取会看到项目 `status` 变化。由于 Server 在 `stopped` 时会立即清空 open intent 的 `worker`，消费者应把它当作硬停止信号，尽快终止本地推进，而不是继续依赖旧 claim。
-
-Body：
+返回：
 
 ```json
 {
-  "worker": "agent-B"
+  "facts": [{"id": "f002", "description": "22/tcp open ssh"}],
+  "findings": [{"id": "d001", "kind": "weak-credential", "severity": "high", "description": "admin:admin 可登录"}],
+  "step": {"id": "s001", "status": "done", "to": "f002"}
 }
 ```
 
----
+`status` ∈ `done` | `abandoned`。第一条 fact 成为 Step 的 `to`；没有 fact 时 `to` 为 `null`。
 
-#### POST /projects/{project_id}/intents/{intent_id}/release
-
-当前 `worker` 主动释放一条尚无结论的 Intent，使其回到未认领状态，供其他消费者立即接手。仅当前 `worker` 本人可以释放；若被其他消费者占用且未超时，返回 409。若该 Intent 当前已未认领，则幂等返回当前状态。`last_heartbeat_at` 保留，不清空。Release 属于探索写操作，仅 `active` 项目允许；`stopped` 或 `completed` 返回 403。
-
-Body：
-
-```json
-{
-  "worker": "agent-B"
-}
-```
-
-响应：更新后的 Intent 对象。
-
----
-
-#### POST /projects/{project_id}/intents/{intent_id}/conclude
-
-探索结束，产出新 Fact 并将 Intent 结论落定。原子操作。仅对尚无结论的 Intent 有效。claim 规则与 heartbeat 相同：未认领可直接 conclude；由当前 `worker` conclude；若被其他消费者占用且未超时，返回 409。Conclude 属于探索写操作，仅 `active` 项目允许；`stopped` 或 `completed` 返回 403。
-
-`worker` 写入后永久保留，标识本次结论由谁产出。
-
-Body：
-
-```json
-{
-  "worker": "agent-B",
-  "description": "80端口运行 nginx 1.18，存在目录遍历"
-}
-```
-
-响应：
-
-```json
-{
-  "fact": {
-    "id": "f002",
-    "description": "80端口运行 nginx 1.18，存在目录遍历"
-  },
-  "intent": {
-    "id": "i002",
-    "from": ["f001"],
-    "to": "f002",
-    "description": "http 服务探测与目录扫描",
-    "creator": "agent-A",
-    "worker": "agent-B",
-    "last_heartbeat_at": "2026-03-21T10:05:00Z",
-    "created_at": "2026-03-21T10:03:00Z",
-    "concluded_at": "2026-03-21T10:05:00Z"
-  }
-}
-```
-
----
+### 完成与重开
 
 #### POST /projects/{project_id}/complete
 
-消费者判断某些 Facts 共同满足 goal 后调用，声明项目完成。原子操作。Complete 属于探索写操作，仅 `active` 项目允许；`stopped` 或 `completed` 返回 403。
-
-创建一条 `from` 指向所列 Facts、`to` 指向 `goal` 的已结论 Intent。完成声明无探索过程，服务端将 `creator` 和 `worker` 均设为请求中的 `worker` 值。Project 状态变为 `completed`，并立即清空当前 `project.reason`。
-
-如果后续外部验证发现这次完成判断有误，可再调用 `POST /projects/{project_id}/reopen` 撤销这条完成边，并把纠错信息写成新的 Fact 后继续探索。
-
-`from` 不能包含 `goal`。
-
-Body：
-
 ```json
-{
-  "from": ["f007", "f012", "f015"],
-  "description": "三个 shell 均已获取，满足 goal 要求",
-  "worker": "agent-A"
-}
+{"from": ["f005"], "description": "已拿到域控", "worker": "decider-a"}
 ```
 
----
+原子写入：`kind=completion` 的 Step（来源为 `from`）、根 Goal 置为 `achieved`、项目置为 `completed`。要求 `from` 非空且引用真实事实；还有任何 `pending` / `running` 的 `action` Step 或未关闭的子 Goal 时返回 `409`，先收尾再完成。
 
 #### POST /projects/{project_id}/reopen
 
-外部确认项目其实尚未完成时，显式撤销当前完成态。该接口属于项目管理操作，不属于探索写操作；仅 `completed` 项目允许调用。
+```json
+{"description": "外部复核发现该 shell 属于沙箱", "creator": "human"}
+```
 
-服务端会：
+仅对 `completed` 项目可用。撤回完成声明：删除 completion Step，根 Goal 回到 `active`，外部反馈作为新事实写入，项目回到 `active`。新的 Decide 会因图变化被触发。
 
-- 找到当前唯一一条 `to=goal` 的完成边
-- 读取它原本的 `from`
-- 删除这条完成边，不保留“曾完成过一次”的图内历史
-- 新建一个普通 Fact，内容为调用者提供的客观纠错说明
-- 新建一条已结论 Intent，`description` 固定为 `external_feedback`，其 `from` 继承原完成边的 `from`，`to` 指向这个新 Fact
-- 将 `creator` 和 `worker` 都写为请求中的 `creator`
-- 将项目状态改回 `active`
-- 清空当前 `project.reason`
+### Sessions（对话记录）
 
-这适合诸如“提交的 flag 是错的，需要继续寻找正确 flag”这类图外反馈。反馈本身被记成图中的新 Fact，而 `reopen` 只是触发这次改写的控制动作。
+Session 记录一次 worker 运行中模型看到的输入和它的输出，用于事后回看"模型到底看到了什么、回了什么"。它不参与图的推理，也不影响调度，只追加。
 
-Body：
+- `id` 在项目内自增（`x001`、`x002`…）。
+- `phase` ∈ `decide` | `execute` | `execute_conclude`，表示这次运行属于哪个阶段。
+- `step` 仅 Execute 阶段有值。
+- `status` ∈ `running` | `success` | `failed` | `cancelled` | `rejected`；`running` 表示 worker 还在跑，消息仍在追加。
+- `message_count` 是该会话已有的消息数，列表接口也会带上，便于显示"增长中"的进度。
+- `summary` 是一行"这次运行要做什么"：Execute 取 Step 的标题（没有标题时取描述），Decide 取待办步骤数，例如 `决策下一步（3 个待办步骤）`。会话列表不用展开 transcript 就能分辨每次运行。创建时写入，最多 300 字符；旧会话没有这个字段，读作空串。
+- 用量字段：`input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_write_tokens` / `total_tokens`。由 dispatcher 从 worker CLI 的输出里解析，创建与收尾时都接受；CLI 不报用量时全部为 0，绝不估算。`total_tokens` 取各分量之和与 CLI 自报总量的较大值。
+- 四个分量互不重叠：`cache_read_tokens` 是独立的缓存命中量。OpenAI 风格接口把缓存命中算进 `input_tokens`，dispatcher 会先减掉再上报，避免项目总量重复计数。
+
+写入分四步：跑之前创建（`status: running` + prompt 消息）、跑的过程中追加消息、长时间没有输出时发心跳、结束后用 PATCH 收尾。`running` 会话若 60 秒内没有任何追加或心跳，会被读接口判定为失败（`error` 为 `dispatcher stopped before the run finished`）—— dispatcher 被杀掉时不会留下永远 `running` 的会话。
+
+#### POST /projects/{project_id}/sessions
+
+由 dispatcher 在 worker 启动前调用，建立会话并写入 prompt：
 
 ```json
 {
-  "description": "flag FLAG{fake} 是错误的，需要继续寻找正确 flag",
-  "creator": "judge"
+  "worker": "decider-a",
+  "worker_type": "pi",
+  "phase": "decide",
+  "step": null,
+  "summary": "决策下一步（3 个待办步骤）",
+  "native_session": "可选，worker CLI 自己的 session id",
+  "status": "running",
+  "messages": [
+    {"role": "user", "content": "发给模型的 prompt"}
+  ]
 }
 ```
 
-响应：
+也接受一次性的完整写入（`status` 为终态并带上全部 `messages`），供创建失败时的兜底使用。`status` 必填——漏传会被拒（`422`），避免默默记成错误的状态。返回 201 与该 Session 详情（`messages` 带 `seq`）。
+
+#### POST /projects/{project_id}/sessions/{session_id}/messages
+
+运行过程中追加消息，dispatcher 约每秒推送一次新条目：
 
 ```json
 {
-  "project": {
-    "id": "proj_001",
-    "title": "xx渗透测试",
-    "status": "active",
-    "created_at": "2026-03-21T10:00:00Z",
-    "reason": null
-  },
-  "fact": {
-    "id": "f016",
-    "description": "flag FLAG{fake} 是错误的，需要继续寻找正确 flag"
-  },
-  "intent": {
-    "id": "i021",
-    "from": ["f008"],
-    "to": "f016",
-    "description": "external_feedback",
-    "creator": "judge",
-    "worker": "judge",
-    "last_heartbeat_at": "2026-03-21T10:10:00Z",
-    "created_at": "2026-03-21T10:10:00Z",
-    "concluded_at": "2026-03-21T10:10:00Z"
-  }
+  "messages": [
+    {"role": "assistant", "content": "先看看目录"},
+    {"role": "tool_call", "content": "Bash\nls -la"},
+    {"role": "tool_result", "content": "[exit 0]\na.txt"}
+  ]
 }
 ```
 
----
+`seq` 由服务端接着已有的最大值继续分配（应答里带回完整会话）。因此会话页可以在运行中持续刷新，看到思考、调用、结果的完整过程。只有 `running` 状态的会话接受追加；已收尾的会话返回 `409`，dispatcher 收到 `409` 会丢弃该批消息（重试不可能成功）。
+
+#### POST /projects/{project_id}/sessions/{session_id}/heartbeat
+
+worker 长时间没有输出（例如跑一个很慢的命令）时，dispatcher 每 5 秒调用一次，刷新 `updated_at`，避免会话被判定为卡死。无请求体，返回当前 Session。对已收尾的会话是空操作：不会刷新 `updated_at`，`updated_at` 始终保持真实的结束时间。
+
+#### PATCH /projects/{project_id}/sessions/{session_id}
+
+运行结束后收尾，写入真实结果：
+
+```json
+{
+  "status": "success",
+  "returncode": 0,
+  "timed_out": false,
+  "duration_ms": 8421,
+  "error": null,
+  "native_session": "可选，回填 CLI 自己的 session id"
+}
+```
+
+`role` ∈ `system` | `user` | `assistant` | `thinking` | `tool_call` | `tool_result` | `tool`。写入前 dispatcher 会遮蔽 `sk-*`、`Bearer *`、`*_API_KEY=*` 一类的凭据。
+
+记录的是完整过程，而不是只留最终回答：dispatcher 让 worker CLI 以流式 JSON 输出（`pi --mode json`），再把事件流展开成逐条消息：
+
+- `assistant` / `user`：消息里的 text 块，一段一块。
+- `thinking`：`thinking` 块。
+- `tool_call`：一次工具调用，第一行是工具名，第二行是命令/路径/pattern 等关键参数。
+- `tool_result`：工具回填的内容，带 `[exit N]` 前缀；单条上限 8000 字符，其余消息单条上限 20000 字符，单会话最多 1000 条。
+- `tool`：整条输出里没有任何可识别事件时的兜底，保留原始 stdout/stderr。
+
+重复事件（`turn_end` / `agent_end` 会重放消息、CLI 回显 prompt）会按内容去重。
+
+#### GET /projects/{project_id}/sessions
+
+按时间顺序返回该项目的全部 Session 元数据（不含 `messages`）。
+
+#### GET /projects/{project_id}/sessions/{session_id}
+
+返回单个 Session 及其 `messages`。前端会话页通过下面的 `/stream` 接口实时刷新；只在 SSE 不可用时才退化为轮询这个接口。
+
+Session 内容属于旁路信息，不属于 FGS 图，因此导出 YAML / timeline 不包含它。Session 随项目一起删除；`GET /projects/{project_id}` 的响应也会带上 `sessions` 列表。
+
+#### GET /projects/{project_id}/sessions/{session_id}/stream
+
+SSE（`text/event-stream`）对话流，会话页用它实时看到消息增长，连接期间不用轮询：
+
+- `snapshot`：连接后的第一个事件，带完整 `session` 与全部 `messages`，中途连上也能直接渲染；同一条连接只发一次。
+- `messages`：只带连接建立之后新增的 `messages`（同时带最新 `session` 元数据）。
+- `end`：会话进入终态，或 300 秒没有任何新增（说明写入端已消失）时发出，带最终 `session`，随后服务端关闭连接。
+- `gone`：会话被删除时发出。
+- 其余时间每约 0.5 秒发一行 `: keep-alive` 注释。
+
+响应带 `Cache-Control: no-cache, no-transform` 与 `X-Accel-Buffering: no`，浏览器直连服务端；如果以后在前面再加反向代理，必须关闭代理缓冲，否则消息会被攒住不刷新。
+
+### Questions（旁路提问）
+
+旁路提问是一条只读通道：人类在任务进行中问一句图外的问题，dispatcher 用一个空闲 worker 基于当前图快照作答。答案只写进 `questions` 表，不产生 fact / step / hint，也不占用 Decide / Execute 的并发槽位。
+
+```json
+{
+  "id": "q001",
+  "project_id": "proj_001",
+  "content": "这个 CVE 具体是什么？",
+  "status": "pending",
+  "answer": null,
+  "error": null,
+  "worker": null,
+  "created_at": "2026-01-01T00:05:00Z",
+  "started_at": null,
+  "answered_at": null,
+  "duration_ms": null
+}
+```
+
+- `id` 在项目内自增（`q001`、`q002`…）。
+- `status` ∈ `pending` | `running` | `answered` | `failed` | `cancelled`；`pending` 是还没被 dispatcher 抢到，`running` 是已有 worker 接手。
+- `content` 去空白后长度 1–4000，全空白返回 `422`。
+- `pending` 超过 300 秒、`running` 超过 900 秒没有进展的，会被读接口判定为 `failed`，避免界面永远转圈。
+
+#### GET /projects/{project_id}/questions
+
+按时间顺序返回该项目的全部提问。
+
+#### POST /projects/{project_id}/questions
+
+```json
+{"content": "这个 CVE 具体是什么？"}
+```
+
+返回 201 与该 Question。`completed` 项目不能再提问（worker 容器已经不在），返回 `403`。
+
+#### POST /projects/{project_id}/questions/{question_id}/cancel
+
+把 `pending` / `running` 的问题置为 `cancelled` 并写入 `answered_at`；已到终态返回 `409`。正在跑的 worker 不受影响，它稍后提交的答案会被丢弃。
+
+#### DELETE /projects/{project_id}/questions
+
+清空历史，只删除终态（`answered` / `failed` / `cancelled`）记录，返回 `{"deleted": N}`；仍在等待的问题保留。
+
+#### POST /projects/{project_id}/questions/{question_id}/claim
+
+内部接口，dispatcher 调用 worker 之前抢占：
+
+```json
+{"worker": "pi-main"}
+```
+
+`pending` → `running`，记录 `worker` 与 `started_at`。已被抢占或已不是 `pending` 时返回 `409`。
+
+#### POST /projects/{project_id}/questions/{question_id}/answer
+
+内部接口，worker 跑完后提交结果：
+
+```json
+{"status": "answered", "answer": "CVE-2024-1 是演示用的占位编号", "worker": "pi-main", "duration_ms": 4210}
+{"status": "failed", "error": "worker timed out", "worker": "pi-main"}
+```
+
+`status` ∈ `answered` | `failed`；`answered` 必须带 `answer`，`failed` 必须带 `error`，缺了返回 `422`。只有 `running` 的问题能作答（必须先 claim），重复提交返回 `409`。
+
+`worker` 必须与 claim 时记录的 worker 一致：答案只认领主的提交，其他 dispatcher（或漏传 `worker`）一律返回 `409`，避免多 dispatcher 场景下答案被覆盖。
+
+#### GET /questions/pending
+
+内部接口，跨项目返回最早的待答问题供 dispatcher 领取：默认 5 条，`limit` 取值 1–50，越界返回 `422`。
+
+#### GET /projects/{project_id}/questions/stream
+
+SSE（`text/event-stream`）提问流：
+
+- `snapshot`：连接后的第一个事件，带完整 `questions` 列表。
+- `questions`：列表变化时发出，仍带完整列表（列表很短，不做增量）。
+- `end`：没有任何 `pending` / `running` 的问题，或连接超过 900 秒时发出，随后关闭连接。
+- `gone`：项目被删除时发出。
+- 其余时间每秒发一行 `: keep-alive` 注释。
+
+### Context（滚动图摘要）
+
+图快照超出 worker 的上下文预算时，dispatcher 把最近窗口之外的历史压成摘要，连同"覆盖了多少条"一起存到项目上，后续 Decide / Execute / 提问直接复用，不再重复调用模型。三条通道各自独立：
+
+| 通道 | 字段 | 内容 |
+| --- | --- | --- |
+| 事实 | `summary` / `facts_covered` | 已确认的结论、凭据、拓扑 |
+| 已关闭 Step | `step_summary` / `steps_covered` | 试过什么、为什么没成 |
+| Finding | `finding_summary` / `findings_covered` | 版本、服务、拓扑等持久观察 |
+
+```json
+{
+  "summary": "- 10.0.0.5 上的数据库可访问 (f012)",
+  "facts_covered": 75,
+  "step_summary": "- sqlmap 打 /login 没有注入点 (s003)",
+  "steps_covered": 42,
+  "finding_summary": "- 22/tcp openssh 8.2 (d001)",
+  "findings_covered": 8
+}
+```
+
+#### GET /projects/{project_id}/context
+
+返回三条通道的当前摘要；从未生成过的通道是空串 + 0。
+
+#### PUT /projects/{project_id}/context
+
+```json
+{"summary": "- 10.0.0.5 上的数据库可访问 (f012)", "facts_covered": 75, "steps_covered": 42}
+```
+
+按通道合并写入并返回合并后的完整摘要：**每个通道只向前推进**——覆盖数小于已存值、或文本为空时保留旧值。摘要由后台任务写入，这个规则保证晚到的旧摘要不会覆盖新摘要。摘要属于旁路信息，不进入导出 YAML / timeline。
+
+### Findings（汇总）
+
+#### GET /projects/{project_id}/findings
+
+按创建时间返回全部 Finding。
+
+#### GET /projects/{project_id}/findings/summary
+
+返回已确认 Finding 的聚合，用于报告和界面徽标：
+
+```json
+{
+  "project_id": "proj_001",
+  "total": 3,
+  "by_severity": {"critical": 1, "high": 2},
+  "by_kind": {"sqli": 1, "weak-credential": 2}
+}
+```
+
+`by_severity` 按严重度从高到低排列，只包含出现过的等级；需要逐条内容时用 `GET /projects/{project_id}/findings`。
+
+### Usage（用量）
+
+#### GET /projects/{project_id}/usage
+
+汇总项目内所有 Session 的实测 token 用量，并给出按阶段、按 worker 的拆分：
+
+```json
+{
+  "project_id": "proj_001",
+  "sessions": 12,
+  "input_tokens": 184000,
+  "output_tokens": 21000,
+  "cache_read_tokens": 96000,
+  "cache_write_tokens": 12000,
+  "total_tokens": 313000,
+  "by_phase": {"decide": {"sessions": 5, "total_tokens": 121000}},
+  "by_worker": {"decider-a": {"sessions": 5, "total_tokens": 121000}}
+}
+```
+
+未上报用量的 Session 计 0，因此总量永远只由实测值组成。
 
 ### 导出
 
 #### GET /projects/{project_id}/export?format=yaml
 
-返回项目图的 YAML 结构化快照，供消费者读取。不含 `last_heartbeat_at`。尚无结论的 Intent（`to=null`）出现在 YAML 中，`worker` 字段直接反映当前是否有消费者在处理。`project.reason` 不在导出中出现，因为它是项目级协调状态，不属于事实图。读取时服务端仍会执行超时清理，因此导出结果反映的是清理后的当前状态。`created_at` 和 `concluded_at` 按服务端当前时区格式化为 `YYYY-MM-DD HH:mm:ss`。
-
-```yaml
-project:
-  title: "xx渗透测试"
-  origin: "目标 http://192.168.1.10"
-  goal: "拿到 flag"
-  bootstrap_enabled: true
-
-hints:
-  - content: "优先看 web 服务"
-    creator: "human"
-    created_at: "2026-03-21 18:00:00"
-  - content: "注意 80 端口"
-    creator: "human"
-    created_at: "2026-03-21 18:00:00"
-
-facts:
-  - id: origin
-    description: "目标 http://192.168.1.10"
-  - id: goal
-    description: "拿到 flag"
-  - id: f001
-    description: "发现开放端口 22/80/443"
-  - id: f002
-    description: "80端口运行 nginx 1.18，存在目录遍历"
-  - id: f003
-    description: "遍历发现 /backup/db.sql，包含用户表"
-  - id: f004
-    description: "获得凭据 admin/passwd123"
-  - id: f005
-    description: "ssh 登录失败，凭据不通用"
-  - id: f006
-    description: "web后台登录成功，发现文件上传功能"
-  - id: f007
-    description: "上传 webshell 成功，获得 www-data shell"
-  - id: f008
-    description: "在 /var/www/html/flag.txt 找到 flag{abc123}"
-
-intents:
-  - from: [origin]
-    to: f001
-    description: "nmap 全端口扫描"
-    creator: "agent-A"
-    worker: "agent-A"
-    created_at: "2026-03-21 18:01:00"
-    concluded_at: "2026-03-21 18:02:00"
-
-  - from: [f001]
-    to: f002
-    description: "http 服务探测与目录扫描"
-    creator: "agent-A"
-    worker: "agent-B"
-    created_at: "2026-03-21 18:02:00"
-    concluded_at: "2026-03-21 18:04:00"
-
-  - from: [f002]
-    to: f003
-    description: "利用目录遍历下载 /backup/db.sql"
-    creator: "agent-B"
-    worker: "agent-B"
-    created_at: "2026-03-21 18:04:00"
-    concluded_at: "2026-03-21 18:05:00"
-
-  - from: [f003]
-    to: f004
-    description: "解析 db.sql 提取用户凭据"
-    creator: "agent-A"
-    worker: "agent-A"
-    created_at: "2026-03-21 18:05:00"
-    concluded_at: "2026-03-21 18:05:30"
-
-  - from: [f004]
-    to: f005
-    description: "尝试 ssh 登录"
-    creator: "agent-A"
-    worker: "agent-C"
-    created_at: "2026-03-21 18:05:30"
-    concluded_at: "2026-03-21 18:06:00"
-
-  - from: [f002, f004]
-    to: f006
-    description: "用 f004 获取的凭据登录 f002 发现的后台"
-    creator: "agent-A"
-    worker: "agent-B"
-    created_at: "2026-03-21 18:05:30"
-    concluded_at: "2026-03-21 18:06:00"
-
-  - from: [f006]
-    to: f007
-    description: "上传 php webshell 绕过扩展名检测"
-    creator: "agent-B"
-    worker: "agent-B"
-    created_at: "2026-03-21 18:06:00"
-    concluded_at: "2026-03-21 18:07:00"
-
-  - from: [f007]
-    to: f008
-    description: "在 shell 中搜索 flag 文件"
-    creator: "agent-B"
-    worker: "agent-A"
-    created_at: "2026-03-21 18:07:00"
-    concluded_at: "2026-03-21 18:08:00"
-
-  - from: [f008]
-    to: goal
-    description: "flag{abc123} 满足 goal 要求"
-    creator: "agent-A"
-    worker: "agent-A"
-    created_at: "2026-03-21 18:08:00"
-    concluded_at: "2026-03-21 18:08:01"
-```
-
-尚无结论的 Intent 示例（`worker` 不为 null 表示有消费者正在处理）：
-
-```yaml
-  - from: [f003]
-    to: null
-    description: "尝试利用目录遍历读取敏感文件"
-    creator: "agent-A"
-    worker: "agent-C"
-    created_at: "2026-03-21 18:09:00"
-    concluded_at: null
-```
-
----
+导出当前 FGS 图快照（`project` / `hints` / `constraints` / `steers` / `scope` / `facts` / `goals` / `steps` / `findings`），Finding 带 `severity`。`steers` 含 `answer` / `answered_at`。
 
 #### GET /projects/{project_id}/export?format=timeline
 
-返回项目的时间线纯文本，按事件发生时间排序。YAML 快照展示图的结构拓扑，timeline 展示事件的先后顺序和因果链，两者互补。事件类型包括 `PROJECT CREATED`、`HINT`、`INTENT DECLARED`、`INTENT CONCLUDED`、`PROJECT COMPLETED`。若项目曾经完成后又被 `reopen`，由于旧的 `goal` 边已被撤销，timeline 中不会保留之前那次 `PROJECT COMPLETED` 事件。
+导出人类可读的时间线，事件包括：PROJECT CREATED、HINT、CONSTRAINT REQUIRED / FORBIDDEN、STEER / STEER ANSWER、SCOPE ENTRY、GOAL DECLARED / ACHIEVED / DROPPED、STEP DECLARED / CONCLUDED / ABANDONED / CANCELLED、FINDING、PROJECT COMPLETED。FINDING 行会带上 `severity`。
 
----
+#### GET /projects/{project_id}/export?format=findings
 
-## 消费者典型使用流程
+导出 Markdown 发现报告：按严重度分组，组内逐条列出 `id`、`kind`、产生它的 Step 与描述。
 
-```
-1. 读取结构化项目数据
-   用于调度、状态判断、intent 选择与协议写回
+非法 `format` 返回 `400`。
 
-2. GET /projects/{id}/export?format=yaml
-   读取图快照（仅供 Dispatcher 渲染给 Agent）
+## 不变量
 
-3. 若项目仍处于最初阶段：
-   典型判定是 facts 只有 `origin` 和 `goal`，且没有普通 intent；
-   某些消费者会允许“没有任何 intent”，或“只存在保留 bootstrap intent”都视为初始态
-   若 `project.bootstrap_enabled=false`，或消费者不具备 bootstrap 能力，则直接进入 reason；
-   a. 若尚不存在保留 bootstrap intent：
-      POST /projects/{id}/intents
-        { from: ["origin"], description: "bootstrap", creator: "dispatcher.bootstrap", worker: null }
-   b. POST /projects/{id}/intents/{intent_id}/heartbeat
-        { worker: "dispatcher-worker-A" }
-      认领成功后，直接做一轮 `bootstrap`
-   c. 推进过程中持续 heartbeat
-   d. 若拿到了关键证明性事实：
-      POST /projects/{id}/intents/{intent_id}/conclude
-        { worker: "dispatcher-worker-A", description: "发现登录页存在默认口令 admin:admin" }
-      若该新 fact 已足以满足 goal，也可继续：
-      POST /projects/{id}/complete
-        { from: ["新写入的 fact id"], description: "为什么该事实已足以满足 goal", worker: "dispatcher-worker-A" }
-   e. 若本轮 bootstrap 失败且需要放弃：
-      POST /projects/{id}/intents/{intent_id}/release
-        { worker: "dispatcher-worker-A" }
-   f. 回到步骤 1
-
-4. 若图中存在未认领的普通 Intent（worker=null）：
-   a. 选择一条可认领 Intent
-   b. POST /projects/{id}/intents/{intent_id}/heartbeat
-        { worker: "dispatcher-worker-A" }
-      认领成功后，派发一次 `explore`
-   c. 探索过程中持续 heartbeat
-   d. 探索成功时：
-      POST /projects/{id}/intents/{intent_id}/conclude
-        { worker: "dispatcher-worker-A", description: "发现 /search 参数存在报错注入" }
-   e. 若探索失败且需要放弃：
-      POST /projects/{id}/intents/{intent_id}/release
-        { worker: "dispatcher-worker-A" }
-   f. 回到步骤 1
-
-5. 若图中没有未认领 Intent：
-   a. POST /projects/{id}/reason/claim
-        { worker: "dispatcher-worker-A", trigger: "new_facts" }
-      认领成功后，派发一次 `reason`
-   b. 推进过程中持续 POST /projects/{id}/reason/heartbeat
-        { worker: "dispatcher-worker-A" }
-   c. 若 `reason` 返回完成结论：
-      POST /projects/{id}/complete
-        { from: ["f008"], description: "flag{abc} 满足 goal 要求", worker: "dispatcher-worker-A" }
-      流程结束
-   d. 若 `reason` 返回新的 intent：
-      POST /projects/{id}/intents
-        { from: ["f003"], description: "尝试 SQL 注入", creator: "dispatcher-worker-A", worker: null }
-      然后 POST /projects/{id}/reason/release
-        { worker: "dispatcher-worker-A" }
-   e. 若 `reason` 未返回完成结论，也未返回新 intent：
-      POST /projects/{id}/reason/release
-        { worker: "dispatcher-worker-A" }
-      本轮不写图
-   f. 若 `reason` 执行失败、超时或需要放弃：
-      POST /projects/{id}/reason/release
-        { worker: "dispatcher-worker-A" }
-   g. 回到步骤 1
-
-6. 若项目已 `completed`，但图外验证确认之前的完成判断有误：
-   a. POST /projects/{id}/reopen
-        { description: "flag FLAG{fake} 是错误的，需要继续寻找正确 flag", creator: "judge" }
-   b. 项目回到 `active`，图中新增一条 `external_feedback` 结论边和一个纠错 Fact
-   c. 回到步骤 1
-```
+1. Fact 只追加；`origin` 保留。
+2. 根 Goal 有且仅有一个，在项目创建时写入。
+3. Step 不删除，只改变状态；唯一的删除是 reopen 撤回 completion Step。
+4. 一个 Step 同时只能被一个 worker 持有。
+5. 一个项目同时只能有一个 Decide 租约。
+6. 项目 `completed` 后所有写接口返回 `403`，只有 reopen 例外。
+7. 旁路提问只写 `questions` 表：不新增事实、不占用 Step，答案不进入图。

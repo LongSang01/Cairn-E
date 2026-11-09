@@ -1,12 +1,15 @@
 # Cairn server API endpoint.
 server: "http://cairn-server:8000"
 
-# Shared environment variables merged into every worker.
+# Shared environment variables merged into every worker; a worker's own env wins.
+# Use it for values every worker needs (a proxy here); leave empty if there are none.
 common_env:
-  TSEC_SERVER_HOST: "<SERVER_HOST>:8000"
-  TSEC_AGENT_TOKEN: "xxx"
+  https_proxy: "http://127.0.0.1:7897"
 
 runtime:
+  # "container" runs one worker container per project; see dispatch.local.example.yaml
+  # for running the worker CLIs directly on the dispatcher host instead.
+  execution: "container"
   # Scheduler tick interval in seconds.
   interval: 3
   # Global concurrency cap across all workers and all projects.
@@ -15,6 +18,11 @@ runtime:
   max_running_projects: 3
   # Per-project worker cap. Prevents one project from monopolizing the whole dispatcher.
   max_project_workers: 4
+  # Upper bound on concurrent Execute runs per project. Inside that bound the scheduler
+  # only parallelises steps proposed by the SAME Decide run; steps from different runs
+  # stay serial, because neither run saw the other's plan. worker.max_running must also
+  # allow it, and SQLite writes are serialized.
+  max_running_steps: 2
   # Timeout for each enabled worker healthcheck.
   healthcheck_timeout: 20
   # "startup_and_task" checks at dispatcher startup and before every task.
@@ -22,27 +30,64 @@ runtime:
   worker_healthcheck: "startup_only"
   # Prompt set loaded from cairn/src/cairn/dispatcher/prompts/.
   prompt_group: "default"
+  # Side questions run outside the Decide/Execute slots, but still need a concurrency cap.
+  max_questions: 1
+  # Summaries run in the background, after the Decide that asked for them finished.
+  max_summaries: 1
+  # Budget for the graph snapshot handed to a worker. "enabled: false" pastes the graph verbatim.
+  # A worker can override the window through CONTEXT_WINDOW (or PI_MODEL_CONTEXT_WINDOW) in its env.
+  context_budget:
+    enabled: true
+    context_window: 200000
+    max_output_tokens: 16000
+    safety_ratio: 0.05
+    safety_min_tokens: 2000
+    safety_max_tokens: 18000
+    # How many recent facts keep their original text. Decide runs after every step, so
+    # a smaller window keeps the snapshot cheap instead of re-reading the whole graph.
+    recent_items: 8
+    # Summarization calls allowed per Decide run; 0 disables the rolling summary.
+    summary_max_calls: 1
+    summary_timeout: 90
+    min_snapshot_tokens: 2000
 
+# Two activities, one runner: Decide only edits the FGS graph, Execute acts on the world.
 tasks:
-  bootstrap:
-    # Main execution timeout for the initial direct solve attempt.
+  decide:
+    # Decide reads the whole graph and returns graph mutations. It never touches the world.
     timeout: 300
-    # Time budget for conclude fallback after the main phase times out or returns unusable output.
-    conclude_timeout: 90
-  reason:
-    # Reason decides whether the goal is met and whether new intents should be proposed.
-    timeout: 300
-    # Hard cap on how many new intents one reason step may create.
-    max_intents: 2
-  explore:
-    # Main execution timeout for exploring a claimed intent.
-    timeout: 300
-    # Time budget for conclude fallback used to summarize confirmed findings from the same session.
-    conclude_timeout: 90
+    # Hard cap on how many new steps one Decide run may add.
+    max_steps: 3
+  execute:
+    # Main timeout for executing a claimed step. Full auto penetration runs long scans,
+    # so the budget has to cover a real enumeration instead of cutting it mid-flight.
+    timeout: 1800
+    # Time budget for the conclude fallback after the main phase times out or returns unusable output.
+    conclude_timeout: 120
+    # Seconds reserved out of timeout for the settlement round: the main run stops at
+    # timeout - settlement_margin so a conclude pass still fits in the same budget.
+    settlement_margin: 120
+
+tool_guard:
+  # 命令级拦截：worker 内的 pi 扩展在每次 bash 之前询问服务端，
+  # 规则（allow/deny/ask）、人工审批队列与审计日志都在服务端。
+  # 开启前确认 worker 容器能访问 api_url；默认关闭。
+  enabled: false
+  # worker 容器使用 host 网络，这里指向宿主 loopback 上映射的服务端端口
+  # （docker-compose.yaml 里 127.0.0.1:8001 -> 8000）。
+  api_url: "http://127.0.0.1:8001"
+  # 扩展连不上服务端时的策略：allow 不阻塞任务，deny 宁停不停。
+  # 注意这是「扩展 → 服务端」这一跳；服务端审核员的失败策略是独立的
+  # CAIRN_REVIEWER_FAIL_ACTION（默认 ask，转人工）。
+  # 审核员（规则未命中时的 LLM 裁判）的全部配置都走服务端环境变量，
+  # 不写在这里——本文件会被挂载进 nginx。变量清单与示例见
+  # docs/specs/dispatcher-design.md「命令审核」与 README 的 .env 段落。
+  fail_action: "allow"
 
 container:
   # Base worker container. The dispatcher execs agent commands inside one container per project.
-  image: "ghcr.io/oritera/cairn-worker-container:latest"
+  # Built with `make worker` (docker build ./container); independent of the app image.
+  image: "cairn-worker-container:latest"
   network_mode: "host"
   # "stop" keeps finished containers for inspection; "remove" is cleaner but loses post-run state.
   completed_action: "stop"
@@ -50,39 +95,35 @@ container:
   # cap_add:
   #   - "NET_RAW"
   #   - "NET_ADMIN"
+  # Per-worker resource limits (None = Docker default, unlimited). Bounds one
+  # worker container so a runaway task cannot exhaust the host.
+  # mem_limit: "512m"
+  # nano_cpus: 1000000000   # 1 CPU = 1_000_000_000
+  # pids_limit: 256
 
 
 workers:
   # Worker priority is ascending: lower numbers are preferred first.
   # max_running is per-worker concurrency. Slower backends such as Pi usually benefit from lower values.
-  - name: "claudecode_deepseek-v4-pro"
-    type: "claudecode"
-    task_types: [bootstrap, reason, explore]
+  # Decide benefits from a strong reasoning model; Execute benefits from a model that is good with tools.
+  - name: "pi_deepseek-v4-pro"
+    type: "pi"
+    task_types: [decide, execute]
     max_running: 2
     priority: 0
     env:
-      ANTHROPIC_MODEL: "deepseek-v4-pro"
-      ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
-      ANTHROPIC_AUTH_TOKEN: "sk-xxx"
+      PI_MODEL: "deepseek-v4-pro"
+      PI_BASE_URL: "https://api.deepseek.com/v1"
+      PI_API_KEY: "sk-xxx"
+      PI_PROVIDER_API: "openai-completions"
+      PI_MODEL_CONTEXT_WINDOW: "131072"
 
-  # - name: "codex_qwen3.6-plus"
-  #   type: "codex"
-  #   task_types: [bootstrap,reason,explore]
-  #   max_running: 2
-  #   priority: 0
-  #   env:
-  #     CODEX_MODEL: "qwen3.6-plus"
-  #     CODEX_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  #     OPENAI_API_KEY: "sk-xxx"
-
-  # - name: "pi_qwen3.6-plus"
-  #   type: "pi"
-  #   task_types: [bootstrap,reason,explore]
-  #   max_running: 2
-  #   priority: 0
-  #   env:
-  #     PI_MODEL: "qwen3.6-plus"
-  #     PI_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  #     PI_API_KEY: "sk-xxx"
-  #     PI_PROVIDER_API: "openai-completions"
-  #     PI_MODEL_CONTEXT_WINDOW: "262144"
+# Web UI authentication — the server enforces HTTP Basic Auth from this block; the
+# dispatcher only validates the schema. Without it the UI is unauthenticated, and a
+# non-loopback bind is refused unless the server is started with --allow-insecure.
+# web:
+#   auth:
+#     realm: "Cairn"
+#     users:
+#       - name: admin
+#         password: "<password>"

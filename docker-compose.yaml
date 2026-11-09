@@ -5,33 +5,92 @@ services:
       dockerfile: Dockerfile
     image: cairn-app
     container_name: cairn-server
+    # The server is the only entry point. It enforces web.auth itself, so there is no
+    # proxy sidecar between the browser and the app.
     ports:
       - "8000:8000"
+      # Worker containers run with host networking and reach the command guard over
+      # host loopback; binding 127.0.0.1 keeps that path off the LAN.
+      - "127.0.0.1:8001:8000"
+    environment:
+      # Command reviewer (LLM judge). It runs here, not in the worker: the worker is
+      # the untrusted side, and a reviewer inside it could be rewritten by the model
+      # it is supposed to police. Values come from `.env` so no key is committed and
+      # worker containers never see them.
+      CAIRN_REVIEWER_ENABLED: "${CAIRN_REVIEWER_ENABLED:-0}"
+      CAIRN_REVIEWER_MODEL: "${CAIRN_REVIEWER_MODEL:-}"
+      CAIRN_REVIEWER_BASE_URL: "${CAIRN_REVIEWER_BASE_URL:-}"
+      CAIRN_REVIEWER_API_KEY: "${CAIRN_REVIEWER_API_KEY:-}"
+      CAIRN_REVIEWER_API: "${CAIRN_REVIEWER_API:-openai-completions}"
+      CAIRN_REVIEWER_TIMEOUT_SECONDS: "${CAIRN_REVIEWER_TIMEOUT_SECONDS:-15}"
+      CAIRN_REVIEWER_RETRY_COUNT: "${CAIRN_REVIEWER_RETRY_COUNT:-2}"
+      CAIRN_REVIEWER_FAIL_ACTION: "${CAIRN_REVIEWER_FAIL_ACTION:-ask}"
+      CAIRN_REVIEWER_ASK_TIMEOUT_SECONDS: "${CAIRN_REVIEWER_ASK_TIMEOUT_SECONDS:-300}"
+      CAIRN_REVIEWER_ASK_TIMEOUT_ACTION: "${CAIRN_REVIEWER_ASK_TIMEOUT_ACTION:-deny}"
+      CAIRN_REVIEWER_INCOMPLETE_SCRIPT_ACTION: "${CAIRN_REVIEWER_INCOMPLETE_SCRIPT_ACTION:-model}"
+      CAIRN_REVIEWER_CACHE_TTL_SECONDS: "${CAIRN_REVIEWER_CACHE_TTL_SECONDS:-86400}"
+      # Channel separation. Empty means "not enforced":
+      # - web.auth in dispatch.yaml enables Basic Auth for the UI
+      # - CAIRN_WORKER_TOKEN gates /internal/* (the guard extension's channel)
+      CAIRN_WEB_CONFIG: /cairn/dispatch.yaml
+      CAIRN_WORKER_TOKEN: "${CAIRN_WORKER_TOKEN:-}"
     volumes:
       - ./datas/cairn/:/root/.local/share/cairn/
+      # Read-only: the server parses web.auth from it and enforces Basic Auth itself.
+      - ./dispatch.yaml:/cairn/dispatch.yaml:ro
     healthcheck:
       test:
         - "CMD"
-        - "python"
+        - "python3"
         - "-c"
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/projects', timeout=5)"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 3s
     restart: unless-stopped
-    command: ["uv", "run", "cairn", "serve", "--host", "0.0.0.0", "--no-access-log"]
+    command: ["cairn", "serve", "--host", "0.0.0.0", "--no-access-log"]
+  cairn-socket-proxy:
+    image: ghcr.io/tecnativa/docker-socket-proxy:latest
+    container_name: cairn-socket-proxy
+    environment:
+      # 只开放 dispatcher 需要的接口（容器 + exec 的读写）；build/images/volumes/
+      # networks/system/auth 等危险接口一律关闭，缩小 worker 逃逸后的攻击面。
+      CONTAINERS: 1
+      EXEC: 1
+      POST: 1
+      PUT: 1
+      DELETE: 1
+      IMAGES: 0
+      BUILD: 0
+      NETWORKS: 0
+      VOLUMES: 0
+      SYSTEM: 0
+      AUTH: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    expose:
+      - "2375"
+    restart: unless-stopped
   cairn-dispatcher:
     build:
       context: .
       dockerfile: Dockerfile
     image: cairn-app
     container_name: cairn-dispatcher
+    environment:
+      # 通过受限 socket 代理操作 Docker，不再直挂宿主 /var/run/docker.sock。
+      DOCKER_HOST: tcp://cairn-socket-proxy:2375
+      # Written into each task's cairn-guard.json so the extension can authenticate to
+      # /internal/*. Deliberately not in dispatch.yaml: the server reads that file, and
+      # the worker must not receive the UI's credentials.
+      CAIRN_WORKER_TOKEN: "${CAIRN_WORKER_TOKEN:-}"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ./dispatch.yaml:/cairn/dispatch.yaml
     depends_on:
+      cairn-socket-proxy:
+        condition: service_started
       cairn-server:
         condition: service_healthy
     restart: unless-stopped
-    command: ["uv", "run", "cairn", "dispatch", "--config", "dispatch.yaml"]
+    command: ["cairn", "dispatch", "--config", "dispatch.yaml"]

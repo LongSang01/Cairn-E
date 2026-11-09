@@ -1,0 +1,15 @@
+{
+  "name": "cairn-web-tests",
+  "private": true,
+  "type": "module",
+  "description": "Vitest suite for the Cairn web UI's pure modules (server/static/js).",
+  "scripts": {
+    "test": "vitest run",
+    "format": "prettier --write 'cairn/src/cairn/server/static/js/**/*.js' 'web-tests/**/*.js'",
+    "format:check": "prettier --check 'cairn/src/cairn/server/static/js/**/*.js' 'web-tests/**/*.js'"
+  },
+  "devDependencies": {
+    "prettier": "^3.9.10",
+    "vitest": "^3.2.4"
+  }
+}

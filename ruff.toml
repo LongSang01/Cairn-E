@@ -1,0 +1,4 @@
+# The Python project keeps its lint rules in cairn/pyproject.toml. This root
+# entry point makes `ruff check .` from the repository root use the same rules
+# instead of silently falling back to Ruff's defaults.
+extend = "cairn/pyproject.toml"

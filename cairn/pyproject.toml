@@ -1,6 +1,6 @@
 [project]
 name = "cairn"
-version = "0.2.1"
+version = "0.3.0"
 description = "Fact-graph based collaborative exploration protocol"
 authors = [
     { name = "leixiao", email = "1729888211@qq.com" }
@@ -8,12 +8,18 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
-    "uvicorn[standard]>=0.34",
+    # Plain uvicorn: no websockets/watchfiles/uvloop are used, and SSE is plain HTTP.
+    "uvicorn>=0.34",
     "click>=8.1",
     "pyyaml>=6.0",
-    "docker>=7.1.0",
     "requests>=2.32.3",
+    "pydantic>=2.12.5",
+    "starlette>=1.0.0",
 ]
+
+[project.optional-dependencies]
+# Only the container execution mode talks to Docker; `execution: local` installs nothing.
+container = ["docker>=7.1.0"]
 
 [project.scripts]
 cairn = "cairn.cli:main"
@@ -25,11 +31,52 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "httpx>=0.27",
+    "mypy>=2.4.1",
     "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.17",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Run from a checkout without installing: `python -m pytest` finds the package.
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# Keep the rule set explicit so a ruff upgrade cannot silently change what "clean" means.
+select = ["E4", "E7", "E9", "F", "I", "B", "BLE", "SIM", "UP", "RUF"]
+# Model output and config values share one rejection type (ValueError); TRY004's
+# TypeError split would only force every caller to catch both. Chinese punctuation in
+# user-facing summaries is intentional, so RUF001's ASCII homoglyph warning is off.
+ignore = ["TRY004", "RUF001"]
+
+[tool.coverage.run]
+source = ["src/cairn"]
+# Branch coverage would flag every defensive `except` guard as a half-covered branch;
+# line coverage plus the per-file gaps in `--cov-report=term-missing` is what we act on.
+branch = false
+
+[tool.coverage.report]
+# The mixin base class declares the shared interface; its stubs only exist for typing.
+exclude_also = [
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+skip_covered = true
+show_missing = true
+# Floor, not a target: the suite sits in the high 80s, so this only catches a real drop.
+fail_under = 80
+
+[tool.mypy]
+python_version = "3.12"
+follow_imports = "skip"
+ignore_missing_imports = true
+check_untyped_defs = true
 
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
 import json
+from decimal import Decimal, InvalidOperation
 from importlib import resources
 from pathlib import Path
 from typing import Any, Literal
@@ -9,25 +9,19 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+# The web-auth schema is shared with the server, which enforces it; the dispatcher also
+# reads it to authenticate its own calls to the server's UI endpoints (it talks to the
+# same routes as a browser), and validates it so a malformed file fails at boot.
+from cairn.contracts.web import WebConfig
 
-TaskType = Literal["reason", "explore", "bootstrap"]
-WorkerType = Literal["claudecode", "codex", "pi", "mock"]
+TaskType = Literal["decide", "execute"]
+WorkerType = Literal["pi", "mock"]
 CompletedAction = Literal["remove", "stop"]
 WorkerHealthcheckMode = Literal["startup_and_task", "startup_only", "disabled"]
 ExecutionMode = Literal["container", "local"]
 LocalCompletedAction = Literal["keep", "remove"]
 
 WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
-    "claudecode": (
-        "ANTHROPIC_MODEL",
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_AUTH_TOKEN",
-    ),
-    "codex": (
-        "CODEX_MODEL",
-        "CODEX_BASE_URL",
-        "OPENAI_API_KEY",
-    ),
     "pi": (
         "PI_MODEL",
         "PI_BASE_URL",
@@ -38,30 +32,46 @@ WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
 }
 
 DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
-    "reason.md": ("{graph_yaml}", "{fact_ids}", "{open_intents}", "{max_intents}"),
-    "explore.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
-    "explore_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
-    "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
-    "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
+    "decide.md": (
+        "{graph_yaml}",
+        "{fact_ids}",
+        "{open_steps}",
+        "{max_steps}",
+        "{constraints}",
+        "{steers}",
+        "{scope}",
+    ),
+    "execute.md": (
+        "{graph_yaml}",
+        "{step_id}",
+        "{step_description}",
+        "{constraints}",
+        "{steers}",
+        "{scope}",
+        "{opsec}",
+    ),
+    "execute_conclude.md": ("{graph_yaml}", "{step_id}", "{step_description}"),
 }
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
     "mock": {
-        "reason.md": ("{fact_ids}", "{open_intents}", "{max_intents}"),
-        "explore.md": ("{intent_id}",),
-        "explore_conclude.md": ("{intent_id}",),
-        "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
-        "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
+        "decide.md": ("{fact_ids}", "{open_steps}", "{max_steps}"),
+        "execute.md": ("{step_id}",),
+        "execute_conclude.md": ("{step_id}",),
     }
 }
 
 MOCK_ALLOWED_OUTCOMES: dict[str, frozenset[str]] = {
     "healthcheck": frozenset({"ok", "fail"}),
-    "reason": frozenset({"complete", "intent", "noop", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "explore_execute": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "explore_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "bootstrap": frozenset({"complete", "fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "bootstrap_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "decide": frozenset(
+        {"complete", "steps", "noop", "rejected", "invalid_json", "invalid_payload", "command_fail"}
+    ),
+    "execute": frozenset({"facts", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "execute_conclude": frozenset(
+        {"facts", "rejected", "invalid_json", "invalid_payload", "command_fail"}
+    ),
+    "question": frozenset({"answer", "invalid_json", "command_fail"}),
+    "summary": frozenset({"answer", "invalid_json", "command_fail"}),
 }
 
 MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
@@ -69,11 +79,11 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
         "delay": [0.05, 0.15],
         "outcomes": {"ok": "1.0", "fail": "0.0"},
     },
-    "reason": {
+    "decide": {
         "delay": [0.05, 0.3],
         "outcomes": {
             "complete": "0.0",
-            "intent": "1.0",
+            "steps": "1.0",
             "noop": "0.0",
             "rejected": "0.0",
             "invalid_json": "0.0",
@@ -81,96 +91,140 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
             "command_fail": "0.0",
         },
     },
-    "explore_execute": {
+    "execute": {
         "delay": [0.05, 0.3],
         "outcomes": {
-            "fact": "1.0",
+            "facts": "1.0",
             "rejected": "0.0",
             "invalid_json": "0.0",
             "invalid_payload": "0.0",
             "command_fail": "0.0",
         },
     },
-    "explore_conclude": {
+    "execute_conclude": {
         "delay": [0.05, 0.3],
         "outcomes": {
-            "fact": "1.0",
+            "facts": "1.0",
             "rejected": "0.0",
             "invalid_json": "0.0",
             "invalid_payload": "0.0",
             "command_fail": "0.0",
         },
     },
-    "bootstrap": {
-        "delay": [0.05, 0.3],
-        "outcomes": {
-            "complete": "1.0",
-            "fact": "0.0",
-            "rejected": "0.0",
-            "invalid_json": "0.0",
-            "invalid_payload": "0.0",
-            "command_fail": "0.0",
-        },
+    "question": {
+        "delay": [0.05, 0.2],
+        "outcomes": {"answer": "1.0", "invalid_json": "0.0", "command_fail": "0.0"},
     },
-    "bootstrap_conclude": {
-        "delay": [0.05, 0.3],
-        "outcomes": {
-            "fact": "1.0",
-            "rejected": "0.0",
-            "invalid_json": "0.0",
-            "invalid_payload": "0.0",
-            "command_fail": "0.0",
-        },
+    "summary": {
+        "delay": [0.05, 0.2],
+        "outcomes": {"answer": "1.0", "invalid_json": "0.0", "command_fail": "0.0"},
     },
 }
 
-MOCK_ALLOWED_ENV_KEYS = frozenset(
-    {f"MOCK_{phase.upper()}" for phase in MOCK_ALLOWED_OUTCOMES}
-)
+MOCK_ALLOWED_ENV_KEYS = frozenset({f"MOCK_{phase.upper()}" for phase in MOCK_ALLOWED_OUTCOMES})
 
 
-class ReasonTaskConfig(BaseModel):
+class DecideTaskConfig(BaseModel):
+    """Decide inspects the FGS graph and evolves it. It has no world tools."""
+
     timeout: int = Field(gt=0)
-    max_intents: int = Field(gt=0, default=3)
+    max_steps: int = Field(gt=0, default=3)
 
 
-class ExploreTaskConfig(BaseModel):
-    timeout: int = Field(gt=0)
-    conclude_timeout: int = Field(gt=0)
+class ExecuteTaskConfig(BaseModel):
+    """Execute claims one step, acts on the world and submits facts/findings."""
 
-
-class BootstrapTaskConfig(BaseModel):
     timeout: int = Field(gt=0)
     conclude_timeout: int = Field(gt=0)
+    # Seconds reserved out of `timeout` for the settlement round. The main run is
+    # cut short by this much so a conclude pass still fits in the same budget: a run
+    # that hits the wall with nothing written is worth less than a shorter run that
+    # writes back what it found.
+    settlement_margin: int = Field(ge=0, default=90)
+
+
+class QuestionTaskConfig(BaseModel):
+    """Side question: one read-only answer, never written back into the graph."""
+
+    timeout: int = Field(gt=0, default=120)
 
 
 class TasksConfig(BaseModel):
-    bootstrap: BootstrapTaskConfig
-    reason: ReasonTaskConfig
-    explore: ExploreTaskConfig
+    model_config = ConfigDict(extra="forbid")
+
+    decide: DecideTaskConfig
+    execute: ExecuteTaskConfig
+    question: QuestionTaskConfig = Field(default_factory=QuestionTaskConfig)
+
+
+class ContextBudgetConfig(BaseModel):
+    """Prompt budget for the graph snapshot (see cairn.dispatcher.context).
+
+    `context_window` is the fallback window; a worker can override it through the
+    `CONTEXT_WINDOW` (or pi's `PI_MODEL_CONTEXT_WINDOW`) env var.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    context_window: int = Field(gt=0, default=200_000)
+    max_output_tokens: int = Field(gt=0, default=16_000)
+    safety_ratio: float = Field(gt=0, le=0.5, default=0.05)
+    safety_min_tokens: int = Field(ge=0, default=2_000)
+    safety_max_tokens: int = Field(gt=0, default=18_000)
+    recent_items: int = Field(gt=0, default=20)
+    summary_max_calls: int = Field(ge=0, default=1)
+    summary_timeout: int = Field(gt=0, default=90)
+    min_snapshot_tokens: int = Field(gt=0, default=2_000)
+
+    @model_validator(mode="after")
+    def validate_safety_margin(self) -> ContextBudgetConfig:
+        if self.safety_min_tokens > self.safety_max_tokens:
+            raise ValueError("safety_min_tokens cannot exceed safety_max_tokens")
+        return self
 
 
 class ContainerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     image: str
     network_mode: str
     completed_action: CompletedAction
     cap_add: list[str] = Field(default_factory=list)
+    # Per-worker resource limits; None = Docker default (unlimited). Bounds one
+    # worker container so a runaway task cannot exhaust the host.
+    mem_limit: str | None = None
+    nano_cpus: int | None = None
+    pids_limit: int | None = None
 
 
 class LocalConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     workspace_root: str | None = None
     completed_action: LocalCompletedAction = "keep"
 
 
 class RuntimeConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     max_workers: int = Field(gt=0)
     max_running_projects: int = Field(gt=0)
     max_project_workers: int = Field(gt=0)
+    # Concurrent Execute runs per project. 1 keeps the historical serial behaviour;
+    # raise it only when the steps touch different assets, because the graph cannot
+    # express "these two steps would fight over the same login endpoint".
+    max_running_steps: int = Field(ge=1, default=1)
     interval: int = Field(gt=0)
     healthcheck_timeout: int = Field(gt=0)
     worker_healthcheck: WorkerHealthcheckMode = "startup_only"
     execution: ExecutionMode = "container"
     prompt_group: str = Field(min_length=1)
+    # Side questions run outside the decide/execute slots but still need a cap.
+    max_questions: int = Field(gt=0, default=1)
+    # Summaries run in the background, after the Decide that asked for them has finished.
+    max_summaries: int = Field(gt=0, default=1)
+    context_budget: ContextBudgetConfig = Field(default_factory=ContextBudgetConfig)
 
 
 class WorkerConfig(BaseModel):
@@ -193,7 +247,7 @@ class WorkerConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def validate_env(self) -> "WorkerConfig":
+    def validate_env(self) -> WorkerConfig:
         # Required LLM env keys (base_url / key / model) are enforced per execution mode by
         # DispatchConfig: container mode needs them, local mode reuses the host CLI config.
         # The checks below are mode-independent and always apply.
@@ -204,6 +258,22 @@ class WorkerConfig(BaseModel):
         return self
 
 
+class ToolGuardConfig(BaseModel):
+    """Command-level interception, enforced inside the worker by a pi extension.
+
+    The extension asks the server before every `bash` call; the server owns the
+    rules, the human approval queue and the audit log. `api_url` must be reachable
+    from the worker container (they run with `network_mode: host`, so the server's
+    internal port has to be published on loopback).
+    """
+
+    enabled: bool = False
+    api_url: str = "http://127.0.0.1:8001"
+    # What the extension does when the server is unreachable: blocking on a broken
+    # link would freeze the run, so the default is to let it through.
+    fail_action: Literal["allow", "deny"] = "allow"
+
+
 class DispatchConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -212,8 +282,10 @@ class DispatchConfig(BaseModel):
     tasks: TasksConfig
     container: ContainerConfig | None = None
     local: LocalConfig | None = None
+    tool_guard: ToolGuardConfig = Field(default_factory=ToolGuardConfig)
     common_env: dict[str, str] = Field(default_factory=dict)
     workers: list[WorkerConfig]
+    web: WebConfig | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -246,7 +318,7 @@ class DispatchConfig(BaseModel):
         return merged
 
     @model_validator(mode="after")
-    def validate_workers(self) -> "DispatchConfig":
+    def validate_workers(self) -> DispatchConfig:
         names = [worker.name for worker in self.workers]
         if len(set(names)) != len(names):
             raise ValueError("worker names must be unique")
@@ -257,7 +329,7 @@ class DispatchConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_execution_mode(self) -> "DispatchConfig":
+    def validate_execution_mode(self) -> DispatchConfig:
         if self.runtime.execution == "container":
             if self.container is None:
                 raise ValueError("container config is required when runtime.execution is container")
@@ -272,7 +344,7 @@ class DispatchConfig(BaseModel):
         return self
 
     @classmethod
-    def load(cls, path: Path) -> "DispatchConfig":
+    def load(cls, path: Path) -> DispatchConfig:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         config = cls.model_validate(data)
         validate_prompt_resources(config.runtime.prompt_group)
@@ -296,7 +368,9 @@ def validate_prompt_resources(prompt_group: str) -> None:
     group_dir = prompts_dir.joinpath(prompt_group)
     if not group_dir.is_dir():
         raise ValueError(f"missing prompt group: {prompt_group}")
-    required_tokens = PROMPT_REQUIRED_TOKENS_BY_GROUP.get(prompt_group, DEFAULT_PROMPT_REQUIRED_TOKENS)
+    required_tokens = PROMPT_REQUIRED_TOKENS_BY_GROUP.get(
+        prompt_group, DEFAULT_PROMPT_REQUIRED_TOKENS
+    )
     for name, tokens in required_tokens.items():
         try:
             content = group_dir.joinpath(name).read_text(encoding="utf-8")
@@ -304,13 +378,19 @@ def validate_prompt_resources(prompt_group: str) -> None:
             raise ValueError(f"prompt group {prompt_group} missing resource: {name}") from exc
         missing = [token for token in tokens if token not in content]
         if missing:
-            raise ValueError(f"prompt group {prompt_group} resource {name} missing placeholders: {', '.join(missing)}")
+            raise ValueError(
+                f"prompt group {prompt_group} resource {name} missing placeholders: {', '.join(missing)}"
+            )
 
 
 def resolve_mock_behavior(worker_name: str, env: dict[str, str]) -> dict[str, dict[str, Any]]:
-    unknown = sorted(key for key in env if key.startswith("MOCK_") and key not in MOCK_ALLOWED_ENV_KEYS)
+    unknown = sorted(
+        key for key in env if key.startswith("MOCK_") and key not in MOCK_ALLOWED_ENV_KEYS
+    )
     if unknown:
-        raise ValueError(f"worker {worker_name} has unsupported mock env keys: {', '.join(unknown)}")
+        raise ValueError(
+            f"worker {worker_name} has unsupported mock env keys: {', '.join(unknown)}"
+        )
 
     behavior: dict[str, dict[str, Any]] = {}
     for phase, allowed_outcomes in MOCK_ALLOWED_OUTCOMES.items():
@@ -318,15 +398,19 @@ def resolve_mock_behavior(worker_name: str, env: dict[str, str]) -> dict[str, di
         payload = _parse_mock_phase_payload(worker_name, env, prefix, MOCK_DEFAULT_BEHAVIOR[phase])
         min_delay, max_delay = _parse_mock_delay_range(worker_name, prefix, payload.get("delay"))
         if max_delay < min_delay:
-            raise ValueError(f"worker {worker_name} {prefix}.delay[1] must be greater than or equal to delay[0]")
+            raise ValueError(
+                f"worker {worker_name} {prefix}.delay[1] must be greater than or equal to delay[0]"
+            )
         raw_outcomes = payload.get("outcomes")
         if not isinstance(raw_outcomes, dict):
             raise ValueError(f"worker {worker_name} {prefix}.outcomes must be an object")
         unknown_outcomes = sorted(set(raw_outcomes) - allowed_outcomes)
         if unknown_outcomes:
-            raise ValueError(f"worker {worker_name} {prefix}.outcomes has unsupported keys: {', '.join(unknown_outcomes)}")
+            raise ValueError(
+                f"worker {worker_name} {prefix}.outcomes has unsupported keys: {', '.join(unknown_outcomes)}"
+            )
         outcomes: dict[str, float] = {}
-        total = Decimal("0")
+        total = Decimal(0)
         for outcome in sorted(allowed_outcomes):
             weight = _parse_mock_probability(
                 worker_name,
@@ -336,8 +420,10 @@ def resolve_mock_behavior(worker_name: str, env: dict[str, str]) -> dict[str, di
             )
             outcomes[outcome] = float(weight)
             total += weight
-        if total != Decimal("1"):
-            raise ValueError(f"worker {worker_name} {prefix}.outcomes probabilities must sum to 1.0, got {total}")
+        if total != Decimal(1):
+            raise ValueError(
+                f"worker {worker_name} {prefix}.outcomes probabilities must sum to 1.0, got {total}"
+            )
         behavior[phase] = {
             "delay": {"min": min_delay, "max": max_delay},
             "outcomes": outcomes,
@@ -349,7 +435,9 @@ def resolve_mock_behavior(worker_name: str, env: dict[str, str]) -> dict[str, di
             normalized_rules: list[dict[str, Any]] = []
             for index, rule in enumerate(rules):
                 if not isinstance(rule, dict):
-                    raise ValueError(f"worker {worker_name} {prefix}.rules[{index}] must be an object")
+                    raise ValueError(
+                        f"worker {worker_name} {prefix}.rules[{index}] must be an object"
+                    )
                 force = rule.get("force")
                 if not isinstance(force, str) or force not in allowed_outcomes:
                     raise ValueError(
@@ -359,18 +447,24 @@ def resolve_mock_behavior(worker_name: str, env: dict[str, str]) -> dict[str, di
                 if "fact_ids_gte" in rule:
                     value = rule["fact_ids_gte"]
                     if not isinstance(value, int) or value < 0:
-                        raise ValueError(f"worker {worker_name} {prefix}.rules[{index}].fact_ids_gte must be a non-negative integer")
+                        raise ValueError(
+                            f"worker {worker_name} {prefix}.rules[{index}].fact_ids_gte must be a non-negative integer"
+                        )
                     entry["fact_ids_gte"] = value
                 if "fact_ids_lte" in rule:
                     value = rule["fact_ids_lte"]
                     if not isinstance(value, int) or value < 0:
-                        raise ValueError(f"worker {worker_name} {prefix}.rules[{index}].fact_ids_lte must be a non-negative integer")
+                        raise ValueError(
+                            f"worker {worker_name} {prefix}.rules[{index}].fact_ids_lte must be a non-negative integer"
+                        )
                     entry["fact_ids_lte"] = value
-                if "open_intents_empty" in rule:
-                    value = rule["open_intents_empty"]
+                if "open_steps_empty" in rule:
+                    value = rule["open_steps_empty"]
                     if not isinstance(value, bool):
-                        raise ValueError(f"worker {worker_name} {prefix}.rules[{index}].open_intents_empty must be boolean")
-                    entry["open_intents_empty"] = value
+                        raise ValueError(
+                            f"worker {worker_name} {prefix}.rules[{index}].open_steps_empty must be boolean"
+                        )
+                    entry["open_steps_empty"] = value
                 normalized_rules.append(entry)
             behavior[phase]["rules"] = normalized_rules
     return behavior
@@ -380,7 +474,9 @@ def _mock_env_prefix(phase: str) -> str:
     return f"MOCK_{phase.upper()}"
 
 
-def _parse_mock_phase_payload(worker_name: str, env: dict[str, str], key: str, default: dict[str, Any]) -> dict[str, Any]:
+def _parse_mock_phase_payload(
+    worker_name: str, env: dict[str, str], key: str, default: dict[str, Any]
+) -> dict[str, Any]:
     raw = env.get(key)
     if raw is None:
         return json.loads(json.dumps(default))
@@ -413,12 +509,20 @@ def _coerce_mock_seconds(worker_name: str, key: str, value: Any) -> float:
     return parsed
 
 
-def _parse_mock_probability(worker_name: str, phase_key: str, outcomes: dict[str, Any], outcome: str) -> Decimal:
-    raw = outcomes.get(outcome, MOCK_DEFAULT_BEHAVIOR[phase_key.removeprefix("MOCK_").lower()]["outcomes"][outcome])
+def _parse_mock_probability(
+    worker_name: str, phase_key: str, outcomes: dict[str, Any], outcome: str
+) -> Decimal:
+    raw = outcomes.get(
+        outcome, MOCK_DEFAULT_BEHAVIOR[phase_key.removeprefix("MOCK_").lower()]["outcomes"][outcome]
+    )
     try:
         value = Decimal(str(raw))
     except InvalidOperation as exc:
-        raise ValueError(f"worker {worker_name} {phase_key}.outcomes.{outcome} must be a decimal probability") from exc
+        raise ValueError(
+            f"worker {worker_name} {phase_key}.outcomes.{outcome} must be a decimal probability"
+        ) from exc
     if value < 0 or value > 1:
-        raise ValueError(f"worker {worker_name} {phase_key}.outcomes.{outcome} must be between 0 and 1")
+        raise ValueError(
+            f"worker {worker_name} {phase_key}.outcomes.{outcome} must be between 0 and 1"
+        )
     return value

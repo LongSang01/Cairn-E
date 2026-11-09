@@ -4,3 +4,13 @@ __pycache__/
 .playwright-cli/
 datas/
 dispatch.yaml
+node_modules/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
