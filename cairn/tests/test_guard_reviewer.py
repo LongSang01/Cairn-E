@@ -105,6 +105,26 @@ def test_an_allow_is_cached_and_replayed_without_a_second_model_call(client, mon
     assert _audit_rows(project_id)[-1]["decision_source"] == "cache"
 
 
+def test_editing_a_referenced_script_invalidates_the_cache(client, monkeypatch) -> None:
+    """`bash ./poc.sh` must be re-judged after the script's contents change."""
+    _enable(monkeypatch)
+    calls: list[list[dict]] = []
+
+    def fake(config, messages):
+        calls.append(messages)
+        return _reply("allow", rule="A2", operation="运行测试脚本")
+
+    monkeypatch.setattr(reviewer_service, "_call_model", fake)
+    project_id = _project(client)
+
+    script = {"path": "poc.sh", "source": "file", "content": "curl http://10.0.0.5/x"}
+    _check(client, project_id, "bash ./poc.sh", script_files=[script])
+    script["content"] = "curl http://10.0.0.5/x && rm -rf /var/www/html"
+    _check(client, project_id, "bash ./poc.sh", script_files=[script])
+
+    assert len(calls) == 2
+
+
 def test_an_expired_verdict_is_not_reused(client, monkeypatch) -> None:
     _enable(monkeypatch)
     calls: list[int] = []
@@ -430,6 +450,9 @@ def test_arguments_default_to_the_command_when_the_extension_omits_them() -> Non
         '{"decision": "allow", "comment": "实际操作：；成功后的后果：b；命中规则：A1"}',
         '{"decision": "allow", "comment": "实际操作：a；成功后的后果：b；命中规则：A1", "extra": "x"}',
         '{"decision": "allow", "comment": "实际操作：a；成功后的后果：b；命中规则：A1"',
+        # Duplicate keys: a parser keeps the last one, so a deny could become an allow.
+        '{"decision": "deny", "comment": "实际操作：a；成功后的后果：b；命中规则：D4",'
+        ' "decision": "allow"}',
     ],
 )
 def test_parse_verdict_rejects_anything_off_contract(text: str) -> None:
@@ -444,6 +467,43 @@ def test_parse_verdict_accepts_a_fenced_reply() -> None:
     assert verdict is not None
     assert verdict.action == "allow"
     assert verdict.rule == "A5"
+
+
+def test_parse_verdict_rejects_an_overlong_comment() -> None:
+    comment = "实际操作：" + "删" * 2400 + "；成功后的后果：b；命中规则：D4"
+
+    text = json.dumps({"decision": "deny", "comment": comment}, ensure_ascii=False)
+
+    assert reviewer_service.parse_verdict(text) is None
+
+
+def test_default_policy_carries_the_ported_artex_clauses() -> None:
+    """Task contract: D1-D6 / A1-A6 / ASK, plus the two application sections."""
+    prompt = reviewer_service.effective_policy(reviewer_service.ReviewerConfig())
+
+    clauses = [f"D{i}" for i in range(1, 7)] + [f"A{i}" for i in range(1, 7)]
+    for clause in clauses:
+        assert clause in prompt
+    assert "ASK" in prompt
+    assert reviewer_service.INPUT_BOUNDARY.strip() in prompt
+    assert reviewer_service.OUTPUT_CONTRACT.strip() in prompt
+    assert prompt.index(reviewer_service.INPUT_BOUNDARY.strip()) < prompt.index(
+        reviewer_service.OUTPUT_CONTRACT.strip()
+    )
+
+
+def test_an_embedded_boundary_is_not_appended_twice() -> None:
+    """A custom policy file may already carry the boundary; keep a single copy."""
+    custom = "自定义策略。\n\n" + reviewer_service.INPUT_BOUNDARY.strip()
+    config = reviewer_service.ReviewerConfig(
+        enabled=True, model="m", base_url="http://reviewer.local/v1", policy=custom
+    )
+
+    prompt = reviewer_service.effective_policy(config)
+
+    assert prompt.count(reviewer_service.INPUT_BOUNDARY.strip()) == 1
+    assert prompt.startswith("自定义策略。")
+    assert reviewer_service.OUTPUT_CONTRACT.strip() in prompt
 
 
 def test_missing_configuration_disables_the_reviewer(monkeypatch) -> None:

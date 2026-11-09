@@ -3,6 +3,7 @@
 Grouped by concern; every public name is re-exported for a single import site.
 """
 
+from . import terminal
 from .leases import (
     best_effort_release,
     best_effort_release_decide,
@@ -52,6 +53,7 @@ __all__ = [
     "run_worker_process",
     "step_session_summary",
     "task_healthcheck_enabled",
+    "terminal",
     "write_graph_snapshot_reference",
     "write_step_result",
 ]

@@ -609,6 +609,38 @@ def test_execute_timeout_without_session_releases_claim(monkeypatch) -> None:
     assert f"of {config.tasks.execute.timeout}s" in reasons[0]
 
 
+def test_execute_reports_a_provider_refusal_as_a_worker_fault(monkeypatch) -> None:
+    """A dead key or empty balance is the worker's problem, not the step's."""
+    config = make_config()
+    step = make_step(status="running", worker="test-worker")
+    project = make_project(steps=[step])
+    client = FakeClient(project)
+
+    monkeypatch.setattr(execute, "get_driver", lambda *_a, **_k: FakeDriver())
+    monkeypatch.setattr(execute.HeartbeatLease, "for_step", _lease_factory(FakeLease()))
+    monkeypatch.setattr(
+        execute,
+        "_run_process",
+        lambda *_args, **_kwargs: ProcessResult(1, "", "Error: insufficient_quota"),
+    )
+
+    reasons: list[str] = []
+    outcome = execute.run_execute_task(
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        step,
+        config.workers[0],
+        TaskCancellation(),
+        on_failure=reasons.append,
+    )
+
+    assert outcome == "failed"
+    assert reasons == ["quota: worker exited with code 1"]
+
+
 def test_decide_startup_only_mode_skips_task_healthcheck(monkeypatch) -> None:
     config = make_config()
     config.runtime.worker_healthcheck = "startup_only"

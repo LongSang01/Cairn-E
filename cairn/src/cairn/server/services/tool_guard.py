@@ -144,14 +144,17 @@ def _review(
     """Ask the reviewer about a command no rule covered; ``None`` keeps the default.
 
     The cache is consulted before the model so a repeated reconnaissance command
-    costs nothing. Only allow/deny are cached — an ``ask`` is a human decision and
-    replaying it would let a stale verdict bypass the queue.
+    costs nothing. Its key includes the script snapshots, because ``bash ./x.sh``
+    means something different once the file is edited. Only allow/deny are cached —
+    an ``ask`` is a human decision and replaying it would let a stale verdict bypass
+    the queue.
     """
     config = reviewer.config_from_env()
     if not config.ready():
         return None
     constraints = _load_constraints(conn, project_id)
-    cache_key = reviewer.command_hash(command, arguments)
+    review_scripts = _review_scripts(scripts)
+    cache_key = reviewer.command_hash(command, arguments, review_scripts)
     scope_values = [str(item.get("value", "")) for item in scope]
     scope_key = reviewer.scope_digest(scope_values, constraints)
     cached = reviewer.cached_verdict(
@@ -164,7 +167,7 @@ def _review(
         command=command,
         arguments=arguments,
         working_directory=working_directory,
-        scripts=_review_scripts(scripts),
+        scripts=review_scripts,
         scope=scope_values,
         constraints=constraints,
     )

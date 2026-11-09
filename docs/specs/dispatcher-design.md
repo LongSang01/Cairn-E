@@ -185,7 +185,7 @@ workers:
 | 人工审批超时 | `timeout_action`（默认 deny） |
 | 审核员未配置 | 回到默认 `allow`，与无守卫部署一致 |
 
-缓存：`allow`/`deny` 写入 `tool_review_cache`，键为「规范化命令 + 项目 + scope/constraints 摘要」。
+缓存：`allow`/`deny` 写入 `tool_review_cache`，键为「规范化命令 + 项目 + scope/constraints 摘要 + 脚本快照摘要」。
 改动 `scope` 或 `constraints` 会换 key，旧裁决自然失效；`ask` 永不缓存（人工裁决不能被回放）。
 
 拒绝话术统一以「【Cairn 平台管控·非目标防御】」开头：渗透 agent 把平台拦截误读成目标 WAF 时会
@@ -203,7 +203,7 @@ workers:
 | `CAIRN_REVIEWER_ASK_TIMEOUT_SECONDS` / `_ASK_TIMEOUT_ACTION` | `300` / `deny` | 人工队列超时 |
 | `CAIRN_REVIEWER_INCOMPLETE_SCRIPT_ACTION` | `model` | 证据不完整时 `model` 或 `ask` |
 | `CAIRN_REVIEWER_CACHE_TTL_SECONDS` | `86400` | 裁决缓存有效期 |
-| `CAIRN_REVIEWER_POLICY_FILE` | 空 | 覆盖内置策略文本（运维可调，不必重建镜像） |
+| `CAIRN_REVIEWER_POLICY_FILE` | 空 | 覆盖内置策略文本（运维可调，不必重建镜像）；输入边界与输出契约仍由程序追加，策略文件不能移除 |
 
 ### 通道隔离
 
@@ -360,6 +360,7 @@ checkpoint 在 Decide 成功后**重新读取图**再写入，这样"Decide 只�
 | 心跳冲突（租约被回收） | 立即结束，不写图 |
 | 写 conclude 时项目已非 active | 视为正常结束，只释放 Step |
 | 连续失败 | worker 进入 rejected 冷却（项目 + 任务类型维度，`REJECTED_RETRY_AFTER_SECONDS` = 5s） |
+| provider 拒绝（额度耗尽 / 凭证失效） | 失败原因带 `quota:` / `auth:` 前缀，按 worker 故障记 rejected 冷却，不计入 Step 的尝试次数 |
 | Decide 失败（解析失败 / 完成被拒 / 崩溃） | checkpoint 不推进，同一 trigger 会立刻再次触发；按项目冷却 `DECIDE_RETRY_AFTER_SECONDS`（10s）后再派发 |
 | 同一 trigger 连续失败达 `MAX_CONSECUTIVE_DECIDE_FAILURES`（5） | 不再派发该 trigger，直到图变化（trigger 字符串随之改变）；否则冷却只是把"无限重试"摊慢成每 10s 一次 |
 | Decide 成功但图没变（noop） | 记 success，不写图；下一轮由 open Step / facts 变化继续驱动 |

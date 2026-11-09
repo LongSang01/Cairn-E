@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 from cairn.contracts.models import ProjectSummary
 from cairn.dispatcher.models import RunningTask, StepFailure
+from cairn.dispatcher.tasks.common import terminal
 
 from ._base import LoopBase
 from ._common import (
@@ -43,6 +44,22 @@ class ReaperMixin(LoopBase):
                         outcome,
                     )
                 self._clear_project_log_state(task.project_id)
+                # A provider refusal (quota, dead credentials) is a worker fault, not
+                # the step's: Execute reports it as ``"quota: ..."``/``"auth: ..."`` so
+                # it is cooled down like a rejection instead of burning an attempt.
+                worker_fault = (
+                    task.task_type == "execute"
+                    and outcome == "failed"
+                    and terminal.is_worker_fault(task.failure_reason)
+                )
+                if worker_fault:
+                    LOG.warning(
+                        "worker fault attributed to the platform project=%s step=%s worker=%s reason=%s",
+                        task.project_id,
+                        task.step_id,
+                        task.worker_name,
+                        task.failure_reason,
+                    )
                 if outcome == "unhealthy":
                     retry_after_seconds = UNHEALTHY_RETRY_AFTER_SECONDS
                     self.worker_unhealthy_until[task.worker_name] = (
@@ -56,7 +73,7 @@ class ReaperMixin(LoopBase):
                 else:
                     self.worker_unhealthy_until.pop(task.worker_name, None)
                 rejection_key = (task.project_id, task.task_type, task.worker_name)
-                if outcome == "rejected":
+                if outcome == "rejected" or worker_fault:
                     retry_after_seconds = REJECTED_RETRY_AFTER_SECONDS
                     self.worker_rejected_until[rejection_key] = time.time() + retry_after_seconds
                     LOG.info(
@@ -68,7 +85,7 @@ class ReaperMixin(LoopBase):
                     )
                 else:
                     self.worker_rejected_until.pop(rejection_key, None)
-                if task.task_type == "execute":
+                if task.task_type == "execute" and not worker_fault:
                     self._record_step_outcome(
                         task.project_id, task.step_id, outcome, task.failure_reason
                     )
@@ -141,7 +158,7 @@ class ReaperMixin(LoopBase):
             return
         key = (project_id, step_id)
         if outcome == "success":
-            if reason and reason.startswith("noop"):
+            if reason and terminal.classify(reason) == terminal.NOOP:
                 # The step closed but produced nothing; keep it visible to Decide
                 # instead of clearing the counters as a real success would.
                 failure = self.step_failures.get(key) or StepFailure()
@@ -165,7 +182,7 @@ class ReaperMixin(LoopBase):
         failure = self.step_failures.get(key) or StepFailure()
         failure.count += 1
         failure.reason = reason or "execute failed"
-        if failure.reason.startswith("budget_exhausted"):
+        if terminal.classify(failure.reason) == terminal.BUDGET_EXHAUSTED:
             failure.budget_exhausted += 1
         else:
             failure.error += 1

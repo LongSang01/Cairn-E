@@ -26,6 +26,7 @@ from cairn.dispatcher.tasks.common import (
     run_worker_process,
     step_session_summary,
     task_healthcheck_enabled,
+    terminal,
     write_graph_snapshot_reference,
     write_step_result,
 )
@@ -114,7 +115,9 @@ def run_execute_task(
                     worker.name,
                     lease.failure.status_code,
                 )
-                report_failure(f"heartbeat lost during healthcheck: {lease.failure.status_code}")
+                report_failure(
+                    terminal.report(terminal.HEARTBEAT_LOST, f"status {lease.failure.status_code}")
+                )
                 best_effort_release(client, project_id, step.id, worker.name)
                 return "failed"
             if not health.ok:
@@ -227,7 +230,9 @@ def run_execute_task(
                 execute_ms,
             )
             record("failed", f"heartbeat lost: {lease.failure.status_code}")
-            report_failure(f"heartbeat lost: {lease.failure.status_code}")
+            report_failure(
+                terminal.report(terminal.HEARTBEAT_LOST, f"status {lease.failure.status_code}")
+            )
             best_effort_release(client, project_id, step.id, worker.name)
             return "failed"
 
@@ -249,7 +254,7 @@ def run_execute_task(
                     preview(first.stderr),
                 )
                 record("failed", f"parse failed: {exc}")
-                report_failure(f"parse failed: {exc}")
+                report_failure(terminal.report(terminal.PARSE_ERROR, str(exc)))
                 return _try_conclude_fallback(
                     config,
                     client,
@@ -287,7 +292,7 @@ def run_execute_task(
                     kind,
                 )
                 record("failed", f"no data for kind {kind}")
-                report_failure(f"no data for kind {kind}")
+                report_failure(terminal.report(terminal.PARSE_ERROR, f"no data for kind {kind}"))
                 best_effort_release(client, project_id, step.id, worker.name)
                 return "failed"
             status = write_step_result(
@@ -304,7 +309,9 @@ def run_execute_task(
             # scheduler keeps the count so the next Decide can change the plan.
             produced = bool(data.get("facts")) or bool(data.get("findings"))
             if status == "done" and not produced:
-                report_failure("noop: step closed without adding a fact or a finding")
+                report_failure(
+                    terminal.report(terminal.NOOP, "step closed without adding a fact or a finding")
+                )
             record("success")
             return status
 
@@ -322,7 +329,12 @@ def run_execute_task(
             record("failed", "timed out")
             # Distinct from a crash: the run used its whole budget, which Decide
             # should treat as "split the step", not "the worker is broken".
-            report_failure(f"budget_exhausted: no answer within {run_timeout}s of {budget}s")
+            report_failure(
+                terminal.report(
+                    terminal.BUDGET_EXHAUSTED,
+                    f"no answer within {run_timeout}s of {budget}s",
+                )
+            )
             return _try_conclude_fallback(
                 config,
                 client,
@@ -349,8 +361,16 @@ def run_execute_task(
             preview(first.stdout),
             preview(first.stderr),
         )
+        # A provider refusal (dead key, empty balance) is the worker's problem, not
+        # the step's: classify it so the scheduler cools that worker instead of
+        # charging the attempt to the step.
+        provider = terminal.provider_fault(f"{first.stdout}\n{first.stderr}")
         record("failed", f"exit code {first.returncode}")
-        report_failure(f"worker exited with code {first.returncode}")
+        report_failure(
+            terminal.report(
+                provider or terminal.CRASHED, f"worker exited with code {first.returncode}"
+            )
+        )
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
     except Exception as exc:
@@ -359,7 +379,7 @@ def run_execute_task(
         )
         if stream is not None:
             stream.finish(status="failed", error="task crashed")
-        report_failure(f"task crashed: {exc}")
+        report_failure(terminal.report(terminal.CRASHED, str(exc)))
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
     finally:

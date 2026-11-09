@@ -485,6 +485,17 @@ def test_failed_execute_accumulates_the_step_history() -> None:
     assert failure.at
 
 
+def test_a_provider_refusal_cools_the_worker_instead_of_the_step() -> None:
+    """Quota/auth failures belong to the platform: the step must not burn an attempt."""
+    loop = _loop()
+    loop.futures = {}
+
+    _reap_execute(loop, "failed", "quota: worker exited with code 1")
+
+    assert loop.step_failures == {}
+    assert ("proj_001", "execute", "test-worker") in loop.worker_rejected_until
+
+
 def test_failure_counters_split_budget_from_errors() -> None:
     """Decide must tell "ran out of time" from "the run broke"."""
     loop = _loop()
