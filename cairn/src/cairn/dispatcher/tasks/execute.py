@@ -24,6 +24,7 @@ from cairn.dispatcher.tasks.common import (
     project_allows_conclude_fallback,
     prompt_overhead_tokens,
     run_worker_process,
+    step_scope_yaml,
     step_session_summary,
     task_healthcheck_enabled,
     terminal,
@@ -265,7 +266,6 @@ def run_execute_task(
                     project_id,
                     project,
                     step,
-                    export_yaml,
                     session,
                     lease,
                     cancellation,
@@ -345,7 +345,6 @@ def run_execute_task(
                 project_id,
                 project,
                 step,
-                export_yaml,
                 session,
                 lease,
                 cancellation,
@@ -396,7 +395,6 @@ def _try_conclude_fallback(
     project_id: str,
     project: ProjectDetail,
     step: Step,
-    export_yaml: str,
     session: str | None,
     lease: HeartbeatLease,
     cancellation: TaskCancellation,
@@ -446,15 +444,11 @@ def _try_conclude_fallback(
         "step_description": step.description,
         **policy_blocks(project),
     }
-    graph_yaml = budgeted_graph_yaml(
-        export_yaml.strip(),
-        client=client,
-        project_id=project_id,
-        config=config,
-        worker=worker,
-        phase="execute_conclude",
-        overhead_tokens=prompt_overhead_tokens(template, blocks),
-    )
+    # Only this step and the facts it started from: the settlement round runs in the
+    # same worker session, so its own transcript already holds what it observed. The
+    # whole graph was pure overhead — it made conclude read for minutes and still
+    # write nothing back.
+    graph_yaml = step_scope_yaml(project, step)
     prompt = render_prompt(
         template,
         {

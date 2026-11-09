@@ -565,8 +565,14 @@ def test_one_step_is_dispatched_per_tick_by_default() -> None:
     assert len(dispatched) == 1
 
 
-def test_slots_fill_up_to_max_running_steps() -> None:
-    project = make_project(steps=[make_step("s001"), make_step("s002"), make_step("s003")])
+def test_slots_fill_up_to_max_running_steps_within_one_batch() -> None:
+    project = make_project(
+        steps=[
+            make_step("s001", batch="x001"),
+            make_step("s002", batch="x001"),
+            make_step("s003", batch="x001"),
+        ]
+    )
     dispatched: list[tuple[str, str]] = []
     loop = _dispatchable_loop(project, dispatched)
     loop.config = make_config({"max_running_steps": 2})
@@ -576,6 +582,91 @@ def test_slots_fill_up_to_max_running_steps() -> None:
 
     # Highest priority first; equal priority falls back to the newest id.
     assert [step_id for _kind, step_id in dispatched] == ["s003", "s002"]
+
+
+def test_steps_from_different_batches_never_overlap() -> None:
+    """A planner saw one snapshot per run: two runs must not act at the same time."""
+    project = make_project(steps=[make_step("s001", batch="x001"), make_step("s002", batch="x002")])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.config = make_config({"max_running_steps": 2})
+    loop.decide_checkpoints["proj_001"] = _checkpoint_matching(project)
+
+    loop._try_dispatch_project(_summary("proj_001", "active"))
+
+    # s002 wins on priority order, and its batch has nothing else to fill the slot.
+    assert dispatched == [("execute", "s002")]
+
+
+def test_a_running_batch_blocks_other_batches() -> None:
+    running = make_step("s001", status="running", worker="w", batch="x001")
+    sibling = make_step("s002", batch="x001")
+    other = make_step("s003", batch="x002", asset=None)
+    project = make_project(steps=[running, sibling, other])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.config = make_config({"max_running_steps": 2})
+    loop.decide_checkpoints["proj_001"] = _checkpoint_matching(project)
+
+    loop._try_dispatch_project(_summary("proj_001", "active"))
+
+    assert dispatched == [("execute", "s002")]
+
+
+def test_a_running_step_without_a_batch_runs_alone() -> None:
+    running = make_step("s001", status="running", worker="w")
+    other = make_step("s002", batch="x002")
+    project = make_project(steps=[running, other])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.config = make_config({"max_running_steps": 2})
+    loop.decide_checkpoints["proj_001"] = _checkpoint_matching(project)
+
+    loop._try_dispatch_project(_summary("proj_001", "active"))
+
+    assert dispatched == []
+
+
+def test_steps_without_a_batch_run_one_at_a_time() -> None:
+    project = make_project(steps=[make_step("s001"), make_step("s002")])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.config = make_config({"max_running_steps": 2})
+    loop.decide_checkpoints["proj_001"] = _checkpoint_matching(project)
+
+    loop._try_dispatch_project(_summary("proj_001", "active"))
+
+    assert len(dispatched) == 1
+
+
+def test_slots_skip_a_step_whose_asset_is_already_running() -> None:
+    """Two concurrent runs on one target duplicate each other, so the slot goes elsewhere."""
+    running = make_step("s001", status="running", worker="w", asset="10.0.0.1:8080", batch="x001")
+    same_asset = make_step("s002", asset="10.0.0.1:8080", batch="x001")
+    other_asset = make_step("s003", asset="10.0.0.1:3389", batch="x001")
+    project = make_project(steps=[running, same_asset, other_asset])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.config = make_config({"max_running_steps": 2})
+    loop.decide_checkpoints["proj_001"] = _checkpoint_matching(project)
+
+    loop._try_dispatch_project(_summary("proj_001", "active"))
+
+    assert dispatched == [("execute", "s003")]
+
+
+def test_slots_do_not_repeat_an_asset_dispatched_in_the_same_tick() -> None:
+    first = make_step("s002", asset="10.0.0.1:8080", batch="x001")
+    second = make_step("s003", asset="10.0.0.1:8080", batch="x001")
+    project = make_project(steps=[first, second])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.config = make_config({"max_running_steps": 2})
+    loop.decide_checkpoints["proj_001"] = _checkpoint_matching(project)
+
+    loop._try_dispatch_project(_summary("proj_001", "active"))
+
+    assert dispatched == [("execute", "s003")]
 
 
 def test_a_stuck_step_is_handed_back_to_decide_instead_of_being_rerun() -> None:

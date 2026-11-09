@@ -277,7 +277,8 @@ def test_decide_stores_the_next_lookups_and_step_title(monkeypatch) -> None:
         lambda *_args, **_kwargs: ProcessResult(
             0,
             '{"accepted":true,"data":{"recall":["ldap"],"doc_ids":[{"id":"doc007"}],'
-            '"steps":[{"from":["f001"],"description":"probe ldap","title":"probe ldap"}]}}',
+            '"steps":[{"from":["f001"],"description":"probe ldap","title":"probe ldap",'
+            '"asset":"ldap.example:389"}]}}',
             "",
         ),
     )
@@ -294,6 +295,9 @@ def test_decide_stores_the_next_lookups_and_step_title(monkeypatch) -> None:
 
     assert outcome == "success"
     assert client.created_step_titles == ["probe ldap"]
+    assert client.created_step_assets == ["ldap.example:389"]
+    # The Decide session is the batch: the scheduler only parallelises inside it.
+    assert client.created_step_batches == ["x001"]
     assert client.recall_plan == RecallPlan(queries=["ldap"], doc_ids=[{"id": "doc007"}])
 
 
@@ -485,6 +489,48 @@ def test_execute_early_plain_text_exit_uses_conclude_fallback(monkeypatch) -> No
     assert len(driver.execute_prompts) == 1
     assert len(driver.conclude_prompts) == 1
     assert lease.started and lease.stopped
+
+
+def test_conclude_prompt_carries_only_the_step_and_its_sources(monkeypatch) -> None:
+    """The settlement round already holds its transcript; the whole graph was overhead."""
+    config = make_config()
+    step = make_step(status="running", worker="test-worker")
+    project = make_project(steps=[step])
+    client = FakeClient(project)
+    driver = FakeDriver()
+    results: Iterator[ProcessResult] = iter(
+        [
+            ProcessResult(0, "Need inspect files and keep working.", ""),
+            ProcessResult(
+                0, '{"accepted":true,"data":{"facts":[{"description":"confirmed fact"}]}}', ""
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(execute, "get_driver", lambda *_a, **_k: driver)
+    monkeypatch.setattr(execute.HeartbeatLease, "for_step", _lease_factory(FakeLease()))
+    monkeypatch.setattr(execute, "_run_process", lambda *_args, **_kwargs: next(results))
+
+    containers = FakeContainerManager()
+    execute.run_execute_task(
+        config,
+        client,
+        containers,
+        project,
+        "facts:\n- id: origin\n- id: f001\nhints:\n- use the clue\n",
+        step,
+        config.workers[0],
+        TaskCancellation(),
+    )
+
+    prompt = driver.conclude_prompts[0]
+    # The snapshot is written into the container and referenced by path.
+    assert "/execute_conclude-" in prompt
+    snapshot = next(content for _, path, content in containers.writes if "execute_conclude" in path)
+    assert "investigate" in snapshot  # the step itself
+    assert "f001" in snapshot  # the fact it started from
+    assert "origin" not in snapshot  # unrelated graph content is gone
+    assert "use the clue" not in snapshot
 
 
 def test_execute_writes_findings_and_status(monkeypatch) -> None:

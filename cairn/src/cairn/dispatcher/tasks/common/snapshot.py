@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import Any
 
-from cairn.contracts.models import ContextSummary
+import yaml
+
+from cairn.contracts.models import ContextSummary, ProjectDetail, Step
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
 from cairn.dispatcher.context import estimate_tokens, prepare_snapshot
 from cairn.dispatcher.prompting import render_prompt
@@ -13,6 +16,9 @@ from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.backend import ExecutionBackend
 
 LOG = logging.getLogger(__name__)
+
+# A conclusion only needs enough of a source fact to recognise it, not its full text.
+STEP_SCOPE_FACT_CHARS = 400
 
 
 def prompt_overhead_tokens(template: str, blocks: dict[str, str]) -> int:
@@ -71,6 +77,35 @@ def budgeted_graph_yaml(
             view.truncated,
         )
     return view.yaml
+
+
+def step_scope_yaml(project: ProjectDetail, step: Step) -> str:
+    """The conclusion's context: this step plus the facts it started from.
+
+    The settlement round runs in the same worker session, so the model already holds
+    everything it observed. Pasting the whole graph on top of that costs tokens without
+    adding evidence: a graph with 27 facts pushed conclude into minutes and still wrote
+    nothing back, while the transcript is what actually proves the result.
+    """
+    facts = {fact.id: fact for fact in project.facts}
+    data: dict[str, Any] = {"step": {"id": step.id, "description": step.description}}
+    if step.rationale:
+        data["step"]["rationale"] = step.rationale
+    sources = [facts[fid] for fid in step.from_ if fid in facts]
+    if sources:
+        data["step"]["from"] = [
+            {"id": fact.id, "statement": _clip(fact.title or fact.description)} for fact in sources
+        ]
+    root_goal = next((goal for goal in project.goals if goal.parent is None), None)
+    if root_goal is not None:
+        data["goal"] = _clip(root_goal.description)
+    return yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
+
+
+def _clip(text: str) -> str:
+    if len(text) <= STEP_SCOPE_FACT_CHARS:
+        return text
+    return text[: STEP_SCOPE_FACT_CHARS - 1] + "…"
 
 
 def write_graph_snapshot_reference(

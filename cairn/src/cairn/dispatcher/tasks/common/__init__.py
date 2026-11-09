@@ -29,6 +29,7 @@ from .snapshot import (
     budgeted_graph_yaml,
     load_stored_summary,
     prompt_overhead_tokens,
+    step_scope_yaml,
     write_graph_snapshot_reference,
 )
 
@@ -51,6 +52,7 @@ __all__ = [
     "project_allows_conclude_fallback",
     "prompt_overhead_tokens",
     "run_worker_process",
+    "step_scope_yaml",
     "step_session_summary",
     "task_healthcheck_enabled",
     "terminal",

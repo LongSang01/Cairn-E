@@ -77,6 +77,14 @@ class Step(BaseModel):
     from_: list[str] = Field(default_factory=list, alias="from")
     to: str | None = None
     goal: str | None = None
+    # The asset this step touches (a host, a host:port, a credential surface). The graph
+    # has no dependency edges, so this is how the scheduler keeps two concurrent steps
+    # off the same target instead of letting them duplicate each other's work.
+    asset: str | None = None
+    # The Decide run that produced this step. Steps from one batch were proposed
+    # together and may run concurrently; steps from different batches never do, because
+    # the planner only saw one batch at a time.
+    batch: str | None = None
     kind: Literal["action", "completion"] = "action"
     description: str
     title: str | None = None

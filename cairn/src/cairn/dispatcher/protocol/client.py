@@ -147,6 +147,8 @@ class CairnClient:
         creator: str,
         title: str | None = None,
         goal: str | None = None,
+        asset: str | None = None,
+        batch: str | None = None,
         rationale: str | None = None,
         priority: int = 0,
     ) -> ApiResult:
@@ -159,6 +161,8 @@ class CairnClient:
                 "title": title,
                 "creator": creator,
                 "goal": goal,
+                "asset": asset,
+                "batch": batch,
                 "rationale": rationale,
                 "priority": priority,
                 "worker": None,

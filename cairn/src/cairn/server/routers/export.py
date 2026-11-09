@@ -165,6 +165,8 @@ def _export_yaml(conn, project_id: str) -> str:
                 **_node_entry(s, docs_by_step.get(s["id"], [])),
                 "from": sources_by_step.get(s["id"], []),
                 "goal": s["goal_id"],
+                "asset": s["asset"],
+                "batch": s["batch"],
                 "kind": s["kind"],
                 "rationale": s["rationale"],
                 "priority": s["priority"],

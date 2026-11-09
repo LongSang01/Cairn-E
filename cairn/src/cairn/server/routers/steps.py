@@ -57,9 +57,10 @@ def create_step(project_id: str, body: CreateStepRequest):
         conn.execute(
             """
             INSERT INTO steps (
-                id, project_id, goal_id, kind, title, description, rationale, priority, status,
-                creator, worker, last_heartbeat_at, created_at, concluded_at, result_fact_id, note
-            ) VALUES (?, ?, ?, 'action', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                id, project_id, goal_id, kind, title, description, asset, batch, rationale,
+                priority, status, creator, worker, last_heartbeat_at, created_at,
+                concluded_at, result_fact_id, note
+            ) VALUES (?, ?, ?, 'action', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
             """,
             (
                 sid,
@@ -67,6 +68,8 @@ def create_step(project_id: str, body: CreateStepRequest):
                 body.goal,
                 body.title,
                 body.description,
+                body.asset,
+                body.batch,
                 body.rationale,
                 body.priority,
                 "running" if claimed else "pending",

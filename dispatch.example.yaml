@@ -18,9 +18,11 @@ runtime:
   max_running_projects: 3
   # Per-project worker cap. Prevents one project from monopolizing the whole dispatcher.
   max_project_workers: 4
-  # Per-project concurrent Execute runs. Keep 1 unless the steps touch different
-  # assets; worker.max_running must also allow it, and SQLite writes are serialized.
-  max_running_steps: 1
+  # Upper bound on concurrent Execute runs per project. Inside that bound the scheduler
+  # only parallelises steps proposed by the SAME Decide run; steps from different runs
+  # stay serial, because neither run saw the other's plan. worker.max_running must also
+  # allow it, and SQLite writes are serialized.
+  max_running_steps: 2
   # Timeout for each enabled worker healthcheck.
   healthcheck_timeout: 20
   # "startup_and_task" checks at dispatcher startup and before every task.
@@ -41,8 +43,9 @@ runtime:
     safety_ratio: 0.05
     safety_min_tokens: 2000
     safety_max_tokens: 18000
-    # How many recent facts keep their original text.
-    recent_items: 20
+    # How many recent facts keep their original text. Decide runs after every step, so
+    # a smaller window keeps the snapshot cheap instead of re-reading the whole graph.
+    recent_items: 8
     # Summarization calls allowed per Decide run; 0 disables the rolling summary.
     summary_max_calls: 1
     summary_timeout: 90
@@ -56,10 +59,14 @@ tasks:
     # Hard cap on how many new steps one Decide run may add.
     max_steps: 3
   execute:
-    # Main timeout for executing a claimed step.
-    timeout: 600
+    # Main timeout for executing a claimed step. Full auto penetration runs long scans,
+    # so the budget has to cover a real enumeration instead of cutting it mid-flight.
+    timeout: 1800
     # Time budget for the conclude fallback after the main phase times out or returns unusable output.
-    conclude_timeout: 90
+    conclude_timeout: 120
+    # Seconds reserved out of timeout for the settlement round: the main run stops at
+    # timeout - settlement_margin so a conclude pass still fits in the same budget.
+    settlement_margin: 120
 
 tool_guard:
   # 命令级拦截：worker 内的 pi 扩展在每次 bash 之前询问服务端，

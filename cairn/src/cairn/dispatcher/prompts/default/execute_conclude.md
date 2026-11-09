@@ -23,8 +23,10 @@ Report only what is already confirmed. If nothing is confirmed, abandon the step
 - Use `"status": "abandoned"` if the step produced nothing.
 - Output this JSON and stop.
 
-## Graph
+## Step and the facts it started from
 
 ```
 {graph_yaml}
 ```
+
+This is context, not evidence: report only what this run observed.

@@ -371,7 +371,15 @@ def run_decide_task(
             record("success")
             return "success"
 
-        applied = _apply_actions(client, project_id, worker.name, data)
+        # The Decide session is the batch: every step this run proposes shares it, and
+        # the scheduler only parallelises inside one batch.
+        applied = _apply_actions(
+            client,
+            project_id,
+            worker.name,
+            data,
+            batch=stream.session_id if stream is not None else None,
+        )
         LOG.info(
             "decide finished project=%s worker=%s applied=%s goals_added=%s goals_closed=%s steps_added=%s steps_updated=%s "
             "execute_ms=%s total_ms=%s",
@@ -405,7 +413,12 @@ def run_decide_task(
 
 
 def _apply_actions(
-    client: CairnClient, project_id: str, worker_name: str, data: dict
+    client: CairnClient,
+    project_id: str,
+    worker_name: str,
+    data: dict,
+    *,
+    batch: str | None = None,
 ) -> dict[str, int]:
     applied = {
         "goals_added": 0,
@@ -481,17 +494,21 @@ def _apply_actions(
             creator=worker_name,
             title=step.get("title"),
             goal=step["goal"],
+            asset=step.get("asset"),
+            batch=batch,
             rationale=step["rationale"],
             priority=step["priority"],
         )
         if response.ok:
             applied["steps_added"] += 1
             LOG.info(
-                "decide added step project=%s worker=%s from=%s priority=%s description=%s",
+                "decide added step project=%s worker=%s batch=%s from=%s priority=%s asset=%s description=%s",
                 project_id,
                 worker_name,
+                batch or "-",
                 step["from"],
                 step["priority"],
+                step.get("asset") or "-",
                 step["description"],
             )
         else:

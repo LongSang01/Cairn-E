@@ -363,6 +363,9 @@ def validate_decide_payload(
                 "title": _short_text(item.get("title"), f"steps.add[{index}].title", 200),
                 "from": _id_list(item.get("from"), f"steps.add[{index}].from", fact_ids),
                 "goal": goal,
+                # Optional target declaration; the scheduler never dispatches two
+                # concurrent steps that name the same asset.
+                "asset": _short_text(item.get("asset"), f"steps.add[{index}].asset", 200),
                 "priority": _priority(item.get("priority"), f"steps.add[{index}].priority"),
                 "rationale": _optional_text(item.get("rationale"), f"steps.add[{index}].rationale"),
             }

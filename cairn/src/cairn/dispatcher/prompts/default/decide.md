@@ -26,7 +26,7 @@ While work remains — no `complete` key at all (a placeholder like
   "doc_ids": [{"id": "doc_001", "from": 0}],
   "goals": {"add": [{"description": "sub goal", "parent": "g001"}],
             "close": [{"id": "g002", "status": "achieved"}]},
-  "steps": {"add": [{"description": "what to do", "from": ["origin"], "goal": "g001", "priority": 3, "rationale": "which new fact this produces"}],
+  "steps": {"add": [{"description": "what to do", "from": ["origin"], "goal": "g001", "asset": "10.0.0.5:8080", "priority": 3, "rationale": "which new fact this produces"}],
             "update": [{"id": "s002", "priority": 7}, {"id": "s003", "status": "abandoned", "note": "why"}, {"id": "s004", "status": "cancelled", "note": "crossed a constraint"}]},
   "constraints": {"add": [{"kind": "deny", "text": "never touch payment.example.com"}]},
   "steers": {"reply": [{"id": "st001", "text": "已停止对 10.0.0.9 的探测，改为只读收集。"}]}
@@ -57,7 +57,9 @@ If you genuinely cannot make progress: `{"accepted": false, "reason": "..."}`.
 - Omit `complete` entirely while the goal is unmet. Never send an empty placeholder like `{"from": [], "description": ""}`.
 - When the root goal carries a measurable bar (a coverage percentage, a target count, a specific privilege), `complete` only after the facts already on the graph meet that measured bar. "Close enough" does not satisfy a quantitative goal: keep the steps coming until the graph shows the number, not the impression.
 - A step must state an action and how it turns known facts into a new fact. Small, concrete, verifiable steps beat broad ones.
+- `asset` (optional) names the single target a step acts on: a host, `host:port`, or a credential surface such as `10.0.0.5:3389/login`. Steps that share an asset never run at the same time; steps without one may. Give an asset to anything that writes, brute-forces or interrupts a service, and leave it out for read-only work that spans many hosts.
 - A chain where one step's output is another step's prerequisite is dispatched one link at a time: add the downstream step only after the upstream step has landed its fact. Adding a step whose prerequisites are not yet facts makes its executor spin or re-derive what is missing.
+- Every step you add in one answer runs **at the same time**. Put several in one payload only when they are truly independent: different hosts or ports, no shared session, no shared credential state. Anything that continues a chain — privilege escalation right after code execution, a follow-up on the same shell, credential reuse — belongs in its own later payload, one link at a time. Steps from different answers never run concurrently, so a chain split across answers is safe; a chain split inside one answer races itself and invalidates both results.
 - While the root goal is unmet, keep the open steps spread across a few mechanistically distinct directions rather than restating one entry point. When every open step crowds one approach and a genuinely different surface is available, prefer adding that divergent step.
 - Priority is 0 (lowest) to 9 (highest). Higher priority runs first.
 - A `steps.update` entry may carry only a `note`: that pins short guidance onto a step the executor has not started yet. Combine it with `priority` or `status` when you also want to reprioritize or abandon.

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 
-from cairn.contracts.models import ProjectSummary
+from cairn.contracts.models import ProjectSummary, Step
 
 from ._base import LoopBase
 from ._common import (
@@ -17,6 +17,15 @@ from ._common import (
 LOG = logging.getLogger("cairn.dispatcher.scheduler.loop")
 
 __all__ = ["MAX_STEP_EXECUTE_ATTEMPTS", "MAX_UNPROMPTED_DECIDE_RUNS", "DispatchMixin"]
+
+
+def _batch_key(step: Step) -> str:
+    """Which parallel group a step belongs to.
+
+    Steps carry the Decide run that proposed them; a step without one (data from before
+    batches, or a manually created step) is its own group, which keeps it serial.
+    """
+    return step.batch or f"step:{step.id}"
 
 
 class DispatchMixin(LoopBase):
@@ -171,32 +180,83 @@ class DispatchMixin(LoopBase):
             step for step in pending_steps if not self._step_attempts_exhausted(summary.id, step.id)
         ]
         if dispatchable_steps:
-            # Steps are independent unless they touch the same asset, and the graph
-            # cannot express that yet, so concurrency is a per-project slot count:
-            # keep at most `max_running_steps` Execute runs in flight and fill them
-            # by priority. The default of 1 preserves the old serial behaviour.
+            # Parallelism is the planner's decision, not the scheduler's. A Decide run is
+            # the unit of consistency: it saw one snapshot, so only the steps it proposed
+            # together (same batch) may run at the same time. Steps from different runs
+            # never overlap, because neither run knew about the other's actions.
             slots = self.config.runtime.max_running_steps
-            free = slots - len(running_step_ids)
+            # The server is the authority on what is running: a restarted dispatcher has
+            # no futures yet, but the project still shows the steps in flight.
+            server_running = [step for step in project.steps if step.status == "running"]
+            in_flight = {step.id for step in server_running} | running_step_ids
+            free = slots - len(in_flight)
             if free <= 0:
                 self._log_changed(
                     f"{skip_scope}:execute_slots_full",
                     logging.DEBUG,
                     "skip execute project=%s because %s/%s slots are running",
                     summary.id,
-                    len(running_step_ids),
+                    len(in_flight),
                     slots,
                 )
                 return False
-            ordered = sorted(
-                dispatchable_steps,
-                key=lambda step: (step.priority, step.created_at, step.id),
-                reverse=True,
-            )
+
+            running_batches = {_batch_key(step) for step in server_running}
+            if len(running_batches) > 1:
+                # Mixed batches only happen for pre-batch data; drain before adding more.
+                self._log_changed(
+                    f"{skip_scope}:mixed_batches",
+                    logging.WARNING,
+                    "skip execute project=%s because running steps span %s batches",
+                    summary.id,
+                    len(running_batches),
+                )
+                return False
+            if running_batches:
+                batch = next(iter(running_batches))
+                candidates = [step for step in dispatchable_steps if _batch_key(step) == batch]
+                if not candidates:
+                    self._log_changed(
+                        f"{skip_scope}:batch_drained",
+                        logging.DEBUG,
+                        "skip execute project=%s because no pending step belongs to the "
+                        "running batch %s",
+                        summary.id,
+                        batch,
+                    )
+                    return False
+            else:
+                ordered = sorted(
+                    dispatchable_steps,
+                    key=lambda step: (step.priority, step.created_at, step.id),
+                    reverse=True,
+                )
+                batch = _batch_key(ordered[0])
+                candidates = [step for step in ordered if _batch_key(step) == batch]
+
+            # Within the batch a step may still name its target; two runs on one asset
+            # duplicate each other's work, so the slot goes to a sibling instead.
+            assets_in_flight = {running.asset for running in server_running if running.asset}
             export_yaml = self.client.export_project(summary.id)
             dispatched = False
-            for step in ordered[:free]:
+            for step in candidates:
+                if free <= 0:
+                    break
+                if step.asset and step.asset in assets_in_flight:
+                    self._log_changed(
+                        f"{skip_scope}:asset_busy:{step.id}",
+                        logging.DEBUG,
+                        "skip execute project=%s step=%s because asset=%s is already running",
+                        summary.id,
+                        step.id,
+                        step.asset,
+                    )
+                    continue
                 if self._dispatch_execute(project, export_yaml, step):
                     dispatched = True
+                    free -= 1
+                    if step.asset:
+                        assets_in_flight.add(step.asset)
             return dispatched
         if pending_steps:
             # Every remaining step already burned its attempts; Decide is the only one

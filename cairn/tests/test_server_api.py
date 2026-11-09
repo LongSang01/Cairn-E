@@ -55,6 +55,7 @@ def test_project_workflow_creates_goal_step_finding_completes_and_reopens(
             "from": ["origin"],
             "goal": "g002",
             "description": "investigate",
+            "asset": "  10.0.0.1:8080  ",
             "priority": 5,
             "creator": "decider",
             "worker": None,
@@ -63,6 +64,7 @@ def test_project_workflow_creates_goal_step_finding_completes_and_reopens(
     assert response.status_code == 201
     assert response.json()["id"] == "s001"
     assert response.json()["from"] == ["origin"]
+    assert response.json()["asset"] == "10.0.0.1:8080"
     assert response.json()["priority"] == 5
 
     response = client.post(

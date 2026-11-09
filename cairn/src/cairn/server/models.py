@@ -383,13 +383,17 @@ class CreateStepRequest(BaseModel):
     title: str | None = None
     description: str
     rationale: str | None = None
+    asset: str | None = None
+    # Written by the dispatcher (the Decide session that proposed this step), never by
+    # the model: it is scheduling metadata, not part of the planner's contract.
+    batch: str | None = None
     priority: int = 0
     creator: str
     worker: str | None = None
 
     model_config = {"populate_by_name": True}
 
-    @field_validator("description", "creator", "rationale", "worker", "goal")
+    @field_validator("description", "creator", "rationale", "worker", "goal", "batch")
     @classmethod
     def validate_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -397,6 +401,20 @@ class CreateStepRequest(BaseModel):
         text = value.strip()
         if not text:
             raise ValueError("must not be empty")
+        return text
+
+    @field_validator("asset")
+    @classmethod
+    def validate_asset(cls, value: str | None) -> str | None:
+        # One line, bounded: the scheduler compares assets for equality, so a stray
+        # newline would make two references to the same target look different.
+        if value is None:
+            return None
+        text = " ".join(value.split())
+        if not text:
+            raise ValueError("must not be empty")
+        if len(text) > 200:
+            raise ValueError("must be at most 200 characters")
         return text
 
     @field_validator("from_")

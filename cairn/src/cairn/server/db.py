@@ -63,6 +63,12 @@ CREATE TABLE IF NOT EXISTS steps (
     kind TEXT NOT NULL DEFAULT 'action',
     title TEXT,
     description TEXT NOT NULL,
+    -- Declared target (host, host:port, credential surface); concurrent Execute runs
+    -- sharing one are serialized, because the graph cannot express dependencies.
+    asset TEXT,
+    -- The Decide run that produced this step: only steps of one batch may run
+    -- concurrently, since a planner never saw two batches at once.
+    batch TEXT,
     rationale TEXT,
     priority INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
@@ -582,6 +588,27 @@ def _migration_009_approval_timeout(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE tool_approvals ADD COLUMN {name} {ddl}")
 
 
+def _migration_010_step_asset(conn: sqlite3.Connection) -> None:
+    """A step's declared target, so concurrent Execute runs sharing it are serialized.
+
+    Additive on purpose: databases from before this migration keep working, and their
+    steps simply carry no asset (which never blocks a dispatch).
+    """
+    if "asset" not in _table_columns(conn, "steps"):
+        conn.execute("ALTER TABLE steps ADD COLUMN asset TEXT")
+
+
+def _migration_011_step_batch(conn: sqlite3.Connection) -> None:
+    """The Decide run that produced a step, so the scheduler only parallelises a batch.
+
+    A planner sees one snapshot per run: two runs never negotiate, so steps they emit
+    separately may contradict each other (a privilege escalation racing an enumeration).
+    Existing steps keep NULL, which reads as "its own batch" and stays serial.
+    """
+    if "batch" not in _table_columns(conn, "steps"):
+        conn.execute("ALTER TABLE steps ADD COLUMN batch TEXT")
+
+
 _MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (1, _migration_001_baseline),
     (2, _migration_002_idempotency),
@@ -592,6 +619,8 @@ _MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (7, _migration_007_steer_replies_and_scope),
     (8, _migration_008_reviewer),
     (9, _migration_009_approval_timeout),
+    (10, _migration_010_step_asset),
+    (11, _migration_011_step_batch),
 )
 
 
