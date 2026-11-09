@@ -393,8 +393,8 @@ def check(
         """
         INSERT INTO tool_approvals (
             id, project_id, session_id, worker, tool, command, digest, status, reason,
-            rule_id, created_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL)
+            rule_id, created_at, expires_at, timeout_seconds, timeout_action
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, ?, ?)
         """,
         (
             approval_id,
@@ -407,6 +407,8 @@ def check(
             decision.reason,
             decision.rule_id,
             now,
+            decision.timeout_seconds,
+            decision.timeout_action,
         ),
     )
     return {
@@ -467,6 +469,7 @@ def decide(
         decision_source="manual",
         rule_id=row["rule_id"],
         actor=actor,
+        reason=note or ("人工批准" if approve else "人工拒绝"),
     )
     return get_approval(conn, project_id, approval_id)
 
@@ -484,22 +487,20 @@ def expire_due(conn: sqlite3.Connection, *, timeout_seconds: int = 60) -> int:
     expired = 0
     for row in rows:
         created = row["created_at"]
-        limit = timeout_seconds
-        if row["rule_id"] is not None:
+        # The asker's own timeout wins: a reviewer's `ask` carries its configured
+        # budget, and the extension is polling for exactly that long.
+        limit = row["timeout_seconds"] or timeout_seconds
+        action = row["timeout_action"] or "deny"
+        if row["timeout_seconds"] is None and row["rule_id"] is not None:
             rule = conn.execute(
-                "SELECT timeout_seconds FROM tool_rules WHERE id = ?", (row["rule_id"],)
+                "SELECT timeout_seconds, timeout_action FROM tool_rules WHERE id = ?",
+                (row["rule_id"],),
             ).fetchone()
             if rule is not None:
                 limit = int(rule["timeout_seconds"] or timeout_seconds)
+                action = rule["timeout_action"] or "deny"
         if _age_seconds(created, now) < limit:
             continue
-        action = "deny"
-        if row["rule_id"] is not None:
-            rule = conn.execute(
-                "SELECT timeout_action FROM tool_rules WHERE id = ?", (row["rule_id"],)
-            ).fetchone()
-            if rule is not None and rule["timeout_action"] == "allow":
-                action = "allow"
         conn.execute(
             "UPDATE tool_approvals SET status = 'timeout', decision_source = 'timeout',"
             " decided_at = ?, reason = COALESCE(reason, '审批超时') WHERE id = ?",
@@ -516,6 +517,7 @@ def expire_due(conn: sqlite3.Connection, *, timeout_seconds: int = 60) -> int:
             decision_source="timeout",
             rule_id=row["rule_id"],
             actor=None,
+            reason=f"审批超时，按{'允许' if action == 'allow' else '拒绝'}处理",
         )
         expired += 1
     return expired

@@ -14,6 +14,7 @@ and code in one place: changing the guard never needs an image rebuild.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -52,7 +53,12 @@ const SCRIPT_PATTERNS = [
 async function call(path, body) {
   const response = await fetch(`${CFG.api_url}${path}`, {
     method: body === undefined ? "GET" : "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      // Marks this as the worker channel. The UI token that can rewrite rules or
+      // approve a pending command is deliberately absent from this container.
+      "x-cairn-worker-token": CFG.worker_token || "",
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!response.ok) throw new Error(`cairn guard http ${response.status}`);
@@ -105,7 +111,7 @@ async function waitForDecision(verdict) {
     await sleep(1500);
     let row;
     try {
-      row = await call(`/projects/${CFG.project_id}/tool-approvals/${verdict.approval_id}`);
+      row = await call(`/internal/projects/${CFG.project_id}/tool-approvals/${verdict.approval_id}`);
     } catch {
       continue;
     }
@@ -131,7 +137,7 @@ export default function (pi) {
     const cwd = typeof process !== "undefined" && process.cwd ? process.cwd() : "/";
     let verdict;
     try {
-      verdict = await call(`/projects/${CFG.project_id}/tool-guard/check`, {
+      verdict = await call(`/internal/projects/${CFG.project_id}/tool-guard/check`, {
         tool: "bash",
         command,
         worker: CFG.worker,
@@ -191,6 +197,9 @@ def config_json(
             "worker": worker.name,
             "session_id": session_id,
             "fail_action": guard.fail_action,
+            # From the dispatcher environment, not dispatch.yaml: that file is also
+            # mounted into the nginx container, and this token must not travel there.
+            "worker_token": os.environ.get("CAIRN_WORKER_TOKEN", "").strip(),
         },
         ensure_ascii=False,
         separators=(",", ":"),

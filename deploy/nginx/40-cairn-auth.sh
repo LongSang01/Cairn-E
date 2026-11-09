@@ -11,6 +11,9 @@
 #         - name: admin
 #           password: "plaintext"
 #
+# `CAIRN_UI_TOKEN` (optional, env) is rendered into `X-Cairn-UI-Token` for every
+# proxied request; the server requires it on endpoints that could weaken the guard.
+#
 # Plaintext passwords are SHA-512 crypt-hashed with the base image's built-in
 # busybox mkpasswd at container start; only the hash reaches .htpasswd. If
 # `web.auth` is absent the proxy
@@ -120,6 +123,19 @@ END {
 
 REALM=$(cat "$tmp_realm")
 
+# Optional shared secret for the UI channel. When set, the server requires it on the
+# endpoints that can weaken the guard (write rules, decide approvals, edit scope), and
+# this proxy injects it for browser traffic. The worker channel never sees it.
+UI_TOKEN="${CAIRN_UI_TOKEN:-}"
+if [ -n "$UI_TOKEN" ]; then
+    case "$UI_TOKEN" in
+        *[!A-Za-z0-9_-]*)
+            echo "cairn-auth: CAIRN_UI_TOKEN must match [A-Za-z0-9_-]+" >&2
+            exit 1
+            ;;
+    esac
+fi
+
 if [ -s "$tmp_users" ]; then
     : > "$HTPASSWD"
     TAB=$(printf '\t')
@@ -133,12 +149,12 @@ if [ -s "$tmp_users" ]; then
                 ;;
         esac
     done < "$tmp_users"
-    awk -v realm="$REALM" '{ gsub(/__CAIRN_REALM__/, realm); print }' "$TEMPLATE" > "$CONF"
+    awk -v realm="$REALM" -v ui_token="$UI_TOKEN" '{ gsub(/__CAIRN_REALM__/, realm); gsub(/__CAIRN_UI_TOKEN__/, ui_token); print }' "$TEMPLATE" > "$CONF"
     chgrp nginx "$HTPASSWD" || true
     chmod 640 "$HTPASSWD"
     echo "cairn-auth: Basic Auth enabled (realm \"$REALM\", $(wc -l < "$HTPASSWD") user(s))"
 else
     rm -f "$HTPASSWD"
-    awk '!/auth_basic/ { print }' "$TEMPLATE" > "$CONF"
+    awk -v ui_token="$UI_TOKEN" '!/auth_basic/ { gsub(/__CAIRN_UI_TOKEN__/, ui_token); print }' "$TEMPLATE" > "$CONF"
     echo "cairn-auth: WARNING: no web.auth section in dispatch.yaml — starting WITHOUT authentication" >&2
 fi

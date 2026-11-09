@@ -30,6 +30,11 @@ services:
       CAIRN_REVIEWER_ASK_TIMEOUT_ACTION: "${CAIRN_REVIEWER_ASK_TIMEOUT_ACTION:-deny}"
       CAIRN_REVIEWER_INCOMPLETE_SCRIPT_ACTION: "${CAIRN_REVIEWER_INCOMPLETE_SCRIPT_ACTION:-model}"
       CAIRN_REVIEWER_CACHE_TTL_SECONDS: "${CAIRN_REVIEWER_CACHE_TTL_SECONDS:-86400}"
+      # Channel separation. Empty means "not enforced" (backwards compatible):
+      # - CAIRN_WORKER_TOKEN gates /internal/* (the guard extension's channel)
+      # - CAIRN_UI_TOKEN gates endpoints that could switch the guard off
+      CAIRN_WORKER_TOKEN: "${CAIRN_WORKER_TOKEN:-}"
+      CAIRN_UI_TOKEN: "${CAIRN_UI_TOKEN:-}"
     volumes:
       - ./datas/cairn/:/root/.local/share/cairn/
     healthcheck:
@@ -52,6 +57,9 @@ services:
     container_name: cairn-nginx
     ports:
       - "8000:80"
+    environment:
+      # Injected into proxied requests as X-Cairn-UI-Token (see the template).
+      CAIRN_UI_TOKEN: "${CAIRN_UI_TOKEN:-}"
     volumes:
       # read-only: the entrypoint renders .htpasswd + nginx config from web.auth
       - ./dispatch.yaml:/cairn/dispatch.yaml:ro
@@ -96,6 +104,9 @@ services:
     environment:
       # 通过受限 socket 代理操作 Docker，不再直挂宿主 /var/run/docker.sock。
       DOCKER_HOST: tcp://cairn-socket-proxy:2375
+      # Written into each task's cairn-guard.json so the extension can authenticate to
+      # /internal/*. Deliberately not in dispatch.yaml: nginx mounts that file too.
+      CAIRN_WORKER_TOKEN: "${CAIRN_WORKER_TOKEN:-}"
     volumes:
       - ./dispatch.yaml:/cairn/dispatch.yaml
     depends_on:

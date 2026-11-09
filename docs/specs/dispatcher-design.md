@@ -205,15 +205,26 @@ workers:
 | `CAIRN_REVIEWER_CACHE_TTL_SECONDS` | `86400` | 裁决缓存有效期 |
 | `CAIRN_REVIEWER_POLICY_FILE` | 空 | 覆盖内置策略文本（运维可调，不必重建镜像） |
 
+### 通道隔离
+
+worker 与浏览器最终都到达同一个 FastAPI 进程：浏览器经 nginx（Basic Auth），worker 经宿主回环
+端口。网络路径分不出两者——被攻陷的 worker 能调用回环上任何端点——所以用两个令牌区分：
+
+| 令牌 | 注入方 | 保护对象 |
+|---|---|---|
+| `CAIRN_WORKER_TOKEN`（`x-cairn-worker-token`） | dispatcher 写进每个任务的 `cairn-guard.json` | `/internal/projects/*`：只允许 check 与审批查询 |
+| `CAIRN_UI_TOKEN`（`x-cairn-ui-token`） | nginx 对浏览器流量注入 | 能削弱审核的端点：写工具规则、批审批、改 scope |
+
+两者都留空时不强制（现有部署不受影响）；设置即开启隔离。worker 容器里只有 worker 令牌，
+即使目标拿到 shell 也读不到 UI 令牌，因此改不了规则、也批不了自己的待审命令。
+
 已知绕过路径（保留 `sudo` 的代价，必须靠部署侧兜住）：
 
 1. worker 内 root 可改 `/etc/hosts` 或 `iptables` 让审核端点不可达 → 走 `fail_action`。把
    `fail_action` 设为 `deny` 可堵住，代价是审核服务抖动会中断扫描。
-2. worker 可调 `POST /projects/{id}/tool-rules` 写「全部放行」的规则 → 规则写入端点必须只对 UI
-   通道开放，worker 通道只给 check 与审批查询（服务令牌，见架构债清单）。
-3. local 模式曾经用 `--no-extensions` 启动且不加载扩展，审核为零 → 现在 local 分支同样用
+2. local 模式曾经用 `--no-extensions` 启动且不加载扩展，审核为零 → 现在 local 分支同样用
    `-e "$guard"` 显式加载，且有测试守住。
-4. `tmux`/后台常驻会话里后续命令不再逐条经过 `bash` 工具 → 至少要求启动命令本身过审，并在
+3. `tmux`/后台常驻会话里后续命令不再逐条经过 `bash` 工具 → 至少要求启动命令本身过审，并在
    report 中标注存在未逐条审核的子进程。
 
 ## 任务模型

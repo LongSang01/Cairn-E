@@ -54,7 +54,8 @@ def test_install_writes_config_before_the_extension() -> None:
     ]
 
 
-def test_install_stamps_the_project_and_api_url() -> None:
+def test_install_stamps_the_project_and_api_url(monkeypatch) -> None:
+    monkeypatch.delenv("CAIRN_WORKER_TOKEN", raising=False)
     backend = _RecordingBackend()
 
     pi_guard.install(
@@ -73,6 +74,7 @@ def test_install_stamps_the_project_and_api_url() -> None:
         "worker": "pi-test",
         "session_id": "s042",
         "fail_action": "deny",
+        "worker_token": "",
     }
     extension = backend.writes[1][1]
     assert 'pi.on("tool_call"' in extension
@@ -86,6 +88,8 @@ def test_extension_sends_the_full_call_plus_script_snapshots() -> None:
     assert "arguments: event.input || { command }" in extension
     assert "working_directory: cwd" in extension
     assert "script_files: captureScripts(command, cwd)" in extension
+    assert "/internal/projects/${CFG.project_id}/tool-guard/check" in extension
+    assert '"x-cairn-worker-token": CFG.worker_token' in extension
     assert "const MAX_SCRIPT_BYTES = 65536;" in extension
     assert "const MAX_SCRIPTS = 5;" in extension
 

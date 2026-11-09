@@ -313,6 +313,8 @@ CREATE TABLE IF NOT EXISTS tool_approvals (
     created_at TEXT NOT NULL,
     decided_at TEXT,
     expires_at TEXT,
+    timeout_seconds INTEGER,
+    timeout_action TEXT,
     PRIMARY KEY (id)
 );
 
@@ -566,6 +568,20 @@ def _migration_008_reviewer(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tool_audit ADD COLUMN reason TEXT")
 
 
+def _migration_009_approval_timeout(conn: sqlite3.Connection) -> None:
+    """Store the timeout the asker actually offered, instead of re-deriving it later.
+
+    `expire_due` used to fall back to the rule's timeout (or 60s) for every pending
+    approval, so a reviewer's `ask` with a 300s budget was expired after 60s while the
+    extension kept polling for 300s — the command was then denied by a timeout nobody
+    had configured. Persisting the value keeps the queue and the poller in agreement.
+    """
+    columns = _table_columns(conn, "tool_approvals")
+    for name, ddl in (("timeout_seconds", "INTEGER"), ("timeout_action", "TEXT")):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE tool_approvals ADD COLUMN {name} {ddl}")
+
+
 _MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (1, _migration_001_baseline),
     (2, _migration_002_idempotency),
@@ -575,6 +591,7 @@ _MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (6, _migration_006_project_tool_rules),
     (7, _migration_007_steer_replies_and_scope),
     (8, _migration_008_reviewer),
+    (9, _migration_009_approval_timeout),
 )
 
 

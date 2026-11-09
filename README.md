@@ -40,6 +40,12 @@ CAIRN_REVIEWER_BASE_URL=https://<endpoint>/v1
 CAIRN_REVIEWER_API_KEY=<key>
 # 失败策略：ask 转人工（默认），deny 宁停不停
 CAIRN_REVIEWER_FAIL_ACTION=ask
+
+# 通道隔离（可选；留空则不强制）。两个值建议都用随机串：
+# worker 侧扩展用它访问 /internal/*（dispatcher 注入，目标拿到 shell 也只能调 check）
+CAIRN_WORKER_TOKEN=<random>
+# 浏览器侧由 nginx 注入（worker 拿不到，因此改不了规则、也批不了自己的待审命令）
+CAIRN_UI_TOKEN=<random>
 ```
 
 判定分级、D/A 条款与已知绕过路径见 `docs/specs/dispatcher-design.md` 的「命令审核」一节。

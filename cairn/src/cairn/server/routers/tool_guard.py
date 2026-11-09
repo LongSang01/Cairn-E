@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from cairn.server.channels import require_ui_channel, require_worker_channel
 from cairn.server.db import get_conn
 from cairn.server.models import (
     CreateToolRuleRequest,
@@ -36,6 +37,8 @@ def _approval_payload(row) -> dict[str, object]:
         "decided_by": row["decided_by"],
         "created_at": row["created_at"],
         "decided_at": row["decided_at"],
+        "timeout_seconds": row["timeout_seconds"],
+        "timeout_action": row["timeout_action"],
     }
 
 
@@ -67,7 +70,11 @@ def list_project_rules(project_id: str):
         return {"rules": [_rule_payload(row) for row in rows]}
 
 
-@router.post("/projects/{project_id}/tool-rules", status_code=201)
+@router.post(
+    "/projects/{project_id}/tool-rules",
+    status_code=201,
+    dependencies=[Depends(require_ui_channel)],
+)
 def create_project_rule(project_id: str, body: CreateToolRuleRequest):
     """Add a rule that only this project's workers see.
 
@@ -100,7 +107,11 @@ def create_project_rule(project_id: str, body: CreateToolRuleRequest):
         return _rule_payload(row)
 
 
-@router.delete("/projects/{project_id}/tool-rules/{rule_id}", status_code=204)
+@router.delete(
+    "/projects/{project_id}/tool-rules/{rule_id}",
+    status_code=204,
+    dependencies=[Depends(require_ui_channel)],
+)
 def delete_project_rule(project_id: str, rule_id: int):
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
@@ -113,9 +124,7 @@ def delete_project_rule(project_id: str, rule_id: int):
         return None
 
 
-@router.post("/projects/{project_id}/tool-guard/check")
-def check_command(project_id: str, body: ToolGuardCheckRequest):
-    """Called by the worker extension before every shell command."""
+def _execute_check(project_id: str, body: ToolGuardCheckRequest) -> dict[str, object]:
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
         expire_tool_approvals(conn)
@@ -132,6 +141,35 @@ def check_command(project_id: str, body: ToolGuardCheckRequest):
         )
 
 
+def _read_one_approval(project_id: str, approval_id: str) -> dict[str, object]:
+    with get_conn() as conn:
+        get_project_or_404(conn, project_id)
+        expire_tool_approvals(conn)
+        row = get_approval(conn, project_id, approval_id)
+        if row is None:
+            raise HTTPException(404, f"Approval {approval_id} not found")
+        return _approval_payload(row)
+
+
+@router.post(
+    "/internal/projects/{project_id}/tool-guard/check",
+    dependencies=[Depends(require_worker_channel)],
+)
+def check_command(project_id: str, body: ToolGuardCheckRequest):
+    """Worker channel: called by the pi extension before every shell command."""
+    return _execute_check(project_id, body)
+
+
+@router.post(
+    "/projects/{project_id}/tool-guard/check",
+    dependencies=[Depends(require_worker_channel)],
+    deprecated=True,
+)
+def check_command_legacy(project_id: str, body: ToolGuardCheckRequest):
+    """Pre-`/internal` path, kept so an extension written by an older dispatcher works."""
+    return _execute_check(project_id, body)
+
+
 @router.get("/projects/{project_id}/tool-approvals")
 def list_pending(project_id: str):
     with get_conn() as conn:
@@ -142,18 +180,25 @@ def list_pending(project_id: str):
         }
 
 
+@router.get(
+    "/internal/projects/{project_id}/tool-approvals/{approval_id}",
+    dependencies=[Depends(require_worker_channel)],
+)
+def read_approval_internal(project_id: str, approval_id: str):
+    """Worker channel: the extension polls this while a command waits for a verdict."""
+    return _read_one_approval(project_id, approval_id)
+
+
 @router.get("/projects/{project_id}/tool-approvals/{approval_id}")
 def read_approval(project_id: str, approval_id: str):
-    with get_conn() as conn:
-        get_project_or_404(conn, project_id)
-        expire_tool_approvals(conn)
-        row = get_approval(conn, project_id, approval_id)
-        if row is None:
-            raise HTTPException(404, f"Approval {approval_id} not found")
-        return _approval_payload(row)
+    """Pre-`/internal` path used by older extensions and by the web UI."""
+    return _read_one_approval(project_id, approval_id)
 
 
-@router.post("/projects/{project_id}/tool-approvals/{approval_id}/decide")
+@router.post(
+    "/projects/{project_id}/tool-approvals/{approval_id}/decide",
+    dependencies=[Depends(require_ui_channel)],
+)
 def decide(project_id: str, approval_id: str, body: ToolApprovalDecision):
     """Human verdict. The extension is polling this row and unblocks on the change."""
     with get_conn() as conn:

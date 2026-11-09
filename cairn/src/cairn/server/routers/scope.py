@@ -5,9 +5,10 @@ from __future__ import annotations
 import ipaddress
 import sqlite3
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from cairn.contracts.models import ScopeEntry
+from cairn.server.channels import require_ui_channel
 from cairn.server.db import get_conn
 from cairn.server.models import CreateScopeEntryRequest, ScopeCheckRequest
 from cairn.server.services import (
@@ -55,7 +56,12 @@ def list_scope(project_id: str):
         return {"entries": [_entry_from_row(row) for row in load_scope(conn, project_id)]}
 
 
-@router.post("/projects/{project_id}/scope", response_model=ScopeEntry, status_code=201)
+@router.post(
+    "/projects/{project_id}/scope",
+    response_model=ScopeEntry,
+    status_code=201,
+    dependencies=[Depends(require_ui_channel)],
+)
 def add_scope_entry(project_id: str, body: CreateScopeEntryRequest):
     """Adding the first entry closes the gate: unlisted hosts become out of scope."""
     with get_conn() as conn:
@@ -79,7 +85,11 @@ def add_scope_entry(project_id: str, body: CreateScopeEntryRequest):
         return _entry_from_row(row)
 
 
-@router.delete("/projects/{project_id}/scope/{entry_id}", status_code=204)
+@router.delete(
+    "/projects/{project_id}/scope/{entry_id}",
+    status_code=204,
+    dependencies=[Depends(require_ui_channel)],
+)
 def delete_scope_entry(project_id: str, entry_id: int):
     with get_conn() as conn:
         check_project_hint_writable(conn, project_id)

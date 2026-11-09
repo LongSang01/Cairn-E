@@ -96,6 +96,9 @@
 - 范围判定在命令层而非资产表层：Cairn 没有资产库，因此 `curl`/`nmap` 直连未登记主机同样会被拦，比资产层的可见性闸门更严。
 - `POST /projects/{id}/tool-guard/check` 请求体扩展为 `{tool, command, worker?, session?, arguments?, working_directory?, script_files?}`。`script_files[]` 是 worker 侧采集的脚本快照（`path / source / content / complete / truncated`，单文件 ≤64KB、最多 5 个），只在规则未命中且服务端配置了审核员时使用。规则未命中时的裁决来源：`reviewer`（LLM）、`cache`（命中裁决缓存）、`reviewer-fail`（重试后按失败策略）、`reviewer-incomplete`（证据不完整且策略为 `ask`）；未配置审核员时仍为默认 `allow`。
 - `GET .../tool-audit` 的每条记录新增 `reason`，保留裁决理由与「命中规则」编号（`D4`/`A5`/`ASK`/`DEFAULT`），用于事后解释一次允许或拒绝。
+- worker 通道迁到 `/internal/projects/{id}/tool-guard/check` 与 `/internal/projects/{id}/tool-approvals/{id}`；旧的 `/projects/...` 路径保留（老扩展可用）但标为 deprecated。配置 `CAIRN_WORKER_TOKEN` 后两条路径都要求 `x-cairn-worker-token`。
+- 能削弱守卫的端点（`POST/DELETE .../tool-rules`、`POST .../tool-approvals/{id}/decide`、`POST/DELETE .../scope`）在配置 `CAIRN_UI_TOKEN` 后要求 `x-cairn-ui-token`，该头由 nginx 注入，worker 拿不到。
+- `tool_approvals` 新增 `timeout_seconds` / `timeout_action`（迁移 v9）：保存发起审批时的超时预算，`expire_due` 优先用它，避免审核员的 300s `ask` 被队列的 60s 默认提前判超时。审批查询接口同步返回这两个字段。
 - 四种导出（`yaml` / `timeline` / `findings` / `report`）中的 `yaml` 与 `timeline` 会带上约束、范围、指令及其答复，供复盘审计。
 
 ## 3. SSE 事件流

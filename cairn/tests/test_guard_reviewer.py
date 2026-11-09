@@ -169,6 +169,71 @@ def test_an_ask_goes_to_the_human_queue_and_is_never_cached(client, monkeypatch)
     assert len(calls) == 2
 
 
+def test_a_reviewer_ask_carries_its_own_timeout_into_the_queue(client, monkeypatch) -> None:
+    """A 120s reviewer budget must not be expired by the queue's 60s default."""
+    _enable(monkeypatch, CAIRN_REVIEWER_ASK_TIMEOUT_SECONDS="120")
+
+    def fake(config, messages):
+        return _reply("ask", rule="ASK", operation="删除归属不明的文件")
+
+    monkeypatch.setattr(reviewer_service, "_call_model", fake)
+    project_id = _project(client)
+    _check(client, project_id, DESTRUCTIVE)
+
+    row = _approvals(project_id)[-1]
+    assert row["timeout_seconds"] == 120
+    assert row["timeout_action"] == "deny"
+
+
+def test_expire_due_respects_the_stored_reviewer_timeout(client, monkeypatch) -> None:
+    """The queue must not expire a 120s ask after the 60s default."""
+    from datetime import UTC, datetime, timedelta
+
+    from cairn.server.services import expire_tool_approvals
+
+    _enable(monkeypatch, CAIRN_REVIEWER_ASK_TIMEOUT_SECONDS="120")
+    monkeypatch.setattr(
+        reviewer_service,
+        "_call_model",
+        lambda config, messages: _reply("ask", rule="ASK", operation="删除归属不明的文件"),
+    )
+    project_id = _project(client)
+    _check(client, project_id, DESTRUCTIVE)
+    approval_id = _approvals(project_id)[-1]["id"]
+
+    def _age(seconds: int) -> None:
+        stamp = (datetime.now(UTC) - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with db.get_conn() as conn:
+            conn.execute(
+                "UPDATE tool_approvals SET created_at = ? WHERE id = ?", (stamp, approval_id)
+            )
+
+    _age(90)
+    with db.get_conn() as conn:
+        assert expire_tool_approvals(conn) == 0
+        assert (
+            conn.execute(
+                "SELECT status FROM tool_approvals WHERE id = ?", (approval_id,)
+            ).fetchone()["status"]
+            == "pending"
+        )
+
+    _age(130)
+    with db.get_conn() as conn:
+        assert expire_tool_approvals(conn) == 1
+        assert (
+            conn.execute(
+                "SELECT status FROM tool_approvals WHERE id = ?", (approval_id,)
+            ).fetchone()["status"]
+            == "timeout"
+        )
+        audited = conn.execute(
+            "SELECT reason FROM tool_audit WHERE project_id = ? ORDER BY id DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+    assert "审批超时" in audited["reason"]
+
+
 def test_an_unparseable_reply_retries_then_falls_back_to_ask(client, monkeypatch) -> None:
     _enable(monkeypatch, CAIRN_REVIEWER_RETRY_COUNT="2")
     calls: list[str] = []
