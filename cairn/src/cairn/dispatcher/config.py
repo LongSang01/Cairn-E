@@ -145,6 +145,8 @@ class QuestionTaskConfig(BaseModel):
 
 
 class TasksConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     decide: DecideTaskConfig
     execute: ExecuteTaskConfig
     question: QuestionTaskConfig = Field(default_factory=QuestionTaskConfig)
@@ -156,6 +158,8 @@ class ContextBudgetConfig(BaseModel):
     `context_window` is the fallback window; a worker can override it through the
     `CONTEXT_WINDOW` (or pi's `PI_MODEL_CONTEXT_WINDOW`) env var.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
     context_window: int = Field(gt=0, default=200_000)
@@ -176,6 +180,8 @@ class ContextBudgetConfig(BaseModel):
 
 
 class ContainerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     image: str
     network_mode: str
     completed_action: CompletedAction
@@ -188,11 +194,15 @@ class ContainerConfig(BaseModel):
 
 
 class LocalConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     workspace_root: str | None = None
     completed_action: LocalCompletedAction = "keep"
 
 
 class RuntimeConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     max_workers: int = Field(gt=0)
     max_running_projects: int = Field(gt=0)
     max_project_workers: int = Field(gt=0)

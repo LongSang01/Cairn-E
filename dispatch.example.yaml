@@ -1,10 +1,10 @@
 # Cairn server API endpoint.
 server: "http://cairn-server:8000"
 
-# Shared environment variables merged into every worker.
+# Shared environment variables merged into every worker; a worker's own env wins.
+# Use it for values every worker needs (a proxy here); leave empty if there are none.
 common_env:
-  TSEC_SERVER_HOST: "<SERVER_HOST>:8000"
-  TSEC_AGENT_TOKEN: "xxx"
+  https_proxy: "http://127.0.0.1:7897"
 
 runtime:
   # "container" runs one worker container per project; see dispatch.local.example.yaml

@@ -65,6 +65,8 @@ def bare_loop() -> DispatcherLoop:
     loop._cleanup_pending = set()
     loop._inactive_cleanup_done = {}
     loop.project_cursor = 0
+    loop._settings_checked = False
+    loop._startup_healthchecks_checked = False
     return loop
 
 

@@ -25,9 +25,8 @@ container:
     - "NET_RAW"
     - "NET_ADMIN"
 
-common_env:
-  TSEC_BASE_URL: "http://<SERVER_HOST>/api"
-  TSEC_AGENT_TOKEN: "common-agent-token"
+# Shared environment merged into every worker; the mock driver needs none.
+common_env: {}
 
 workers:
   - name: "mock-observer-1"

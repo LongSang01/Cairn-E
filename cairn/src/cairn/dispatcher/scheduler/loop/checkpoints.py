@@ -7,10 +7,12 @@ import logging
 from cairn.contracts.models import ProjectSummary
 from cairn.dispatcher.models import DecideCheckpoint
 
+from ._base import LoopBase
+
 LOG = logging.getLogger("cairn.dispatcher.scheduler.loop")
 
 
-class CheckpointsMixin:
+class CheckpointsMixin(LoopBase):
     def _refresh_runtime_projects(self, summaries: list[ProjectSummary]) -> None:
         active_ids = {summary.id for summary in summaries if summary.status == "active"}
         self.runtime_project_ids.intersection_update(active_ids)
@@ -89,17 +91,18 @@ class CheckpointsMixin:
             )
             previous = self.decide_checkpoints.get(project_id)
             unprompted_attempts = 0
-            previous_counts = previous and (
-                previous.fact_count,
-                previous.hint_count,
-                previous.finding_count,
-                previous.open_step_count,
-                previous.steer_count,
-            )
-            if previous_counts == counts:
-                # No change -> keep the attempts already spent, so a graph that
-                # never changes cannot spin forever. A real change resets the budget.
-                unprompted_attempts = previous.unprompted_attempts
+            if previous is not None:
+                previous_counts = (
+                    previous.fact_count,
+                    previous.hint_count,
+                    previous.finding_count,
+                    previous.open_step_count,
+                    previous.steer_count,
+                )
+                if previous_counts == counts:
+                    # No change -> keep the attempts already spent, so a graph that
+                    # never changes cannot spin forever. A real change resets the budget.
+                    unprompted_attempts = previous.unprompted_attempts
             checkpoint = DecideCheckpoint(
                 fact_count=fact_count,
                 hint_count=hint_count,

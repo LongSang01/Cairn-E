@@ -12,10 +12,12 @@ from cairn.dispatcher.scheduler.worker_select import choose_worker
 from cairn.dispatcher.tasks.question import run_question_task
 from cairn.dispatcher.tasks.summary import SummaryRequest, run_summary_task
 
+from ._base import LoopBase
+
 LOG = logging.getLogger("cairn.dispatcher.scheduler.loop")
 
 
-class QuestionsMixin:
+class QuestionsMixin(LoopBase):
     def request_summary(self, request: SummaryRequest) -> bool:
         """Queue a background summary for history a Decide could not carry.
 

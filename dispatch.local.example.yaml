@@ -21,6 +21,7 @@ runtime:
   max_workers: 3              # all workers share this host — size to the machine
   max_running_projects: 2
   max_project_workers: 2
+  max_running_steps: 1        # concurrent Execute runs per project; the default keeps them serial
   interval: 3
   healthcheck_timeout: 15
   prompt_group: "default"

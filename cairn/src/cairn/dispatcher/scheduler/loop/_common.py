@@ -18,6 +18,13 @@ DECIDE_RETRY_AFTER_SECONDS = 10
 # many consecutive failures on the *same* trigger the scheduler waits for the graph to
 # move instead (proj_009 burned 71 noop runs this way).
 MAX_CONSECUTIVE_DECIDE_FAILURES = 5
+# Bounded budget for Decide runs the graph itself did not ask for: an idle (fully
+# terminal) graph, or one whose remaining steps already burned their Execute attempts.
+MAX_UNPROMPTED_DECIDE_RUNS = 3
+# Consecutive failed Execute runs after which a pending step stops being re-dispatched.
+# Retrying it blindly only re-spends a model run on the same dead end (proj_009: s062
+# burned four 600s runs), so the next Decide has to change route or abandon it.
+MAX_STEP_EXECUTE_ATTEMPTS = 3
 
 
 @dataclass(slots=True)

@@ -25,3 +25,26 @@ docker compose up --build
 ```
 
 只重建系统镜像时 `make app` 即可；只重建 worker 时 `make worker` 即可。
+
+### 本地质量门
+
+不依赖 CI，一条命令跑完 lint、格式、类型、Python 测试与前端测试：
+
+```bash
+make check
+```
+
+它会依次执行（需已安装 `ruff` / `mypy` / `pytest`，并执行过 `npm install`）：
+
+1. `cd cairn && python -m ruff check src tests`
+2. `cd cairn && python -m ruff format --check src tests`
+3. `cd cairn && python -m mypy src`
+4. `cd cairn && python -m pytest -q`
+5. `npm run test` 与 `npm run format:check`（vitest / prettier）
+
+只跑 Python 测试时，注意 pytest 需要从 `cairn/` 目录执行（`pythonpath = ["src"]`）：
+
+```bash
+cd cairn && python -m pytest
+cd cairn && python -m pytest --cov=src/cairn --cov-report=term-missing   # 覆盖率
+```

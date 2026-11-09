@@ -18,14 +18,20 @@ from ._common import (
 from .checkpoints import CheckpointsMixin
 from .core import CoreMixin
 from .dispatch import DispatchMixin
+from .dispatch_decide import DecideDispatchMixin
+from .dispatch_execute import ExecuteDispatchMixin
 from .log_state import LogStateMixin
 from .questions import QuestionsMixin
 from .reaper import ReaperMixin
+from .scheduling import SchedulingMixin
 
 
 class DispatcherLoop(
     CoreMixin,
     DispatchMixin,
+    DecideDispatchMixin,
+    ExecuteDispatchMixin,
+    SchedulingMixin,
     QuestionsMixin,
     ReaperMixin,
     CheckpointsMixin,

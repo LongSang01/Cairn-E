@@ -29,6 +29,7 @@ dev = [
     "httpx>=0.27",
     "mypy>=2.4.1",
     "pytest>=8.3",
+    "pytest-cov>=6.0",
     "ruff>=0.17",
 ]
 
@@ -49,19 +50,29 @@ select = ["E4", "E7", "E9", "F", "I", "B", "BLE", "SIM", "UP", "RUF"]
 # user-facing summaries is intentional, so RUF001's ASCII homoglyph warning is off.
 ignore = ["TRY004", "RUF001"]
 
+[tool.coverage.run]
+source = ["src/cairn"]
+# Branch coverage would flag every defensive `except` guard as a half-covered branch;
+# line coverage plus the per-file gaps in `--cov-report=term-missing` is what we act on.
+branch = false
+
+[tool.coverage.report]
+# The mixin base class declares the shared interface; its stubs only exist for typing.
+exclude_also = [
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+skip_covered = true
+show_missing = true
+# Floor, not a target: the suite sits in the high 80s, so this only catches a real drop.
+fail_under = 80
+
 [tool.mypy]
 python_version = "3.12"
 follow_imports = "skip"
 ignore_missing_imports = true
 check_untyped_defs = true
-
-[[tool.mypy.overrides]]
-# Gradual typing: the scheduler loop composes behaviour through mixins whose
-# attributes (futures, config, client, ...) live in sibling classes, so static
-# analysis cannot resolve them. TODO: fold the mixins into a typed base class
-# and drop this override.
-module = "cairn.dispatcher.scheduler.loop.*"
-disable_error_code = ["attr-defined"]
 
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple"

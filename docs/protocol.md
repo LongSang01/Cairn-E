@@ -138,7 +138,7 @@
 - dispatcher 侧([cairn/dispatcher/session.py](../cairn/src/cairn/dispatcher/session.py)):
   - 每个 `SessionStream` 在启动时生成一个 `client_key`,**创建与终态补传共用**,使实时路径与兜底上传在服务端收敛到同一会话。
   - 消息在进入重试缓冲区之前盖上 `msg_id`(uuid4),重试不换号。
-  - 上传重试(3 次,退避 2s/5s)全部可安全重放。
+  - 上传重试(3 次,退避从 0.25s 起每次翻倍、单次上限 2s,即 0.25s/0.5s)全部可安全重放。
 - 未带 `msg_id` 的消息与未带 `client_key` 的创建**不提供幂等保证**(重复投递即重复入库),手工调用方需自行携带。
 
 ## 5. 兼容性承诺(1.x)

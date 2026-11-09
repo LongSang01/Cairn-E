@@ -24,10 +24,12 @@ from cairn.dispatcher.runtime.startup_healthcheck import (
 )
 from cairn.dispatcher.workers.registry import get_driver
 
+from ._base import LoopBase
+
 LOG = logging.getLogger("cairn.dispatcher.scheduler.loop")
 
 
-class CoreMixin:
+class CoreMixin(LoopBase):
     def __init__(self, config_path: Path):
         self.config_path = config_path
         self.config = DispatchConfig.load(config_path)

@@ -8,7 +8,7 @@ Dispatcher 是 FGS 图的**唯一写入者**。它观察图、选出该发生的
 
 ## 设计要点
 
-1. **Less is more**：只有两类活动（Decide / Execute），没有固定角色、没有跨会话记忆、没有工具集成层。
+1. **Less is more**：调度活动只有两类（Decide / Execute）；旁路提问（Question）与背景摘要（Summary）走独立额度，不抢这两类槽位。没有固定角色、没有跨会话记忆、没有工具集成层。
 2. **外化记忆**：每次活动都从干净上下文重新开始，靠读取 FGS 图恢复状态。
 3. **单一写入者**：Agent 只输出结构化 JSON，Server 校验后写图，避免并发写冲突。
 4. **提示词极短且与任务领域解耦**：`decide.md` / `execute.md` 只描述图语法与输出契约，不含任何渗透测试术语。
@@ -27,19 +27,47 @@ Dispatcher 是 FGS 图的**唯一写入者**。它观察图、选出该发生的
 - **Dispatcher**：轮询项目摘要、抢占租约、构造提示词、执行 CLI、校验输出、写回图。
 - **Worker**：Pi / Mock；容器模式下每个项目一个容器，本地模式下直接跑在宿主机。
 
+### 模块结构
+
+`DispatcherLoop` 由单文件拆分为一组聚焦的 mixin，公共状态与跨 mixin 接口声明在
+`_base.py`（`LoopBase`），组合入口仍保持 `cairn.dispatcher.scheduler.loop.DispatcherLoop` 不变：
+
+```
+dispatcher/scheduler/
+  worker_select.py       按 priority / 当前负载挑选 worker
+  loop/
+    __init__.py          组合 DispatcherLoop，再导出 time / shutil 供测试 patch
+    _base.py             LoopBase：共享属性 + 跨 mixin 方法签名
+    _common.py           退避常量（DECIDE/UNHEALTHY/REJECTED）、预算常量、WorkerSelection
+    core.py              CoreMixin：__init__ / close / run 主循环 / 启动健康检查 / 设置校验
+    dispatch.py          DispatchMixin：全局与项目级派发入口
+    dispatch_decide.py   DecideDispatchMixin：Decide 触发判定与提交
+    dispatch_execute.py  ExecuteDispatchMixin：Execute 提交与 Step 尝试计数
+    scheduling.py        SchedulingMixin：worker 选择与在跑任务统计
+    questions.py         QuestionsMixin：旁路提问与背景摘要
+    reaper.py            ReaperMixin：Future 回收、退避记录、容器清理
+    checkpoints.py       CheckpointsMixin：Decide checkpoint 与项目运行集
+    log_state.py         LogStateMixin：抑制重复日志
+```
+
+新增 mixin 需要同时把状态或跨 mixin 方法补进 `_base.py`，否则 `mypy` 会因
+`attr-defined` 失败——这条约束替代了原先整包关闭 `attr-defined` 的妥协。
+
 ### 执行主链路
 
-1. 定时 tick：`list_projects()`。
-2. 回收已完成任务的 Future，更新 Decide checkpoint。
-3. 取消非 `active` 项目的运行中任务，清理容器。
-4. 选取项目：
+1. 定时 tick：`run_startup_healthchecks()`（仅首次），随后每轮先做一次设置校验（仅首次）。
+2. `list_projects()` 拉取项目摘要。
+3. 回收已完成任务的 Future，更新 Decide checkpoint 与失败退避。
+4. 取消非 `active` 项目的运行中任务，排队清理已结束项目的容器。
+5. 回收摘要 Future、派发待答旁路提问（各自独立线程池）。
+6. 选取项目：
    - `active` 且没有运行中任务的项目优先；
    - 受 `max_running_projects` 约束；
    - 空闲项目按 project_cursor 轮转，避免饿死。
-5. 项目内选活动：
+7. 项目内选活动：
    - Decide 可抢占且触发条件成立 → 先 Decide；
-   - 否则取 `priority` 最高、创建最早的 pending Step → Execute。
-6. 抢租约成功 → 提交线程池 → 任务结束后按结果更新 checkpoint 或冷却 worker。
+   - 否则按 `priority` 从高到低填充 `max_running_steps` 个 Execute 槽位。
+8. 抢租约成功 → 提交线程池 → 任务结束后按结果更新 checkpoint 或冷却 worker。
 
 ## 配置模型
 
@@ -52,6 +80,7 @@ runtime:
   max_workers: 8
   max_running_projects: 3
   max_project_workers: 4
+  max_running_steps: 1          # 项目内并发的 Execute，1 = 串行；仅在 Step 互不抢资源时调大
   healthcheck_timeout: 20
   worker_healthcheck: startup_only   # startup_and_task | startup_only | disabled
   prompt_group: default
@@ -85,6 +114,14 @@ container:
 local:
   workspace_root: null
   completed_action: keep        # keep | remove
+tool_guard:                     # pi 扩展在 worker 内拦截 bash，dispatcher 只读配置
+  enabled: false
+  api_url: "http://127.0.0.1:8001"
+  fail_action: allow            # allow | deny：服务端不可达时的行为
+web:                            # cairn-nginx 前端的 Basic Auth，dispatcher 不使用
+  auth:
+    realm: Cairn
+    users: []
 workers:
   - name: pi-a
     type: pi                    # pi | mock
@@ -98,8 +135,10 @@ workers:
 
 - worker 名字唯一；
 - `max_project_workers` 不得超过 `max_workers`；
-- `task_types` 只能取 `decide` / `execute`；
-- 每个 worker 的 env 会和 `common_env` 合并，worker 自身优先。
+- `task_types` 只能取 `decide` / `execute`（Question 由具备 `decide` 能力的 worker 顺带作答）；
+- `max_running_steps >= 1`，默认 1 保持项目内串行；
+- 每个 worker 的 env 会和 `common_env` 合并，worker 自身优先；
+- 顶层、`runtime`、`workers[]` 及 `web` 配置均为严格模式，出现未知键会直接启动失败（拼错的键不会被静默忽略）。
 
 ## 任务模型
 
@@ -195,7 +234,8 @@ checkpoint 在 Decide 成功后**重新读取图**再写入，这样"Decide 只�
 
 #### 触发条件
 
-存在 `pending`、`worker` 为空、且本地没有在跑的 Step。按 `(priority, created_at, id)` 取最大值。
+存在 `pending`、`worker` 为空、且本地没有在跑的 Step。按 `(priority, created_at, id)` 从大到小填充
+`runtime.max_running_steps` 个槽位（已有 `N` 个 Execute 在跑时只再派发 `max_running_steps - N` 个）。
 
 #### 输入
 
@@ -232,7 +272,7 @@ checkpoint 在 Decide 成功后**重新读取图**再写入，这样"Decide 只�
 | 兜底也失败 | 释放 Step，回到 pending |
 | 心跳冲突（租约被回收） | 立即结束，不写图 |
 | 写 conclude 时项目已非 active | 视为正常结束，只释放 Step |
-| 连续失败 | worker 进入 rejected 冷却（项目 + 任务类型维度） |
+| 连续失败 | worker 进入 rejected 冷却（项目 + 任务类型维度，`REJECTED_RETRY_AFTER_SECONDS` = 5s） |
 | Decide 失败（解析失败 / 完成被拒 / 崩溃） | checkpoint 不推进，同一 trigger 会立刻再次触发；按项目冷却 `DECIDE_RETRY_AFTER_SECONDS`（10s）后再派发 |
 | 同一 trigger 连续失败达 `MAX_CONSECUTIVE_DECIDE_FAILURES`（5） | 不再派发该 trigger，直到图变化（trigger 字符串随之改变）；否则冷却只是把"无限重试"摊慢成每 10s 一次 |
 | Decide 成功但图没变（noop） | 记 success，不写图；下一轮由 open Step / facts 变化继续驱动 |
@@ -294,6 +334,7 @@ snapshot_tokens = max(min_snapshot_tokens, input_budget - overhead_tokens)
 |------|------|
 | 全局并发 | `runtime.max_workers` |
 | 项目并发 | `runtime.max_project_workers` |
+| 项目内 Execute 并发 | `runtime.max_running_steps` |
 | 单 worker 并发 | `workers[].max_running` |
 | 项目内 Decide 串行 | Server 的 decide 租约 |
 | 单 Step 独占 | Server 的 step 租约 |
@@ -320,18 +361,21 @@ build_execute(worker, prompt, session) -> DriverResult
 build_conclude(worker, prompt, session) -> list[str]
 extract_session(session, stdout, stderr) -> str | None
 extract_response_text(stdout, stderr) -> str
+extract_usage(stdout, stderr) -> Usage | None
 supports_conclude() -> bool
-check_health(worker, timeout) -> HealthResult
+local_binary() -> str | None          # 本地模式启动时要检查的宿主机 CLI
+check_health(worker, *, timeout) -> HealthResult
+describe_health(worker) -> str        # 健康检查结果里打印的端点
 ```
 
 `build_execute` 返回 argv 与 session；session 用于把 conclude 兜底续接到同一次对话。
 
 ### 健康检查
 
-- `startup_and_task`：启动时检查一次，每个任务前再检查；失败则冷却 worker。
+- `startup_and_task`：启动时检查一次，每个任务前再检查；任务返回 `unhealthy` 时该 worker 冷却 `UNHEALTHY_RETRY_AFTER_SECONDS`（5s）。
 - `startup_only`：只在启动时检查。
-- `disabled`：完全跳过自动检查（本地模式默认）。
-- 本地模式启动时还会检查 CLI 是否在 PATH 上。
+- `disabled`：完全跳过自动检查（默认值是 `startup_only`；`dispatch.local.example.yaml` 显式设为 `disabled`）。
+- 本地模式启动时改为检查每个 worker 的 CLI 是否在 PATH 上（`local_binary()`），一个都没装则启动失败，部分缺失只告警。
 
 ### CLI 接入约定
 
@@ -355,11 +399,13 @@ cairn/src/cairn/dispatcher/prompts/
   mock/execute.md
   mock/execute_conclude.md
   mock/question.md
+  mock/summary.md
 ```
 
 - `prompt_group` 选择目录。
-- 加载时校验必需占位符，缺一即启动失败。
+- 加载时校验必需占位符，缺一即启动失败（`default` 组还额外要求 `{constraints}` / `{steers}` / `{scope}` / `{opsec}`）。
 - default 组与安全任务解耦：只描述 Fact / Goal / Step 与输出契约。
+- `default/` 下没有 `summary.md`：背景摘要任务会在读取失败时回退到内置模板；`mock/` 组提供了 `summary.md` 方便端到端验证。
 
 ## Mock 驱动
 
@@ -372,6 +418,7 @@ cairn/src/cairn/dispatcher/prompts/
 | `MOCK_EXECUTE` | Execute | `facts` / `rejected` / `invalid_json` / `invalid_payload` / `command_fail` |
 | `MOCK_EXECUTE_CONCLUDE` | 兜底 | 同上 |
 | `MOCK_QUESTION` | 旁路提问 | `answer` / `invalid_json` / `command_fail` |
+| `MOCK_SUMMARY` | 背景摘要 | `answer` / `invalid_json` / `command_fail` |
 
 支持按提示词内容设置规则，例如：
 
@@ -380,7 +427,7 @@ cairn/src/cairn/dispatcher/prompts/
  "rules": [{"fact_ids_gte": 2, "force": "complete"}]}
 ```
 
-可用条件：`fact_ids_gte` / `fact_ids_lte` / `open_steps_empty` / `phase`。
+可用条件：`fact_ids_gte` / `fact_ids_lte` / `open_steps_empty`（未知条件键会被静默忽略）。
 
 ## 本地模式
 

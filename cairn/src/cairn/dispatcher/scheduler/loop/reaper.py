@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from cairn.contracts.models import ProjectSummary
 from cairn.dispatcher.models import RunningTask, StepFailure
 
+from ._base import LoopBase
 from ._common import (
     DECIDE_RETRY_AFTER_SECONDS,
     MAX_CONSECUTIVE_DECIDE_FAILURES,
@@ -19,7 +20,7 @@ from ._common import (
 LOG = logging.getLogger("cairn.dispatcher.scheduler.loop")
 
 
-class ReaperMixin:
+class ReaperMixin(LoopBase):
     def _reap_futures(self) -> None:
         done = [future for future in self.futures if future.done()]
         for future in done:
@@ -161,9 +162,7 @@ class ReaperMixin:
         if outcome != "failed":
             # cancelled / rejected / unhealthy are not the step's own failure.
             return
-        failure = self.step_failures.get(key)
-        if failure is None:
-            failure = StepFailure()
+        failure = self.step_failures.get(key) or StepFailure()
         failure.count += 1
         failure.reason = reason or "execute failed"
         if failure.reason.startswith("budget_exhausted"):

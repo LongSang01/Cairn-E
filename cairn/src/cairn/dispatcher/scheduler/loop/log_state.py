@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 
+from ._base import LoopBase
+
 LOG = logging.getLogger("cairn.dispatcher.scheduler.loop")
 
 
-class LogStateMixin:
+class LogStateMixin(LoopBase):
     def _log_changed(self, scope: str, level: int, message: str, *args: object) -> None:
         state = (level, message, args)
         if self._log_state.get(scope) == state:
