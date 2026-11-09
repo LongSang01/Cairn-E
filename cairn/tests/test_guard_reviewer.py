@@ -612,3 +612,50 @@ def test_policy_samples_against_a_live_reviewer(client) -> None:
     for command, expected in samples:
         body = _check(client, project_id, command).json()
         assert body["decision"] in expected, f"{command} -> {body}"
+
+
+def test_a_different_working_directory_is_reviewed_again(client, monkeypatch) -> None:
+    """`cat ./config.yml` reads a different file in every directory."""
+    _enable(monkeypatch)
+    calls: list[int] = []
+
+    def fake(config, messages):
+        calls.append(1)
+        return _reply("allow", rule="A4", operation="读取配置")
+
+    monkeypatch.setattr(reviewer_service, "_call_model", fake)
+    project_id = _project(client)
+
+    _check(client, project_id, "cat ./config.yml", working_directory="/srv/app-a")
+    _check(client, project_id, "cat ./config.yml", working_directory="/srv/app-b")
+
+    assert len(calls) == 2
+
+
+def test_a_policy_change_invalidates_cached_verdicts(client, monkeypatch, tmp_path) -> None:
+    policy = tmp_path / "policy.md"
+    policy.write_text("旧策略：端口扫描放行", encoding="utf-8")
+    _enable(monkeypatch, CAIRN_REVIEWER_POLICY_FILE=str(policy))
+    calls: list[int] = []
+
+    def fake(config, messages):
+        calls.append(1)
+        return _reply("allow", rule="A4", operation="端口扫描")
+
+    monkeypatch.setattr(reviewer_service, "_call_model", fake)
+    project_id = _project(client)
+
+    _check(client, project_id, SAFE)
+    _check(client, project_id, SAFE)
+    assert len(calls) == 1
+
+    policy.write_text("新策略：端口扫描需人工确认", encoding="utf-8")
+    _check(client, project_id, SAFE)
+
+    assert len(calls) == 2
+
+
+def test_the_working_directory_is_part_of_the_cache_key() -> None:
+    here = reviewer_service.command_hash("cat ./config.yml", {}, None, working_directory="/a")
+    there = reviewer_service.command_hash("cat ./config.yml", {}, None, working_directory="/b")
+    assert here != there

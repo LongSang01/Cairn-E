@@ -122,6 +122,7 @@ container = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "docker" },
     { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
@@ -144,6 +145,7 @@ provides-extras = ["container"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "docker", specifier = ">=7.1.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mypy", specifier = ">=2.4.1" },
     { name = "pytest", specifier = ">=8.3" },

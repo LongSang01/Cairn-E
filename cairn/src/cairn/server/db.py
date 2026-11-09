@@ -439,9 +439,9 @@ def _seed_tool_rules(conn: sqlite3.Connection) -> None:
                 90,
             ),
             (
-                "command",
+                "host",
                 "regex",
-                r"\.(?:gov|edu)(?:[./:]|$)",
+                r"\.(?:gov|edu)(?:\.[a-z]{2})?$",
                 "目标属于禁止范围（政府/教育域名），需人工确认后由管理员处理",
                 85,
             ),

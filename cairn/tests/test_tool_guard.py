@@ -180,3 +180,49 @@ def test_duplicate_decision_is_rejected(client: TestClient) -> None:
 
     assert first.status_code == 200
     assert second.status_code == 409
+
+
+def test_a_forbidden_tld_in_a_file_name_is_not_a_forbidden_host(client: TestClient) -> None:
+    project_id = _project(client)
+
+    body = _check(client, project_id, "curl -s http://example.com/files/report.edu.txt").json()
+
+    assert body["decision"] == "allow"
+
+
+def test_a_government_host_is_denied_without_the_scheme(client: TestClient) -> None:
+    project_id = _project(client)
+
+    body = _check(client, project_id, "ping www.mit.edu").json()
+
+    assert body["decision"] == "deny"
+
+
+def test_an_ask_rule_is_audited_before_a_human_decides(client: TestClient) -> None:
+    project_id = _project(client)
+    _add_rule(action="ask", pattern="sqlmap", priority=200)
+
+    assert (
+        _check(client, project_id, "sqlmap -u http://target/login.php").json()["decision"] == "ask"
+    )
+
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT decision, decision_source FROM tool_audit WHERE project_id = ?"
+            " ORDER BY id DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+    assert row["decision"] == "ask"
+    assert row["decision_source"] == "rule"
+
+
+def test_expire_due_still_sweeps_a_row_with_a_short_budget(client: TestClient) -> None:
+    from cairn.server.services.tool_guard import expire_due
+
+    project_id = _project(client)
+    _add_rule(action="ask", pattern="sqlmap", priority=200, timeout_seconds=5)
+    assert _check(client, project_id, "sqlmap -u http://target/x").json()["decision"] == "ask"
+
+    with db.get_conn() as conn:
+        conn.execute("UPDATE tool_approvals SET created_at = '2000-01-01T00:00:00Z'")
+        assert expire_due(conn) == 1

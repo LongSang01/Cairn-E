@@ -22,6 +22,7 @@ import hashlib
 import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
@@ -29,7 +30,7 @@ from . import reviewer
 from .hosts import host_candidates
 from .scope import host_in_scope, load_scope
 from .steer_delivery import claim_steers
-from .timeutil import utcnow
+from .timeutil import utcnow, utcnow_before
 
 # Wording matters: an agent that reads a block as "the target defended itself" will
 # retry with a bypass. This says the platform did it.
@@ -154,11 +155,18 @@ def _review(
         return None
     constraints = _load_constraints(conn, project_id)
     review_scripts = _review_scripts(scripts)
-    cache_key = reviewer.command_hash(command, arguments, review_scripts)
+    command_key = reviewer.command_hash(
+        command, arguments, review_scripts, working_directory=working_directory
+    )
     scope_values = [str(item.get("value", "")) for item in scope]
     scope_key = reviewer.scope_digest(scope_values, constraints)
+    policy_key = reviewer.policy_identity(config)
     cached = reviewer.cached_verdict(
-        conn, project_id=project_id, cache_key=cache_key, scope_key=scope_key
+        conn,
+        project_id=project_id,
+        command_key=command_key,
+        scope_key=scope_key,
+        policy_key=policy_key,
     )
     if cached is not None:
         return _from_verdict(cached, config)
@@ -189,8 +197,9 @@ def _review(
             conn,
             config,
             project_id=project_id,
-            cache_key=cache_key,
+            command_key=command_key,
             scope_key=scope_key,
+            policy_key=policy_key,
             verdict=verdict,
         )
     return _from_verdict(verdict, config)
@@ -414,6 +423,19 @@ def check(
             decision.timeout_action,
         ),
     )
+    _audit(
+        conn,
+        project_id=project_id,
+        session_id=session_id,
+        worker=worker,
+        tool=tool,
+        command=command,
+        decision="ask",
+        decision_source=decision.source,
+        rule_id=decision.rule_id,
+        actor=actor,
+        reason=decision.reason,
+    )
     return {
         "decision": "ask",
         "approval_id": approval_id,
@@ -484,8 +506,26 @@ def expire_due(conn: sqlite3.Connection, *, timeout_seconds: int = 60) -> int:
     in the project sweeps the queue.
     """
     now = utcnow()
+    # Pre-filter in SQL: only rows that could already be past their own budget are
+    # fetched. The smallest live budget bounds the cutoff, so a 5s rule is not held
+    # back by a 300s one sitting next to it.
+    floor = conn.execute(
+        """
+        SELECT MIN(COALESCE(
+            timeout_seconds,
+            (SELECT timeout_seconds FROM tool_rules r WHERE r.id = tool_approvals.rule_id),
+            ?
+        )) AS value
+        FROM tool_approvals WHERE status = 'pending'
+        """,
+        (timeout_seconds,),
+    ).fetchone()["value"]
+    if floor is None:
+        return 0
     rows = conn.execute(
-        "SELECT * FROM tool_approvals WHERE status = 'pending' ORDER BY created_at"
+        "SELECT * FROM tool_approvals WHERE status = 'pending' AND created_at <= ?"
+        " ORDER BY created_at",
+        (utcnow_before(max(int(floor), 1)),),
     ).fetchall()
     expired = 0
     for row in rows:
@@ -534,8 +574,6 @@ def list_audit(conn: sqlite3.Connection, project_id: str, *, limit: int = 100) -
 
 
 def _age_seconds(created_at: str, now: str) -> float:
-    from datetime import datetime
-
     try:
         start = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
         end = datetime.fromisoformat(now.replace("Z", "+00:00"))

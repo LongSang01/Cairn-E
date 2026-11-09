@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -29,6 +30,21 @@ from cairn.dispatcher.workers.health import HealthResult
 from cairn.dispatcher.workers.usage import Usage
 from cairn.server import db
 from cairn.server.app import app
+
+
+@pytest.fixture(autouse=True)
+def _isolate_environment():
+    """Keep ``CAIRN_*`` environment from leaking between tests.
+
+    The CLI sets ``CAIRN_WEB_CONFIG`` for the middleware it is about to run; when a
+    test calls that path while the repository root holds a ``dispatch.yaml``, the
+    credentials stayed set for every later test. Restore the environment verbatim.
+    """
+    before = {key: value for key, value in os.environ.items() if key.startswith("CAIRN_")}
+    yield
+    for key in [key for key in os.environ if key.startswith("CAIRN_")]:
+        del os.environ[key]
+    os.environ.update(before)
 
 
 @pytest.fixture

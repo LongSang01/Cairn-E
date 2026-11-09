@@ -26,6 +26,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import requests
@@ -41,6 +42,10 @@ MAX_COMMAND_CHARS = 8_000
 # runaway reply from being stored as a verdict.
 MAX_COMMENT_CHARS = 2_400
 CACHE_TTL_SECONDS = 86_400
+# Expired rows are swept on write, but only every Nth write: the delete is a full
+# table scan and a busy project would otherwise pay for it on every verdict.
+CACHE_SWEEP_EVERY = 50
+_writes_until_sweep = 0
 
 INPUT_BOUNDARY = """# 审查输入边界
 输入为 JSON。待裁决对象是 tool_name 与 arguments（完整工具参数）；script_files 是平台在
@@ -326,15 +331,23 @@ def command_hash(
     command: str,
     arguments: dict[str, Any] | None,
     scripts: list[ReviewScript] | None = None,
+    *,
+    working_directory: str | None = None,
 ) -> str:
-    """Cache key for one call: the command, its arguments and its script evidence.
+    """Cache key for one call: the command, its arguments, its scripts and its cwd.
 
     Script contents belong in the key. ``bash ./scan.sh`` looks identical before and
     after someone appends ``rm -rf /var/www`` to the file, so hashing the command
     alone would replay the earlier allow against different code.
+
+    The working directory belongs in the key for the same reason: ``cat ./config.yml``
+    reads a different file in every directory, and the reviewer is asked about the
+    directory, so a verdict given for one must not answer for the other.
     """
     normalized = " ".join(command.split())
     material = normalized
+    if working_directory:
+        material += "\n--cwd--\n" + " ".join(working_directory.split())
     if arguments:
         material += "\n" + json.dumps(arguments, sort_keys=True, ensure_ascii=False)
     for item in scripts or []:
@@ -345,6 +358,29 @@ def command_hash(
 def scope_digest(scope: list[str], constraints: list[str]) -> str:
     material = "\n".join(sorted(scope)) + "\n--\n" + "\n".join(sorted(constraints))
     return _digest(material)
+
+
+def policy_identity(config: ReviewerConfig) -> str:
+    """Identify the policy and model that produced a verdict.
+
+    ``CAIRN_REVIEWER_POLICY_FILE`` is hot-swappable, so the policy text is re-read on
+    every call. Folding its digest (plus the model endpoint) into the cache key means
+    tightened rules take effect immediately instead of after the TTL of an old allow.
+    """
+    material = "\n".join(
+        (
+            effective_policy(config),
+            config.model,
+            config.base_url,
+            config.api,
+        )
+    )
+    return _digest(material)
+
+
+def cache_key(command_key: str, policy_key: str) -> str:
+    """The stored key: one command under one policy, never across a policy change."""
+    return _digest(f"{command_key}\n--policy--\n{policy_key}")
 
 
 def build_input(
@@ -536,11 +572,18 @@ def _call_model(config: ReviewerConfig, messages: list[dict[str, str]]) -> str:
     return str(body["choices"][0]["message"]["content"])
 
 
-def cached_verdict(conn: Any, *, project_id: str, cache_key: str, scope_key: str) -> Verdict | None:
+def cached_verdict(
+    conn: Any,
+    *,
+    project_id: str,
+    command_key: str,
+    scope_key: str,
+    policy_key: str,
+) -> Verdict | None:
     row = conn.execute(
         "SELECT decision, reason, rule FROM tool_review_cache "
         "WHERE project_id = ? AND command_hash = ? AND scope_digest = ? AND expires_at > ?",
-        (project_id, cache_key, scope_key, utcnow()),
+        (project_id, cache_key(command_key, policy_key), scope_key, utcnow()),
     ).fetchone()
     if row is None:
         return None
@@ -552,16 +595,21 @@ def store_verdict(
     config: ReviewerConfig,
     *,
     project_id: str,
-    cache_key: str,
+    command_key: str,
     scope_key: str,
+    policy_key: str,
     verdict: Verdict,
 ) -> None:
     """Cache allow/deny only: an ``ask`` is a human decision and must not be replayed."""
     if verdict.action not in ("allow", "deny") or config.cache_ttl_seconds <= 0:
         return
-    # Opportunistic sweep: the table is only read on a cache miss, so expired rows would
-    # otherwise accumulate for the lifetime of the database.
-    conn.execute("DELETE FROM tool_review_cache WHERE expires_at <= ?", (utcnow(),))
+    global _writes_until_sweep
+    _writes_until_sweep += 1
+    if _writes_until_sweep >= CACHE_SWEEP_EVERY:
+        # Rates the full-table delete down to once per N writes; expired rows are
+        # already invisible to lookups because they filter on expires_at.
+        conn.execute("DELETE FROM tool_review_cache WHERE expires_at <= ?", (utcnow(),))
+        _writes_until_sweep = 0
     expires = _future_stamp(config.cache_ttl_seconds)
     conn.execute(
         "INSERT INTO tool_review_cache (project_id, command_hash, scope_digest, decision,"
@@ -571,7 +619,7 @@ def store_verdict(
         " created_at = excluded.created_at, expires_at = excluded.expires_at",
         (
             project_id,
-            cache_key,
+            cache_key(command_key, policy_key),
             scope_key,
             verdict.action,
             verdict.reason,
@@ -583,7 +631,5 @@ def store_verdict(
 
 
 def _future_stamp(seconds: int) -> str:
-    from datetime import UTC, datetime, timedelta
-
     moment = datetime.now(UTC) + timedelta(seconds=seconds)
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
