@@ -19,7 +19,7 @@ class RequestIdMiddleware:
     """Assign every HTTP request a correlation id, echoed as `X-Request-ID`.
 
     The id is taken from the caller's `X-Request-ID` header when it looks sane
-    (proxies like the nginx front end can forward one) and generated otherwise.
+    (an upstream proxy can forward one) and generated otherwise.
     It is kept in a contextvar for the duration of the request so log records
     emitted while handling it carry the same id, and the request finishes with a
     single access line whose structured fields show up in JSON log mode.

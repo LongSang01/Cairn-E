@@ -5,19 +5,18 @@ services:
       dockerfile: Dockerfile
     image: cairn-app
     container_name: cairn-server
-    # Browser traffic goes through cairn-nginx (Basic Auth); the server is
-    # only reachable on the compose network.
-    expose:
-      - "8000"
+    # The server is the only entry point. It enforces web.auth itself, so there is no
+    # proxy sidecar between the browser and the app.
     ports:
+      - "8000:8000"
       # Worker containers run with host networking and reach the command guard over
-      # host loopback; binding 127.0.0.1 keeps it off the LAN. nginx owns :8000.
+      # host loopback; binding 127.0.0.1 keeps that path off the LAN.
       - "127.0.0.1:8001:8000"
     environment:
       # Command reviewer (LLM judge). It runs here, not in the worker: the worker is
       # the untrusted side, and a reviewer inside it could be rewritten by the model
       # it is supposed to police. Values come from `.env` so no key is committed and
-      # none is mounted into the nginx container.
+      # worker containers never see them.
       CAIRN_REVIEWER_ENABLED: "${CAIRN_REVIEWER_ENABLED:-0}"
       CAIRN_REVIEWER_MODEL: "${CAIRN_REVIEWER_MODEL:-}"
       CAIRN_REVIEWER_BASE_URL: "${CAIRN_REVIEWER_BASE_URL:-}"
@@ -31,48 +30,29 @@ services:
       CAIRN_REVIEWER_INCOMPLETE_SCRIPT_ACTION: "${CAIRN_REVIEWER_INCOMPLETE_SCRIPT_ACTION:-model}"
       CAIRN_REVIEWER_CACHE_TTL_SECONDS: "${CAIRN_REVIEWER_CACHE_TTL_SECONDS:-86400}"
       # Channel separation. Empty means "not enforced" (backwards compatible):
+      # - web.auth in dispatch.yaml enables Basic Auth for the UI
       # - CAIRN_WORKER_TOKEN gates /internal/* (the guard extension's channel)
-      # - CAIRN_UI_TOKEN gates endpoints that could switch the guard off
+      # CAIRN_UI_TOKEN is not passed here: browsers cannot present a custom header, so a
+      # token-only deployment would lock the UI out of its own write endpoints. It stays
+      # supported in code for scripted clients.
+      CAIRN_WEB_CONFIG: /cairn/dispatch.yaml
       CAIRN_WORKER_TOKEN: "${CAIRN_WORKER_TOKEN:-}"
-      CAIRN_UI_TOKEN: "${CAIRN_UI_TOKEN:-}"
     volumes:
       - ./datas/cairn/:/root/.local/share/cairn/
+      # Read-only: the server parses web.auth from it and enforces Basic Auth itself.
+      - ./dispatch.yaml:/cairn/dispatch.yaml:ro
     healthcheck:
       test:
         - "CMD"
         - "python3"
         - "-c"
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/projects', timeout=5)"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 3s
     restart: unless-stopped
-    command: ["uv", "run", "cairn", "serve", "--host", "0.0.0.0", "--no-access-log"]
-  cairn-nginx:
-    build:
-      context: deploy/nginx
-      dockerfile: Dockerfile
-    image: cairn-nginx
-    container_name: cairn-nginx
-    ports:
-      - "8000:80"
-    environment:
-      # Injected into proxied requests as X-Cairn-UI-Token (see the template).
-      CAIRN_UI_TOKEN: "${CAIRN_UI_TOKEN:-}"
-    volumes:
-      # read-only: the entrypoint renders .htpasswd + nginx config from web.auth
-      - ./dispatch.yaml:/cairn/dispatch.yaml:ro
-    depends_on:
-      cairn-server:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "sh", "-c", "wget -S -O /dev/null http://127.0.0.1/ 2>&1 | grep -qE ' (200|401) '"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 3s
-    restart: unless-stopped
+    command: ["cairn", "serve", "--host", "0.0.0.0", "--no-access-log"]
   cairn-socket-proxy:
     image: ghcr.io/tecnativa/docker-socket-proxy:latest
     container_name: cairn-socket-proxy
@@ -105,7 +85,8 @@ services:
       # 通过受限 socket 代理操作 Docker，不再直挂宿主 /var/run/docker.sock。
       DOCKER_HOST: tcp://cairn-socket-proxy:2375
       # Written into each task's cairn-guard.json so the extension can authenticate to
-      # /internal/*. Deliberately not in dispatch.yaml: nginx mounts that file too.
+      # /internal/*. Deliberately not in dispatch.yaml: the server reads that file, and
+      # the worker must not receive the UI's credentials.
       CAIRN_WORKER_TOKEN: "${CAIRN_WORKER_TOKEN:-}"
     volumes:
       - ./dispatch.yaml:/cairn/dispatch.yaml
@@ -115,4 +96,4 @@ services:
       cairn-server:
         condition: service_healthy
     restart: unless-stopped
-    command: ["uv", "run", "cairn", "dispatch", "--config", "dispatch.yaml"]
+    command: ["cairn", "dispatch", "--config", "dispatch.yaml"]

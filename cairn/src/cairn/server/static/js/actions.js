@@ -261,7 +261,7 @@ export const actionsMixins = {
         : 'dagre_tb';
       this.layoutMode = this.localPrefs.layout_mode;
       this.saveLocalPrefs();
-      if (this.cy) this.cy.layout(this.layoutOpts()).run();
+      if (this.cy) this.relayout();
       this.showLocalPrefs = false;
       this.showToast('本地偏好已保存');
     } catch (e) {

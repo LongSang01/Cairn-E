@@ -29,9 +29,20 @@ def test_serve_configures_db_and_delegates_to_uvicorn(monkeypatch) -> None:
     monkeypatch.setattr(cli, "configure_logging", lambda *a, **kw: captured.setdefault("log", kw))
     monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kw: captured.setdefault("uvicorn", kw))
 
+    # A public bind without web.auth is refused on purpose (see test_server_auth);
+    # --allow-insecure is the explicit opt-out the operator would pass in that case.
     result = CliRunner().invoke(
         cli.serve,
-        ["--host", "0.0.0.0", "--port", "9001", "--log-format", "json", "--no-access-log"],
+        [
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9001",
+            "--log-format",
+            "json",
+            "--no-access-log",
+            "--allow-insecure",
+        ],
     )
 
     assert result.exit_code == 0, result.output

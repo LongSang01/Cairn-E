@@ -8,14 +8,18 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
-    "uvicorn[standard]>=0.34",
+    # Plain uvicorn: no websockets/watchfiles/uvloop are used, and SSE is plain HTTP.
+    "uvicorn>=0.34",
     "click>=8.1",
     "pyyaml>=6.0",
-    "docker>=7.1.0",
     "requests>=2.32.3",
     "pydantic>=2.12.5",
     "starlette>=1.0.0",
 ]
+
+[project.optional-dependencies]
+# Only the container execution mode talks to Docker; `execution: local` installs nothing.
+container = ["docker>=7.1.0"]
 
 [project.scripts]
 cairn = "cairn.cli:main"

@@ -254,10 +254,10 @@ class Verdict:
 def config_from_env() -> ReviewerConfig:
     """Read the reviewer settings from the server environment.
 
-    Environment (not ``dispatch.yaml``) on purpose: the dispatcher config is mounted
-    into the nginx container for Basic Auth, so the review model's key must not live
-    there. ``CAIRN_REVIEWER_POLICY_FILE`` lets an operator swap the policy text
-    without rebuilding the image.
+    Environment (not ``dispatch.yaml``) on purpose: the dispatcher config is shared by
+    the server and the dispatcher, so the review model's key must not live there.
+    ``CAIRN_REVIEWER_POLICY_FILE`` lets an operator swap the policy text without
+    rebuilding the image.
     """
     policy = REVIEW_POLICY
     policy_path = os.environ.get("CAIRN_REVIEWER_POLICY_FILE", "").strip()

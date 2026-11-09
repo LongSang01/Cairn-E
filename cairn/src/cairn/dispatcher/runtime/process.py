@@ -6,10 +6,10 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from docker.errors import APIError, DockerException
-from docker.models.containers import Container
+if TYPE_CHECKING:
+    from docker.models.containers import Container
 
 LOG = logging.getLogger(__name__)
 EXEC_KILL_JOIN_TIMEOUT_SECONDS = 5.0
@@ -109,6 +109,10 @@ class ManagedProcess:
         )
 
     def kill(self) -> None:
+        # Imported here so `execution: local` works without the optional `container`
+        # extra installed. Only the container path ever reaches this code.
+        from docker.errors import DockerException
+
         if self._exec_id is None:
             return
         try:
@@ -132,6 +136,8 @@ class ManagedProcess:
         self.kill()
 
     def _read_stream(self) -> None:
+        from docker.errors import DockerException
+
         assert self._exec_id is not None
         stream: Any | None = None
         try:
@@ -171,6 +177,8 @@ class ManagedProcess:
                 response_close()
 
     def _resolve_exit_code(self) -> int:
+        from docker.errors import DockerException
+
         assert self._exec_id is not None
         deadline = time.monotonic() + EXEC_KILL_JOIN_TIMEOUT_SECONDS
         while True:
@@ -188,6 +196,8 @@ class ManagedProcess:
             time.sleep(0.1)
 
     def _kill_pid(self, pid: int) -> None:
+        from docker.errors import APIError
+
         last_error: str | None = None
         for command in (
             ["kill", "-KILL", str(pid)],

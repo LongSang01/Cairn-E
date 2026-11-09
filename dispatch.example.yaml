@@ -111,10 +111,9 @@ workers:
       PI_PROVIDER_API: "openai-completions"
       PI_MODEL_CONTEXT_WINDOW: "131072"
 
-# Web front (cairn-nginx) settings — consumed by the nginx Basic Auth entrypoint
-# in Docker Compose mode; the dispatcher itself ignores this section.
-# Passwords are written as plaintext here and hashed (SHA-512 crypt) into
-# nginx's .htpasswd at container start.
+# Web UI authentication — the server enforces HTTP Basic Auth from this block; the
+# dispatcher only validates the schema. Without it the UI is unauthenticated, and a
+# non-loopback bind is refused unless the server is started with --allow-insecure.
 # web:
 #   auth:
 #     realm: "Cairn"

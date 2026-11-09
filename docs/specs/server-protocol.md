@@ -521,7 +521,7 @@ SSE（`text/event-stream`）对话流，会话页用它实时看到消息增长�
 - `gone`：会话被删除时发出。
 - 其余时间每约 0.5 秒发一行 `: keep-alive` 注释。
 
-响应带 `Cache-Control: no-cache, no-transform` 与 `X-Accel-Buffering: no`，nginx 代理侧也必须关闭缓冲（本仓库的 [nginx 配置](../../deploy/nginx/default.conf.template) 已设置 `proxy_buffering off`），否则消息会被攒住不刷新。
+响应带 `Cache-Control: no-cache, no-transform` 与 `X-Accel-Buffering: no`，浏览器直连服务端；如果以后在前面再加反向代理，必须关闭代理缓冲，否则消息会被攒住不刷新。
 
 ### Questions（旁路提问）
 

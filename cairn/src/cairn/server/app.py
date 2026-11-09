@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from cairn import __version__
 from cairn.server import db
+from cairn.server.auth import UIAuthMiddleware
 from cairn.server.middleware import RequestIdMiddleware
 from cairn.server.routers import (
     constraints,
@@ -66,6 +67,9 @@ app.include_router(usage.router)
 app.include_router(export.router)
 app.include_router(tool_guard.router)
 
+# Added first so RequestIdMiddleware stays the outer layer: a 401 from the auth
+# middleware still gets a correlation id and an access line.
+app.add_middleware(UIAuthMiddleware)
 app.add_middleware(RequestIdMiddleware)
 
 

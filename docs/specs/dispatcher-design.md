@@ -118,7 +118,7 @@ tool_guard:                     # pi 扩展在 worker 内拦截 bash，dispatche
   enabled: false
   api_url: "http://127.0.0.1:8001"
   fail_action: allow            # allow | deny：服务端不可达时的行为
-web:                            # cairn-nginx 前端的 Basic Auth，dispatcher 不使用
+web:                            # 服务端 Basic Auth：server 读取并执行，dispatcher 只做校验
   auth:
     realm: Cairn
     users: []
@@ -194,7 +194,7 @@ ARTEX 的置信度阈值只作用于它的 Jev（System One 单选项）通道�
 拒绝话术统一以「【Cairn 平台管控·非目标防御】」开头：渗透 agent 把平台拦截误读成目标 WAF 时会
 换手法反复绕，越绕越糟。
 
-审核员配置走 **server 环境变量**（不写进 `dispatch.yaml`——那份文件被 nginx 容器挂载）：
+审核员配置走 **server 环境变量**（不写进 `dispatch.yaml`——那份文件由 dispatcher 与 server 共读）：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
@@ -210,16 +210,19 @@ ARTEX 的置信度阈值只作用于它的 Jev（System One 单选项）通道�
 
 ### 通道隔离
 
-worker 与浏览器最终都到达同一个 FastAPI 进程：浏览器经 nginx（Basic Auth），worker 经宿主回环
-端口。网络路径分不出两者——被攻陷的 worker 能调用回环上任何端点——所以用两个令牌区分：
+worker 与浏览器最终都到达同一个 FastAPI 进程：浏览器带 `Authorization: Basic`（`web.auth`，
+由服务端中间件校验），worker 经宿主回环端口只带 worker 令牌。网络路径分不出两者——被攻陷的
+worker 能调用回环上任何端点——所以用两套凭据区分：
 
-| 令牌 | 注入方 | 保护对象 |
+| 凭据 | 来源 | 保护对象 |
 |---|---|---|
 | `CAIRN_WORKER_TOKEN`（`x-cairn-worker-token`） | dispatcher 写进每个任务的 `cairn-guard.json` | `/internal/projects/*`：只允许 check 与审批查询 |
-| `CAIRN_UI_TOKEN`（`x-cairn-ui-token`） | nginx 对浏览器流量注入 | 能削弱审核的端点：写工具规则、批审批、改 scope |
+| Basic Auth（`web.auth`） | 浏览器，服务端直接校验 | 全部页面与 API，包括能削弱审核的端点（写工具规则、批审批、改 scope） |
+| `CAIRN_UI_TOKEN`（`x-cairn-ui-token`，可选） | 脚本客户端 | 同上；仅为兼容旧客户端保留 |
 
-两者都留空时不强制（现有部署不受影响）；设置即开启隔离。worker 容器里只有 worker 令牌，
-即使目标拿到 shell 也读不到 UI 令牌，因此改不了规则、也批不了自己的待审命令。
+未配置 `web.auth` 时 UI 不强制认证（现有部署不受影响），但非回环绑定会被 CLI 拒绝，除非显式
+`--allow-insecure`。worker 容器里只有 worker 令牌，即使目标拿到 shell 也读不到 UI 凭据，因此
+改不了规则、也批不了自己的待审命令。
 
 已知绕过路径（保留 `sudo` 的代价，必须靠部署侧兜住）：
 

@@ -27,6 +27,7 @@ cairn/.ruff_cache/
 cairn/.pytest_cache/
 cairn/.mypy_cache/
 cairn/.venv/
+cairn/tests/
 
 # The worker container image has its own context.
 container/

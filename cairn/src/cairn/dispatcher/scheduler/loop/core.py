@@ -16,7 +16,6 @@ from cairn.dispatcher.config import DispatchConfig, LocalConfig
 from cairn.dispatcher.models import DecideCheckpoint, RunningTask, StepFailure
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.backend import ExecutionBackend
-from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.local_backend import LocalBackend
 from cairn.dispatcher.runtime.startup_healthcheck import (
     format_failure_summary,
@@ -39,6 +38,10 @@ class CoreMixin(LoopBase):
                 self.config.local or LocalConfig()
             )
         else:
+            # Imported only for container mode so a local install does not need the
+            # optional `container` extra (the docker SDK) at all.
+            from cairn.dispatcher.runtime.containers import ContainerManager
+
             assert self.config.container is not None
             self.container_manager = ContainerManager(self.config.container)
         self.executor = ThreadPoolExecutor(max_workers=self.config.runtime.max_workers)

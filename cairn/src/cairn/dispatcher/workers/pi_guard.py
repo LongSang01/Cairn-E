@@ -197,8 +197,8 @@ def config_json(
             "worker": worker.name,
             "session_id": session_id,
             "fail_action": guard.fail_action,
-            # From the dispatcher environment, not dispatch.yaml: that file is also
-            # mounted into the nginx container, and this token must not travel there.
+            # From the dispatcher environment, not dispatch.yaml: the server reads that
+            # file too, and this token must not travel with the worker.
             "worker_token": os.environ.get("CAIRN_WORKER_TOKEN", "").strip(),
         },
         ensure_ascii=False,

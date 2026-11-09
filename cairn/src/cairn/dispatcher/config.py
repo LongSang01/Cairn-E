@@ -9,6 +9,10 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+# The web-auth schema is shared with the server, which enforces it; the dispatcher only
+# parses and validates the block so a malformed file fails at boot, not at request time.
+from cairn.contracts.web import WebConfig
+
 TaskType = Literal["decide", "execute"]
 WorkerType = Literal["pi", "mock"]
 CompletedAction = Literal["remove", "stop"]
@@ -251,40 +255,6 @@ class WorkerConfig(BaseModel):
         if self.type == "mock":
             resolve_mock_behavior(self.name, self.env)
         return self
-
-
-class WebAuthUser(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str = Field(min_length=1)
-    password: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def validate_credentials(self) -> WebAuthUser:
-        # Mirrors the nginx entrypoint's constraints (see deploy/nginx/40-cairn-auth.sh).
-        if self.name.startswith("-") or ":" in self.name or "\t" in self.name:
-            raise ValueError('user name must not start with "-" or contain ":" or tabs')
-        if "\t" in self.password:
-            raise ValueError("password must not contain tabs")
-        return self
-
-
-class WebAuthConfig(BaseModel):
-    """Basic Auth users for the cairn-nginx web front. Plaintext passwords are
-    hashed (SHA-512 crypt) by the nginx entrypoint at container start."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    realm: str = Field(min_length=1, default="Cairn")
-    users: list[WebAuthUser] = Field(default_factory=list)
-
-
-class WebConfig(BaseModel):
-    """Web front (cairn-nginx) settings; ignored by the dispatcher runtime."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    auth: WebAuthConfig | None = None
 
 
 class ToolGuardConfig(BaseModel):

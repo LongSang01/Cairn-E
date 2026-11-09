@@ -1,5 +1,7 @@
 // Cytoscape graph construction, styles, layout and updates.
 
+import { ensureLayout, isLayoutLoaded } from './layouts.js';
+
 export const graphMixins = {
   buildElements() {
     const nodes = [];
@@ -211,11 +213,16 @@ export const graphMixins = {
     const container = document.getElementById('cy');
     if (!container) return;
     const { nodes, edges } = this.buildElements();
+    // klay/elk may not be fetched yet (see layouts.js). Start with dagre, then re-run
+    // the saved mode once its scripts arrive; waiting here would leave `this.cy` unset
+    // and the callers that immediately update the graph would draw nothing.
+    const engine = this.layoutEngine();
+    const ready = engine === 'dagre' || isLayoutLoaded(engine);
     const rawCy = cytoscape({
       container,
       elements: [...nodes, ...edges],
       style: this.graphStyles(),
-      layout: this.layoutOpts(),
+      layout: this.layoutOpts(true, ready ? engine : 'dagre'),
       minZoom: 0.15,
       maxZoom: 3.5,
     });
@@ -226,6 +233,17 @@ export const graphMixins = {
     rawCy.on('tap', (e) => {
       if (e.target === rawCy) self.clearSelection();
     });
+    if (!ready) {
+      ensureLayout(engine)
+        .then(() => {
+          // The user may have switched to another (still loading) engine meanwhile;
+          // that switch schedules its own relayout, so this one must not run unloaded.
+          if (this.cy === rawCy && isLayoutLoaded(this.layoutEngine())) {
+            rawCy.layout(this.layoutOpts()).run();
+          }
+        })
+        .catch((error) => console.error(error));
+    }
     this.pulseActive();
     this.setupAutoFit();
     this.setupMinimap();
@@ -608,9 +626,9 @@ export const graphMixins = {
     ];
   },
 
-  layoutOpts(animate = true) {
+  layoutOpts(animate = true, engine = this.layoutEngine()) {
     const direction = this.layoutDirection();
-    if (this.layoutEngine() === 'elk') {
+    if (engine === 'elk') {
       const elkDirection = direction === 'TB' ? 'DOWN' : 'RIGHT';
       return {
         name: 'elk',
@@ -632,7 +650,7 @@ export const graphMixins = {
         },
       };
     }
-    if (this.layoutEngine() === 'klay') {
+    if (engine === 'klay') {
       const isHorizontal = direction === 'LR';
       return {
         name: 'klay',
@@ -665,6 +683,22 @@ export const graphMixins = {
       animationDuration: 400,
       animationEasing: 'ease-in-out-cubic',
     };
+  },
+
+  async relayout(animate = true) {
+    if (!this.cy) return;
+    const engine = this.layoutEngine();
+    try {
+      await ensureLayout(engine);
+    } catch (error) {
+      // Keep the current layout; the mode stays selected and a retry re-attempts load.
+      console.error(error);
+      return;
+    }
+    // A newer switch owns the graph now; running a stale mode would either fail (its
+    // engine is still loading) or fight the newer layout.
+    if (!this.cy || this.layoutEngine() !== engine) return;
+    this.cy.layout(this.layoutOpts(animate)).run();
   },
 
   snapshotNodePositions() {
@@ -785,7 +819,7 @@ export const graphMixins = {
         ex.data(e.data);
       }
     }
-    if (changed) this.cy.layout(this.layoutOpts()).run();
+    if (changed) this.relayout();
     this.pulseActive();
     this.refreshGraphDecorations();
   },
@@ -962,7 +996,7 @@ export const graphMixins = {
     this.layoutMode = this.isValidLayoutMode(this.layoutMode) ? this.layoutMode : 'dagre_tb';
     this.localPrefs.layout_mode = this.layoutMode;
     this.saveLocalPrefs();
-    if (this.cy) this.cy.layout(this.layoutOpts()).run();
+    if (this.cy) this.relayout();
   },
 
   clampPanelWidth(width) {
