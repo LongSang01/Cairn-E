@@ -214,6 +214,34 @@ describe('blocked projects, findings evidence and the guard queue', () => {
     expect(capped.budgetLabel()).toBe('1.2k / 5.0k');
   });
 
+  it('budgetMillions turns stored tokens into the M the dialog shows', () => {
+    const c = ctx();
+    expect(c.budgetMillions(null)).toBe('');
+    expect(c.budgetMillions(0)).toBe('');
+    expect(c.budgetMillions(500_000)).toBe('0.5');
+    expect(c.budgetMillions(1_500_000)).toBe('1.5');
+    expect(c.budgetMillions(1_234_567)).toBe('1.234567');
+  });
+
+  it('budgetMillionsToTokens turns the M input back into raw tokens', () => {
+    const c = ctx();
+    expect(c.budgetMillionsToTokens('0.5')).toBe(500_000);
+    expect(c.budgetMillionsToTokens('1')).toBe(1_000_000);
+    expect(c.budgetMillionsToTokens(' 2.25 ')).toBe(2_250_000);
+    expect(c.budgetMillionsToTokens('')).toBeNull();
+    expect(c.budgetMillionsToTokens('0')).toBeNull();
+    expect(c.budgetMillionsToTokens('-1')).toBeNull();
+    expect(c.budgetMillionsToTokens('abc')).toBeNull();
+    // Sub-token input must not silently turn into zero (which would clear the budget).
+    expect(c.budgetMillionsToTokens('0.0000001')).toBeNull();
+  });
+
+  it('budgetPreview names the token count behind the M value', () => {
+    expect(ctx({ budgetForm: { value: '' } }).budgetPreview()).toBe('');
+    expect(ctx({ budgetForm: { value: '0.5' } }).budgetPreview()).toBe('= 500.0k tokens');
+    expect(ctx({ budgetForm: { value: '2' } }).budgetPreview()).toBe('= 2.00M tokens');
+  });
+
   it('counts only pending approvals', () => {
     const c = ctx({
       toolApprovals: [{ status: 'pending' }, { status: 'allowed' }, { status: 'pending' }],

@@ -624,7 +624,11 @@ class UpdateProjectStatusRequest(BaseModel):
 
 
 class UpdateTokenBudgetRequest(BaseModel):
-    """`null` clears the budget and lets the project run again."""
+    """`null` clears the budget and lets the project run again.
+
+    The wire unit is raw tokens because that is what usage is counted in; the web UI
+    asks for millions and converts before it sends (`budgetMillionsToTokens`).
+    """
 
     token_budget: int | None = None
 

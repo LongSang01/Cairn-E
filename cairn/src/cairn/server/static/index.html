@@ -432,7 +432,7 @@
         <span class="font-medium text-slate-500 tabular-nums" x-text="`${formatTokens(usageTotal())} tokens`"></span>
       </span>
       <button type="button" @click="openBudgetDialog()" class="text-[11px] text-slate-400 hover:text-slate-600 underline decoration-dotted"
-        :title="project.project.token_budget ? '当前预算：' + formatTokens(project.project.token_budget) : '未设置预算'">
+        :title="project.project.token_budget ? '当前预算：' + budgetMillions(project.project.token_budget) + ' M（' + formatTokens(project.project.token_budget) + ' tokens）' : '未设置预算'">
         <span x-text="project.project.token_budget ? `预算 ${budgetLabel()}` : '设置预算'"></span>
       </button>
     </div>
@@ -1508,9 +1508,10 @@
         达到预算后项目会被标记为「已阻断」并停止派发新任务；调高或清空预算会恢复为进行中。
         当前已用 <span class="font-mono" x-text="formatTokens(usageTotal())"></span> tokens。
       </p>
-      <label class="block text-xs text-slate-400">预算（tokens，留空表示不限制）</label>
-      <input type="number" min="1" step="1000" x-model="budgetForm.value" placeholder="例如 500000"
+      <label class="block text-xs text-slate-400">预算（M，1 M = 100 万 token；留空表示不限制）</label>
+      <input type="number" min="0.01" step="0.01" x-model="budgetForm.value" placeholder="例如 0.5"
         class="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-300">
+      <p class="text-[11px] text-slate-400 font-mono" x-show="budgetPreview()" x-text="budgetPreview()"></p>
     </div>
     <div class="px-5 py-3 bg-slate-50 border-t border-slate-200/80 flex items-center justify-end gap-2">
       <button @click="saveBudget(true)" :disabled="savingBudget"

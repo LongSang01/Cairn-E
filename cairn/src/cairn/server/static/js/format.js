@@ -159,6 +159,26 @@ export const formatMixins = {
     return `${this.formatTokens(this.usageTotal())} / ${this.formatTokens(budget)}`;
   },
 
+  // The budget is set in millions of tokens; the server keeps counting raw tokens,
+  // so the conversion lives here instead of in every template.
+  budgetMillions(value) {
+    const number = Number(value) || 0;
+    if (!number) return '';
+    return String(Number((number / 1_000_000).toFixed(6)));
+  },
+
+  budgetMillionsToTokens(raw) {
+    const parsed = Number(String(raw ?? '').trim());
+    if (!Number.isFinite(parsed) || parsed <= 0) return null;
+    const tokens = Math.round(parsed * 1_000_000);
+    return tokens > 0 ? tokens : null;
+  },
+
+  budgetPreview() {
+    const tokens = this.budgetMillionsToTokens(this.budgetForm?.value);
+    return tokens ? `= ${this.formatTokens(tokens)} tokens` : '';
+  },
+
   pendingApprovalCount() {
     return (this.toolApprovals || []).filter((item) => item.status === 'pending').length;
   },

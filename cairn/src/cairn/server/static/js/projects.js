@@ -212,7 +212,8 @@ export const projectsMixins = {
 
   openBudgetDialog() {
     const budget = this.project?.project?.token_budget;
-    this.budgetForm = { value: budget ? String(budget) : '' };
+    // The dialog speaks millions (0.5 = 500k tokens); the API keeps raw tokens.
+    this.budgetForm = { value: this.budgetMillions(budget) };
     this.showBudgetModal = true;
   },
 
@@ -222,12 +223,11 @@ export const projectsMixins = {
     const raw = clear ? '' : String(this.budgetForm.value ?? '').trim();
     let tokenBudget = null;
     if (raw) {
-      const parsed = Number(raw);
-      if (!Number.isFinite(parsed) || parsed <= 0) {
-        this.showToast('预算必须是正整数', 'error');
+      tokenBudget = this.budgetMillionsToTokens(raw);
+      if (tokenBudget === null) {
+        this.showToast('预算必须是大于 0 的数（单位 M，1 M = 100 万 token）', 'error');
         return;
       }
-      tokenBudget = Math.floor(parsed);
     }
     this.savingBudget = true;
     try {
