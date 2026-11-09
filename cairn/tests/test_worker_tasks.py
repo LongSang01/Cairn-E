@@ -940,3 +940,36 @@ def test_slice_document_falls_back_to_a_plain_cut_in_a_tiny_budget() -> None:
 
     assert len(out) <= 40
     assert out.startswith("z")
+
+
+def test_decide_passes_the_exclusive_flag_to_the_step(monkeypatch) -> None:
+    config = make_config()
+    project = make_project()
+    client = FakeClient(project)
+    lease = FakeLease()
+
+    monkeypatch.setattr(decide, "get_driver", lambda *_a, **_k: FakeDriver())
+    monkeypatch.setattr(decide.HeartbeatLease, "for_decide", _lease_factory(lease))
+    monkeypatch.setattr(
+        decide,
+        "run_worker_process",
+        lambda *_args, **_kwargs: ProcessResult(
+            0,
+            '{"accepted":true,"data":{"steps":[{"from":["f001"],"description":"spray",'
+            '"asset":"10.0.0.1:8080/login","exclusive":true}]}}',
+            "",
+        ),
+    )
+
+    outcome = decide.run_decide_task(
+        config,
+        client,
+        FakeContainerManager(),
+        project,
+        "graph",
+        config.workers[0],
+        TaskCancellation(),
+    )
+
+    assert outcome == "success"
+    assert client.created_step_exclusive == [True]

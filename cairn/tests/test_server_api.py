@@ -905,3 +905,29 @@ def test_project_list_supports_conditional_get(client: TestClient) -> None:
     changed = client.get("/projects", headers={"If-None-Match": tag})
     assert changed.status_code == 200
     assert changed.headers["etag"] != tag
+
+
+def test_an_exclusive_step_round_trips_and_requires_an_asset(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    created = client.post(
+        f"/projects/{project_id}/steps",
+        json={
+            "description": "spray the login",
+            "creator": "human",
+            "from": ["origin"],
+            "asset": "10.0.0.1:8080/login",
+            "exclusive": True,
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["exclusive"] is True
+
+    detail = client.get(f"/projects/{project_id}").json()
+    assert detail["steps"][0]["exclusive"] is True
+
+    rejected = client.post(
+        f"/projects/{project_id}/steps",
+        json={"description": "spray", "creator": "human", "from": ["origin"], "exclusive": True},
+    )
+    assert rejected.status_code == 422

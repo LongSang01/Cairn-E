@@ -540,6 +540,7 @@ def _apply_actions(
             title=step.get("title"),
             goal=step["goal"],
             asset=step.get("asset"),
+            exclusive=step["exclusive"],
             batch=batch,
             rationale=step["rationale"],
             priority=step["priority"],

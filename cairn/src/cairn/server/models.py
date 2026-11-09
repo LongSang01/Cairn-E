@@ -270,6 +270,9 @@ class CreateStepRequest(BaseModel):
     description: str
     rationale: str | None = None
     asset: str | None = None
+    # True = run alone on this asset. The planner sets it for competing steps; a step
+    # without it may run next to its siblings even when they touch the same host.
+    exclusive: bool = False
     # Written by the dispatcher (the Decide session that proposed this step), never by
     # the model: it is scheduling metadata, not part of the planner's contract.
     batch: str | None = None
@@ -302,6 +305,13 @@ class CreateStepRequest(BaseModel):
         if len(text) > 200:
             raise ValueError("must be at most 200 characters")
         return text
+
+    @model_validator(mode="after")
+    def validate_exclusive_needs_asset(self) -> CreateStepRequest:
+        # Exclusivity is a claim on an asset; without one there is nothing to claim.
+        if self.exclusive and not self.asset:
+            raise ValueError("exclusive requires asset")
+        return self
 
     @field_validator("from_")
     @classmethod

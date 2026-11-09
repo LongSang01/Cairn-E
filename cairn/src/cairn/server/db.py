@@ -10,7 +10,7 @@ DEFAULT_DB = Path.home() / ".local" / "share" / "cairn" / "cairn.db"
 
 # Bumped only when SCHEMA changes shape. There is no upgrade path: the database is
 # created in one shot, and an old file must be recreated.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _db_path: Path | None = None
 _db_generation = 0
@@ -75,9 +75,11 @@ CREATE TABLE IF NOT EXISTS steps (
     kind TEXT NOT NULL DEFAULT 'action',
     title TEXT,
     description TEXT NOT NULL,
-    -- Declared target (host, host:port, credential surface); concurrent Execute runs
-    -- sharing one are serialized, because the graph cannot express dependencies.
+    -- Declared target (host, host:port, credential surface). Two steps sharing one
+    -- still run in parallel; only `exclusive` claims it for a run.
     asset TEXT,
+    -- 1 = do not run this step next to another step on the same asset.
+    exclusive INTEGER NOT NULL DEFAULT 0,
     -- The Decide run that produced this step: only steps of one batch may run
     -- concurrently, since a planner never saw two batches at once.
     batch TEXT,

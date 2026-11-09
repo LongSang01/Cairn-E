@@ -89,10 +89,14 @@ class Step(BaseModel):
     from_: list[str] = Field(default_factory=list, alias="from")
     to: str | None = None
     goal: str | None = None
-    # The asset this step touches (a host, a host:port, a credential surface). The graph
-    # has no dependency edges, so this is how the scheduler keeps two concurrent steps
-    # off the same target instead of letting them duplicate each other's work.
+    # The asset this step touches (a host, a host:port, a credential surface). Two
+    # steps that name one asset still run in parallel by default: different ports of
+    # one host usually do not interfere.
     asset: str | None = None
+    # Set only when this step must not share its asset with another running step:
+    # brute force against one login, a write to one record, a chain on one shell.
+    # Parallel is the default; exclusivity is the exception the planner states.
+    exclusive: bool = False
     # The Decide run that produced this step. Steps from one batch were proposed
     # together and may run concurrently; steps from different batches never do, because
     # the planner only saw one batch at a time.

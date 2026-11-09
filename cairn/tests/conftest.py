@@ -167,14 +167,17 @@ def make_step(
     status: str = "pending",
     worker: str | None = None,
     asset: str | None = None,
+    exclusive: bool = False,
     batch: str | None = None,
+    description: str = "investigate",
 ) -> Step:
     return Step(
         id=step_id,
         from_=["f001"],
-        description="investigate",
+        description=description,
         goal="g001",
         asset=asset,
+        exclusive=exclusive,
         batch=batch,
         priority=0,
         status=status,  # type: ignore[arg-type]
@@ -220,6 +223,7 @@ class FakeClient:
     created_steps: list[tuple[str, list[str], str, str]] = field(default_factory=list)
     created_step_titles: list[str | None] = field(default_factory=list)
     created_step_assets: list[str | None] = field(default_factory=list)
+    created_step_exclusive: list[bool] = field(default_factory=list)
     created_step_batches: list[str | None] = field(default_factory=list)
     updated_steps: list[tuple[str, str, object, object]] = field(default_factory=list)
     created_goals: list[tuple[str, str, str]] = field(default_factory=list)
@@ -321,6 +325,7 @@ class FakeClient:
         title: str | None = None,
         goal: str | None = None,
         asset: str | None = None,
+        exclusive: bool = False,
         batch: str | None = None,
         rationale: str | None = None,
         priority: int = 0,
@@ -328,6 +333,7 @@ class FakeClient:
         self.created_steps.append((project_id, from_ids, description, creator))
         self.created_step_titles.append(title)
         self.created_step_assets.append(asset)
+        self.created_step_exclusive.append(exclusive)
         self.created_step_batches.append(batch)
         return ApiResult(201, {})
 

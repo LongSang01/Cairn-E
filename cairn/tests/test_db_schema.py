@@ -87,7 +87,7 @@ def test_fresh_database_has_the_full_schema(tmp_path, monkeypatch) -> None:
         assert {"client_msg_id"} <= _columns(conn, "session_messages")
         assert {"reason"} <= _columns(conn, "tool_audit")
         assert {"severity", "status"} <= _columns(conn, "findings")
-        assert {"asset", "batch"} <= _columns(conn, "steps")
+        assert {"asset", "exclusive", "batch"} <= _columns(conn, "steps")
 
 
 def test_builtin_tool_rules_are_seeded_once(tmp_path, monkeypatch) -> None:

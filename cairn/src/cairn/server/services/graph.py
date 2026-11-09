@@ -44,6 +44,7 @@ def _step_from_row(row: sqlite3.Row, source_fact_ids: list[str]) -> Step:
         to=row["result_fact_id"],
         goal=row["goal_id"],
         asset=row["asset"],
+        exclusive=bool(row["exclusive"]),
         batch=row["batch"],
         kind=row["kind"],
         description=row["description"],

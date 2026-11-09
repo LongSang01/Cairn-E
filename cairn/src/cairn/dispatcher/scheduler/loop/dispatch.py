@@ -11,6 +11,7 @@ from ._base import LoopBase
 from ._common import (
     MAX_CONSECUTIVE_DECIDE_FAILURES,
 )
+from .concurrency import conflict_reason
 
 LOG = logging.getLogger("cairn.dispatcher.scheduler.loop")
 
@@ -230,29 +231,30 @@ class DispatchMixin(LoopBase):
                 batch = _batch_key(ordered[0])
                 candidates = [step for step in ordered if _batch_key(step) == batch]
 
-            # Within the batch a step may still name its target; two runs on one asset
-            # duplicate each other's work, so the slot goes to a sibling instead.
-            assets_in_flight = {running.asset for running in server_running if running.asset}
+            # Steps of one batch run in parallel by default. Only an exclusive step
+            # holds its asset, so the slot goes to a sibling that can start now.
+            running_steps = list(server_running)
             export_yaml = self.client.export_project(summary.id)
             dispatched = False
             for step in candidates:
                 if free <= 0:
                     break
-                if step.asset and step.asset in assets_in_flight:
+                reason = conflict_reason(step, running_steps)
+                if reason is not None:
                     self._log_changed(
-                        f"{skip_scope}:asset_busy:{step.id}",
+                        f"{skip_scope}:{reason}:{step.id}",
                         logging.DEBUG,
-                        "skip execute project=%s step=%s because asset=%s is already running",
+                        "skip execute project=%s step=%s because asset=%s is held (%s)",
                         summary.id,
                         step.id,
                         step.asset,
+                        reason,
                     )
                     continue
                 if self._dispatch_execute(project, export_yaml, step):
                     dispatched = True
                     free -= 1
-                    if step.asset:
-                        assets_in_flight.add(step.asset)
+                    running_steps.append(step)
             return dispatched
         if pending_steps:
             # Every remaining step already burned its attempts; Decide is the only one

@@ -357,15 +357,22 @@ def validate_decide_payload(
             goal = _text(goal, f"steps.add[{index}].goal")
             if goal not in goal_ids:
                 raise ValueError(f"steps.add[{index}] references unknown goal: {goal}")
+        asset = _short_text(item.get("asset"), f"steps.add[{index}].asset", 200)
+        exclusive = item.get("exclusive", False)
+        if not isinstance(exclusive, bool):
+            raise ValueError(f"steps.add[{index}].exclusive must be a boolean")
+        if exclusive and asset is None:
+            raise ValueError(f"steps.add[{index}].exclusive requires asset")
         step_add.append(
             {
                 "description": _text(item.get("description"), f"steps.add[{index}].description"),
                 "title": _short_text(item.get("title"), f"steps.add[{index}].title", 200),
                 "from": _id_list(item.get("from"), f"steps.add[{index}].from", fact_ids),
                 "goal": goal,
-                # Optional target declaration; the scheduler never dispatches two
-                # concurrent steps that name the same asset.
-                "asset": _short_text(item.get("asset"), f"steps.add[{index}].asset", 200),
+                # Optional target declaration: two steps on one asset may still run
+                # together, unless one of them asks to be exclusive.
+                "asset": asset,
+                "exclusive": exclusive,
                 "priority": _priority(item.get("priority"), f"steps.add[{index}].priority"),
                 "rationale": _optional_text(item.get("rationale"), f"steps.add[{index}].rationale"),
             }

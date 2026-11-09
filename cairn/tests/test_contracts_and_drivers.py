@@ -52,6 +52,7 @@ def test_decide_payload_limits_number_of_steps() -> None:
             "title": None,
             "goal": None,
             "asset": None,
+            "exclusive": False,
             "priority": 0,
             "rationale": None,
         }
@@ -81,6 +82,53 @@ def test_decide_payload_carries_the_declared_asset() -> None:
     )
 
     assert data["steps"]["add"][0]["asset"] == "10.0.0.1:8080"
+    assert data["steps"]["add"][0]["exclusive"] is False
+
+
+def test_decide_payload_carries_the_exclusive_flag() -> None:
+    _kind, data, _lookups = validate_decide_payload(
+        {
+            "accepted": True,
+            "data": {
+                "steps": [
+                    {
+                        "from": ["f001"],
+                        "description": "spray the login",
+                        "asset": "10.0.0.1:8080/login",
+                        "exclusive": True,
+                    }
+                ]
+            },
+        },
+        open_steps_empty=False,
+        max_steps=3,
+        fact_ids=FACTS,
+        goal_ids=GOALS,
+        active_sub_goal_ids=ACTIVE_SUB_GOALS,
+        step_ids=STEPS,
+    )
+
+    assert data["steps"]["add"][0]["exclusive"] is True
+
+
+def test_decide_payload_rejects_exclusive_without_an_asset() -> None:
+    with pytest.raises(ValueError, match="exclusive requires asset"):
+        validate_decide_payload(
+            {
+                "accepted": True,
+                "data": {
+                    "steps": [
+                        {"from": ["f001"], "description": "spray", "exclusive": True},
+                    ]
+                },
+            },
+            open_steps_empty=False,
+            max_steps=3,
+            fact_ids=FACTS,
+            goal_ids=GOALS,
+            active_sub_goal_ids=ACTIVE_SUB_GOALS,
+            step_ids=STEPS,
+        )
 
 
 def test_decide_payload_rejects_an_overlong_asset() -> None:

@@ -641,12 +641,28 @@ def test_steps_without_a_batch_run_one_at_a_time() -> None:
     assert len(dispatched) == 1
 
 
-def test_slots_skip_a_step_whose_asset_is_already_running() -> None:
-    """Two concurrent runs on one target duplicate each other, so the slot goes elsewhere."""
+def test_same_asset_steps_run_in_parallel_by_default() -> None:
+    """Parallel is the default: two ports of one host do not interfere."""
     running = make_step("s001", status="running", worker="w", asset="10.0.0.1:8080", batch="x001")
-    same_asset = make_step("s002", asset="10.0.0.1:8080", batch="x001")
-    other_asset = make_step("s003", asset="10.0.0.1:3389", batch="x001")
-    project = make_project(steps=[running, same_asset, other_asset])
+    sibling = make_step("s002", asset="10.0.0.1:8080", batch="x001")
+    project = make_project(steps=[running, sibling])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.config = make_config({"max_running_steps": 2})
+    loop.decide_checkpoints["proj_001"] = _checkpoint_matching(project)
+
+    loop._try_dispatch_project(_summary("proj_001", "active"))
+
+    assert dispatched == [("execute", "s002")]
+
+
+def test_a_running_exclusive_step_holds_its_asset() -> None:
+    running = make_step(
+        "s001", status="running", worker="w", asset="10.0.0.1:8080", batch="x001", exclusive=True
+    )
+    competing = make_step("s002", asset="10.0.0.1:8080", batch="x001")
+    elsewhere = make_step("s003", asset="10.0.0.1:3389", batch="x001")
+    project = make_project(steps=[running, competing, elsewhere])
     dispatched: list[tuple[str, str]] = []
     loop = _dispatchable_loop(project, dispatched)
     loop.config = make_config({"max_running_steps": 2})
@@ -657,9 +673,65 @@ def test_slots_skip_a_step_whose_asset_is_already_running() -> None:
     assert dispatched == [("execute", "s003")]
 
 
-def test_slots_do_not_repeat_an_asset_dispatched_in_the_same_tick() -> None:
-    first = make_step("s002", asset="10.0.0.1:8080", batch="x001")
-    second = make_step("s003", asset="10.0.0.1:8080", batch="x001")
+def test_an_exclusive_step_waits_for_a_plain_run_on_the_same_asset() -> None:
+    running = make_step("s001", status="running", worker="w", asset="10.0.0.1:8080", batch="x001")
+    competing = make_step("s002", asset="10.0.0.1:8080", batch="x001", exclusive=True)
+    elsewhere = make_step("s003", asset="10.0.0.1:3389", batch="x001")
+    project = make_project(steps=[running, competing, elsewhere])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.config = make_config({"max_running_steps": 2})
+    loop.decide_checkpoints["proj_001"] = _checkpoint_matching(project)
+
+    loop._try_dispatch_project(_summary("proj_001", "active"))
+
+    assert dispatched == [("execute", "s003")]
+
+
+def test_a_brute_force_step_holds_its_asset_without_being_marked() -> None:
+    """The keyword net is the backstop for a planner that forgot `exclusive`."""
+    running = make_step("s001", status="running", worker="w", asset="10.0.0.1:8080", batch="x001")
+    candidate = make_step(
+        "s002",
+        asset="10.0.0.1:8080",
+        batch="x001",
+        description="hydra 爆破登录口令",
+    )
+    project = make_project(steps=[running, candidate])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.config = make_config({"max_running_steps": 2})
+    loop.decide_checkpoints["proj_001"] = _checkpoint_matching(project)
+
+    loop._try_dispatch_project(_summary("proj_001", "active"))
+
+    assert dispatched == []
+
+
+def test_a_competing_run_holds_its_asset_against_a_plain_sibling() -> None:
+    running = make_step(
+        "s001",
+        status="running",
+        worker="w",
+        asset="10.0.0.1:8080",
+        batch="x001",
+        description="password spray the login",
+    )
+    candidate = make_step("s002", asset="10.0.0.1:8080", batch="x001")
+    project = make_project(steps=[running, candidate])
+    dispatched: list[tuple[str, str]] = []
+    loop = _dispatchable_loop(project, dispatched)
+    loop.config = make_config({"max_running_steps": 2})
+    loop.decide_checkpoints["proj_001"] = _checkpoint_matching(project)
+
+    loop._try_dispatch_project(_summary("proj_001", "active"))
+
+    assert dispatched == []
+
+
+def test_two_exclusive_steps_on_one_asset_do_not_start_together() -> None:
+    first = make_step("s002", asset="10.0.0.1:8080", batch="x001", exclusive=True)
+    second = make_step("s003", asset="10.0.0.1:8080", batch="x001", exclusive=True)
     project = make_project(steps=[first, second])
     dispatched: list[tuple[str, str]] = []
     loop = _dispatchable_loop(project, dispatched)
