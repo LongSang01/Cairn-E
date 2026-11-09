@@ -39,16 +39,10 @@ web:
     realm: Cairn
     users:
       - name: admin
-        password: "<password>"
+        password: '<password>'
 ```
 
-配置后所有页面、API 与 SSE 都要求 Basic Auth；`/healthz` 与 worker 的 `/internal/*` 除外（后者
-仍由 `CAIRN_WORKER_TOKEN` 保护）。未配置 `web.auth` 时服务端拒绝绑定非回环地址，除非显式加
-`--allow-insecure`。
-
-判定分级、D/A 条款与已知绕过路径见 `docs/specs/dispatcher-design.md` 的「命令审核」一节。
-
-### 本地质量门
+### 本地测试
 
 不依赖 CI，一条命令跑完 lint、格式、类型、Python 测试与前端测试：
 
@@ -62,7 +56,7 @@ make check
 2. `cd cairn && python -m ruff format --check src tests`
 3. `cd cairn && python -m mypy src`
 4. `cd cairn && python -m pytest -q`
-5. `npm run test` 与 `npm run format:check`（vitest / prettier）
+5. `npm run test` 与 `npm run format:check`
 
 只跑 Python 测试时，注意 pytest 需要从 `cairn/` 目录执行（`pythonpath = ["src"]`）：
 
