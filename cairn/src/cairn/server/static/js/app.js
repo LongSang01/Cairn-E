@@ -68,7 +68,8 @@ function loadAlpine() {
     const banner = document.createElement('div');
     banner.setAttribute('role', 'alert');
     banner.textContent = '前端脚本加载失败，请刷新页面重试。';
-    banner.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:#f8fafc;color:#b91c1c;font:14px system-ui,sans-serif;';
+    banner.style.cssText =
+      'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:#f8fafc;color:#b91c1c;font:14px system-ui,sans-serif;';
     document.body.appendChild(banner);
   };
   document.head.appendChild(alpineScript);

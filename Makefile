@@ -21,3 +21,5 @@ check:
 	cd cairn && python -m ruff format --check src tests
 	cd cairn && python -m mypy src
 	cd cairn && python -m pytest -q
+	npm run test
+	npm run format:check

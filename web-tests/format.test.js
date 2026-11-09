@@ -81,12 +81,7 @@ describe('severity and findings', () => {
   it('findingSeverityCounts derives from findings without a server summary', () => {
     const c = ctx({
       project: {
-        findings: [
-          { severity: 'low' },
-          { severity: 'low' },
-          { severity: 'critical' },
-          {},
-        ],
+        findings: [{ severity: 'low' }, { severity: 'low' }, { severity: 'critical' }, {}],
       },
     });
     expect(c.findingSeverityCounts()).toEqual([
@@ -99,7 +94,11 @@ describe('severity and findings', () => {
   it('sortedFindings orders by severity rank with unknowns last', () => {
     const c = ctx({
       project: {
-        findings: [{ id: 'a', severity: 'info' }, { id: 'b', severity: 'zz' }, { id: 'c', severity: 'critical' }],
+        findings: [
+          { id: 'a', severity: 'info' },
+          { id: 'b', severity: 'zz' },
+          { id: 'c', severity: 'critical' },
+        ],
       },
     });
     expect(c.sortedFindings().map((f) => f.id)).toEqual(['c', 'a', 'b']);
@@ -208,7 +207,10 @@ describe('blocked projects, findings evidence and the guard queue', () => {
 
   it('budgetLabel only shows a cap when one is configured', () => {
     expect(ctx({ usage: { total_tokens: 1200 } }).budgetLabel()).toBe('');
-    const capped = ctx({ usage: { total_tokens: 1200 }, project: { project: { token_budget: 5000 } } });
+    const capped = ctx({
+      usage: { total_tokens: 1200 },
+      project: { project: { token_budget: 5000 } },
+    });
     expect(capped.budgetLabel()).toBe('1.2k / 5.0k');
   });
 
