@@ -1,77 +1,109 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response
 
-from cairn.server.db import get_conn
-from cairn.server.models import (
-    CompleteRequest,
-    CreateProjectRequest,
+from cairn.contracts.models import (
+    Constraint,
     Fact,
+    Goal,
     Hint,
-    HeartbeatRequest,
-    Intent,
     ProjectDetail,
     ProjectMeta,
     ProjectSummary,
+    ScopeEntry,
+    Steer,
+)
+from cairn.server.db import get_conn
+from cairn.server.http_cache import cache_headers
+from cairn.server.models import (
+    CompleteRequest,
+    CompleteResponse,
+    CreateProjectRequest,
+    DecideClaimRequest,
+    HeartbeatRequest,
     ReopenRequest,
     ReopenResponse,
-    ReasonClaimRequest,
-    UpdateProjectTitleRequest,
     UpdateProjectStatusRequest,
+    UpdateProjectTitleRequest,
+    UpdateTokenBudgetRequest,
 )
-from cairn.server.services import (
-    build_intents,
-    check_project_completed,
+from cairn.server.services.documents import utcnow
+from cairn.server.services.graph import (
+    build_findings,
+    build_goals,
+    build_steps,
+    goal_to_model,
+    step_to_model,
+)
+from cairn.server.services.guards import (
     check_project_active,
-    clear_project_reason,
-    expire_reason_leases,
-    expire_workers,
-    get_completion_intent_or_409,
+    check_project_completed,
+    expire_steps,
+    get_completion_step_or_409,
     get_project_or_404,
-    intent_to_model,
-    next_fact_id,
-    next_hint_id,
-    next_intent_id,
-    next_project_id,
-    project_meta_from_row,
-    project_reason_from_row,
-    utcnow,
+    get_root_goal_or_404,
     validate_facts_exist,
-    validate_goal_not_in_sources,
 )
+from cairn.server.services.ids import (
+    next_fact_id,
+    next_goal_id,
+    next_hint_id,
+    next_project_id,
+    next_step_id,
+)
+from cairn.server.services.leases import (
+    clear_project_decide,
+    expire_decide_leases,
+    project_decide_from_row,
+    project_meta_from_row,
+)
+from cairn.server.services.sessions import build_sessions
+from cairn.server.services.usage import enforce_token_budget
 
 router = APIRouter(tags=["projects"])
 
 
 @router.get("/projects", response_model=list[ProjectSummary])
-def list_projects():
+def list_projects(request: Request, response: Response):
     with get_conn() as conn:
-        expire_workers(conn)
-        expire_reason_leases(conn)
+        expire_steps(conn)
+        expire_decide_leases(conn)
         rows = conn.execute("""
-            SELECT p.*,
+            SELECT p.id, p.title, p.status, p.created_at,
+                p.decide_worker, p.decide_trigger, p.decide_started_at, p.decide_last_heartbeat_at,
                 (SELECT COUNT(*) FROM facts WHERE project_id = p.id) AS fact_count,
-                (SELECT COUNT(*) FROM intents WHERE project_id = p.id) AS intent_count,
-                (SELECT COUNT(*) FROM intents WHERE project_id = p.id AND concluded_at IS NULL AND worker IS NOT NULL) AS working_intent_count,
-                (SELECT COUNT(*) FROM intents WHERE project_id = p.id AND concluded_at IS NULL AND worker IS NULL) AS unclaimed_intent_count,
+                (SELECT COUNT(*) FROM goals WHERE project_id = p.id) AS goal_count,
+                (SELECT COUNT(*) FROM goals WHERE project_id = p.id AND status = 'active') AS open_goal_count,
+                (SELECT COUNT(*) FROM steps WHERE project_id = p.id) AS step_count,
+                (SELECT COUNT(*) FROM steps WHERE project_id = p.id AND status = 'running') AS running_step_count,
+                (SELECT COUNT(*) FROM steps WHERE project_id = p.id AND status = 'pending') AS pending_step_count,
+                (SELECT COUNT(*) FROM findings WHERE project_id = p.id) AS finding_count,
                 (SELECT COUNT(*) FROM hints WHERE project_id = p.id) AS hint_count
             FROM projects p
             ORDER BY p.created_at
         """).fetchall()
-        return [
+        summaries = [
             ProjectSummary(
                 id=row["id"],
                 title=row["title"],
                 status=row["status"],
-                bootstrap_enabled=bool(row["bootstrap_enabled"]),
                 created_at=row["created_at"],
-                reason=project_reason_from_row(row),
+                decide=project_decide_from_row(row),
                 fact_count=row["fact_count"],
-                intent_count=row["intent_count"],
-                working_intent_count=row["working_intent_count"],
-                unclaimed_intent_count=row["unclaimed_intent_count"],
+                goal_count=row["goal_count"],
+                open_goal_count=row["open_goal_count"],
+                step_count=row["step_count"],
+                running_step_count=row["running_step_count"],
+                pending_step_count=row["pending_step_count"],
+                finding_count=row["finding_count"],
                 hint_count=row["hint_count"],
             )
             for row in rows
         ]
+
+    headers, not_modified = cache_headers(request, summaries)
+    if not_modified is not None:
+        return not_modified
+    response.headers.update(headers)
+    return summaries
 
 
 @router.post("/projects", response_model=ProjectDetail, status_code=201)
@@ -81,16 +113,27 @@ def create_project(body: CreateProjectRequest):
         now = utcnow()
 
         conn.execute(
-            "INSERT INTO projects (id, title, status, bootstrap_enabled, created_at) VALUES (?, ?, 'active', ?, ?)",
-            (pid, body.title, body.bootstrap_enabled, now),
+            """
+            INSERT INTO projects (
+                id, title, status, created_at,
+                decide_worker, decide_trigger, decide_started_at, decide_last_heartbeat_at
+            ) VALUES (?, ?, 'active', ?, NULL, NULL, NULL, NULL)
+            """,
+            (pid, body.title, now),
         )
+        # origin is the initial world state: a fact, not a special case.
         conn.execute(
-            "INSERT INTO facts (id, project_id, description) VALUES (?, ?, ?)",
-            ("origin", pid, body.origin),
+            "INSERT INTO facts (id, project_id, description, step_id, created_at) VALUES (?, ?, ?, NULL, ?)",
+            ("origin", pid, body.origin, now),
         )
+        # goal is the termination condition: a Goal node, not a fact.
+        gid = next_goal_id(conn, pid)
         conn.execute(
-            "INSERT INTO facts (id, project_id, description) VALUES (?, ?, ?)",
-            ("goal", pid, body.goal),
+            """
+            INSERT INTO goals (id, project_id, parent_id, description, status, creator, created_at, closed_at)
+            VALUES (?, ?, NULL, ?, 'active', 'system', ?, NULL)
+            """,
+            (gid, pid, body.goal, now),
         )
 
         hints = []
@@ -105,49 +148,80 @@ def create_project(body: CreateProjectRequest):
 
         return ProjectDetail(
             project=ProjectMeta(
-                id=pid,
-                title=body.title,
-                status="active",
-                bootstrap_enabled=body.bootstrap_enabled,
-                created_at=now,
-                reason=None,
+                id=pid, title=body.title, status="active", created_at=now, decide=None
             ),
-            facts=[
-                Fact(id="origin", description=body.origin),
-                Fact(id="goal", description=body.goal),
+            facts=[Fact(id="origin", description=body.origin)],
+            goals=[
+                Goal(
+                    id=gid,
+                    parent=None,
+                    description=body.goal,
+                    status="active",
+                    creator="system",
+                    created_at=now,
+                )
             ],
-            intents=[],
+            steps=[],
+            findings=[],
             hints=hints,
         )
 
 
 @router.get("/projects/{project_id}", response_model=ProjectDetail)
-def get_project(project_id: str):
+def get_project(project_id: str, request: Request, response: Response):
     with get_conn() as conn:
-        expire_workers(conn, project_id)
-        expire_reason_leases(conn, project_id)
+        expire_steps(conn, project_id)
+        expire_decide_leases(conn, project_id)
         row = get_project_or_404(conn, project_id)
 
         facts = conn.execute(
-            "SELECT * FROM facts WHERE project_id = ?", (project_id,)
+            "SELECT id, title, description, step_id FROM facts WHERE project_id = ? ORDER BY rowid",
+            (project_id,),
         ).fetchall()
         hints = conn.execute(
             "SELECT * FROM hints WHERE project_id = ? ORDER BY created_at",
             (project_id,),
         ).fetchall()
+        constraints = conn.execute(
+            "SELECT * FROM constraints WHERE project_id = ? ORDER BY rowid",
+            (project_id,),
+        ).fetchall()
+        steers = conn.execute(
+            "SELECT * FROM steers WHERE project_id = ? ORDER BY rowid",
+            (project_id,),
+        ).fetchall()
+        scope_entries = conn.execute(
+            "SELECT * FROM project_scope WHERE project_id = ? ORDER BY id",
+            (project_id,),
+        ).fetchall()
 
-        return ProjectDetail(
+        detail = ProjectDetail(
             project=project_meta_from_row(row),
             facts=[Fact(**dict(f)) for f in facts],
-            intents=build_intents(conn, project_id),
+            goals=build_goals(conn, project_id),
+            steps=build_steps(conn, project_id),
+            findings=build_findings(conn, project_id),
             hints=[Hint(**dict(h)) for h in hints],
+            constraints=[Constraint(**dict(c)) for c in constraints],
+            steers=[Steer(**dict(s)) for s in steers],
+            scope=[ScopeEntry(**dict(s)) for s in scope_entries],
+            sessions=build_sessions(conn, project_id),
         )
+
+    headers, not_modified = cache_headers(request, detail)
+    if not_modified is not None:
+        return not_modified
+    response.headers.update(headers)
+    return detail
 
 
 @router.delete("/projects/{project_id}", status_code=204)
 def delete_project(project_id: str):
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
+        # SQLite cannot add a FK to an existing column (migration 006 added
+        # tool_rules.project_id by ALTER TABLE), so cascade these by hand.
+        conn.execute("DELETE FROM tool_rules WHERE project_id = ?", (project_id,))
         conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
 
 
@@ -155,18 +229,28 @@ def delete_project(project_id: str):
 def update_project_title(project_id: str, body: UpdateProjectTitleRequest):
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
-        conn.execute(
-            "UPDATE projects SET title = ? WHERE id = ?",
-            (body.title, project_id),
-        )
-        updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        conn.execute("UPDATE projects SET title = ? WHERE id = ?", (body.title, project_id))
+        updated = get_project_or_404(conn, project_id)
         return project_meta_from_row(updated)
+
+
+@router.put("/projects/{project_id}/budget", response_model=ProjectMeta)
+def update_project_budget(project_id: str, body: UpdateTokenBudgetRequest):
+    """Set (or clear) the token budget; the status follows immediately."""
+    with get_conn() as conn:
+        get_project_or_404(conn, project_id)
+        conn.execute(
+            "UPDATE projects SET token_budget = ? WHERE id = ?", (body.token_budget, project_id)
+        )
+        # Lowering it may block right away; raising it may unblock a budget block.
+        enforce_token_budget(conn, project_id)
+        return project_meta_from_row(get_project_or_404(conn, project_id))
 
 
 @router.put("/projects/{project_id}/status", response_model=ProjectMeta)
 def update_project_status(project_id: str, body: UpdateProjectStatusRequest):
     with get_conn() as conn:
-        expire_reason_leases(conn, project_id)
+        expire_decide_leases(conn, project_id)
         row = get_project_or_404(conn, project_id)
         current_status = row["status"]
         if current_status == "completed":
@@ -174,29 +258,26 @@ def update_project_status(project_id: str, body: UpdateProjectStatusRequest):
         if current_status == body.status:
             return project_meta_from_row(row)
 
-        conn.execute(
-            "UPDATE projects SET status = ? WHERE id = ?",
-            (body.status, project_id),
-        )
+        conn.execute("UPDATE projects SET status = ? WHERE id = ?", (body.status, project_id))
         if body.status == "stopped":
             conn.execute(
-                "UPDATE intents SET worker = NULL WHERE project_id = ? AND concluded_at IS NULL",
+                "UPDATE steps SET worker = NULL, status = 'pending' WHERE project_id = ? AND status = 'running'",
                 (project_id,),
             )
-            clear_project_reason(conn, project_id)
-        updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+            clear_project_decide(conn, project_id)
+        updated = get_project_or_404(conn, project_id)
         return project_meta_from_row(updated)
 
 
-@router.post("/projects/{project_id}/reason/claim", response_model=ProjectMeta)
-def claim_project_reason(project_id: str, body: ReasonClaimRequest):
+@router.post("/projects/{project_id}/decide/claim", response_model=ProjectMeta)
+def claim_project_decide(project_id: str, body: DecideClaimRequest):
     with get_conn() as conn:
         check_project_active(conn, project_id)
-        expire_reason_leases(conn, project_id)
+        expire_decide_leases(conn, project_id)
         row = get_project_or_404(conn, project_id)
-        current_worker = row["reason_worker"]
+        current_worker = row["decide_worker"]
         if current_worker is not None and current_worker != body.worker:
-            raise HTTPException(409, f"Project reason is currently claimed by {current_worker}")
+            raise HTTPException(409, f"Project decide is currently claimed by {current_worker}")
         if current_worker == body.worker:
             return project_meta_from_row(row)
 
@@ -204,155 +285,165 @@ def claim_project_reason(project_id: str, body: ReasonClaimRequest):
         conn.execute(
             """
             UPDATE projects
-            SET reason_worker = ?,
-                reason_trigger = ?,
-                reason_started_at = ?,
-                reason_last_heartbeat_at = ?
+            SET decide_worker = ?,
+                decide_trigger = ?,
+                decide_started_at = ?,
+                decide_last_heartbeat_at = ?
             WHERE id = ?
             """,
             (body.worker, body.trigger, now, now, project_id),
         )
-        updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        updated = get_project_or_404(conn, project_id)
         return project_meta_from_row(updated)
 
 
-@router.post("/projects/{project_id}/reason/heartbeat", response_model=ProjectMeta)
-def heartbeat_project_reason(project_id: str, body: HeartbeatRequest):
+@router.post("/projects/{project_id}/decide/heartbeat", response_model=ProjectMeta)
+def heartbeat_project_decide(project_id: str, body: HeartbeatRequest):
     with get_conn() as conn:
         check_project_active(conn, project_id)
-        expire_reason_leases(conn, project_id)
+        expire_decide_leases(conn, project_id)
         row = get_project_or_404(conn, project_id)
-        current_worker = row["reason_worker"]
+        current_worker = row["decide_worker"]
         if current_worker is None:
-            raise HTTPException(409, "Project reason is not currently claimed")
+            raise HTTPException(409, "Project decide is not currently claimed")
         if current_worker != body.worker:
-            raise HTTPException(409, f"Project reason is currently claimed by {current_worker}")
+            raise HTTPException(409, f"Project decide is currently claimed by {current_worker}")
 
-        now = utcnow()
         conn.execute(
-            "UPDATE projects SET reason_last_heartbeat_at = ? WHERE id = ?",
-            (now, project_id),
+            "UPDATE projects SET decide_last_heartbeat_at = ? WHERE id = ?",
+            (utcnow(), project_id),
         )
-        updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        updated = get_project_or_404(conn, project_id)
         return project_meta_from_row(updated)
 
 
-@router.post("/projects/{project_id}/reason/release", response_model=ProjectMeta)
-def release_project_reason(project_id: str, body: HeartbeatRequest):
+@router.post("/projects/{project_id}/decide/release", response_model=ProjectMeta)
+def release_project_decide(project_id: str, body: HeartbeatRequest):
     with get_conn() as conn:
         check_project_active(conn, project_id)
-        expire_reason_leases(conn, project_id)
+        expire_decide_leases(conn, project_id)
         row = get_project_or_404(conn, project_id)
-        current_worker = row["reason_worker"]
+        current_worker = row["decide_worker"]
         if current_worker is None:
             return project_meta_from_row(row)
         if current_worker != body.worker:
-            raise HTTPException(409, f"Project reason is currently claimed by {current_worker}")
+            raise HTTPException(409, f"Project decide is currently claimed by {current_worker}")
 
-        clear_project_reason(conn, project_id)
-        updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        clear_project_decide(conn, project_id)
+        updated = get_project_or_404(conn, project_id)
         return project_meta_from_row(updated)
 
 
-@router.post("/projects/{project_id}/complete", response_model=Intent)
+@router.post("/projects/{project_id}/complete", response_model=CompleteResponse)
 def complete_project(project_id: str, body: CompleteRequest):
+    """Decide declares the root goal achieved. Recorded as a completion Step."""
     with get_conn() as conn:
         check_project_active(conn, project_id)
-        expire_reason_leases(conn, project_id)
+        expire_decide_leases(conn, project_id)
         validate_facts_exist(conn, project_id, body.from_)
-        validate_goal_not_in_sources(body.from_)
+        root = get_root_goal_or_404(conn, project_id)
+        if root["status"] != "active":
+            raise HTTPException(409, f"Root goal is already {root['status']}")
+        open_steps = conn.execute(
+            "SELECT COUNT(*) AS n FROM steps"
+            " WHERE project_id = ? AND kind = 'action' AND status IN ('pending', 'running')",
+            (project_id,),
+        ).fetchone()["n"]
+        if open_steps:
+            raise HTTPException(409, f"{open_steps} step(s) are still open")
+        active_sub_goals = conn.execute(
+            "SELECT COUNT(*) AS n FROM goals"
+            " WHERE project_id = ? AND parent_id IS NOT NULL AND status = 'active'",
+            (project_id,),
+        ).fetchone()["n"]
+        if active_sub_goals:
+            raise HTTPException(409, f"{active_sub_goals} sub-goal(s) are still active")
 
         now = utcnow()
-        iid = next_intent_id(conn, project_id)
-
+        sid = next_step_id(conn, project_id)
         conn.execute(
-            "INSERT INTO intents (id, project_id, to_fact_id, description, creator, worker, last_heartbeat_at, created_at, concluded_at) VALUES (?, ?, 'goal', ?, ?, ?, ?, ?, ?)",
-            (iid, project_id, body.description, body.worker, body.worker, now, now, now),
+            """
+            INSERT INTO steps (
+                id, project_id, goal_id, kind, description, rationale, priority, status,
+                creator, worker, last_heartbeat_at, created_at, concluded_at, result_fact_id, note
+            ) VALUES (?, ?, ?, 'completion', ?, NULL, 0, 'done', ?, ?, ?, ?, ?, NULL, 'completion')
+            """,
+            (
+                sid,
+                project_id,
+                root["id"],
+                body.description,
+                body.worker,
+                body.worker,
+                now,
+                now,
+                now,
+            ),
         )
         for fid in body.from_:
             conn.execute(
-                "INSERT INTO intent_sources (intent_id, project_id, fact_id) VALUES (?, ?, ?)",
-                (iid, project_id, fid),
+                "INSERT INTO step_sources (step_id, project_id, fact_id) VALUES (?, ?, ?)",
+                (sid, project_id, fid),
             )
         conn.execute(
-            """
-            UPDATE projects
-            SET status = 'completed',
-                reason_worker = NULL,
-                reason_trigger = NULL,
-                reason_started_at = NULL,
-                reason_last_heartbeat_at = NULL
-            WHERE id = ?
-            """,
-            (project_id,),
+            "UPDATE goals SET status = 'achieved', closed_at = ? WHERE id = ? AND project_id = ?",
+            (now, root["id"], project_id),
         )
+        conn.execute("UPDATE projects SET status = 'completed' WHERE id = ?", (project_id,))
+        clear_project_decide(conn, project_id)
 
-        return Intent(
-            id=iid,
-            **{"from": body.from_},
-            to="goal",
-            description=body.description,
-            creator=body.worker,
-            worker=body.worker,
-            last_heartbeat_at=now,
-            created_at=now,
-            concluded_at=now,
+        updated_project = get_project_or_404(conn, project_id)
+        goal_row = get_root_goal_or_404(conn, project_id)
+        step_row = conn.execute(
+            "SELECT * FROM steps WHERE id = ? AND project_id = ?", (sid, project_id)
+        ).fetchone()
+        return CompleteResponse(
+            project=project_meta_from_row(updated_project),
+            goal=goal_to_model(goal_row),
+            step=step_to_model(conn, step_row, project_id),
         )
 
 
 @router.post("/projects/{project_id}/reopen", response_model=ReopenResponse)
 def reopen_project(project_id: str, body: ReopenRequest):
     with get_conn() as conn:
-        expire_reason_leases(conn, project_id)
+        expire_decide_leases(conn, project_id)
         check_project_completed(conn, project_id)
-        completion = get_completion_intent_or_409(conn, project_id)
+        completion = get_completion_step_or_409(conn, project_id)
 
         source_rows = conn.execute(
-            "SELECT fact_id FROM intent_sources WHERE intent_id = ? AND project_id = ? ORDER BY rowid",
+            "SELECT fact_id FROM step_sources WHERE step_id = ? AND project_id = ? ORDER BY rowid",
             (completion["id"], project_id),
         ).fetchall()
         source_ids = [row["fact_id"] for row in source_rows]
         if not source_ids:
-            raise HTTPException(409, "Completion intent is missing its source facts")
+            raise HTTPException(409, "Completion step is missing its source facts")
 
         now = utcnow()
         fact_id = next_fact_id(conn, project_id)
-        intent_id = next_intent_id(conn, project_id)
-        description = body.description
-        creator = body.creator
+        root = get_root_goal_or_404(conn, project_id)
 
+        # The completion decision is withdrawn; the external feedback becomes a fact, so the
+        # next Decide run sees a changed graph and plans again.
         conn.execute(
-            "DELETE FROM intents WHERE id = ? AND project_id = ?",
+            "DELETE FROM steps WHERE id = ? AND project_id = ?",
             (completion["id"], project_id),
         )
         conn.execute(
-            "INSERT INTO facts (id, project_id, description) VALUES (?, ?, ?)",
-            (fact_id, project_id, description),
+            "INSERT INTO facts (id, project_id, description, step_id, created_at) VALUES (?, ?, ?, NULL, ?)",
+            (fact_id, project_id, body.description, now),
         )
         conn.execute(
-            "INSERT INTO intents (id, project_id, to_fact_id, description, creator, worker, last_heartbeat_at, created_at, concluded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (intent_id, project_id, fact_id, "external_feedback", creator, creator, now, now, now),
+            "UPDATE goals SET status = 'active', closed_at = NULL WHERE id = ? AND project_id = ?",
+            (root["id"], project_id),
         )
-        for source_id in source_ids:
-            conn.execute(
-                "INSERT INTO intent_sources (intent_id, project_id, fact_id) VALUES (?, ?, ?)",
-                (intent_id, project_id, source_id),
-            )
-        clear_project_reason(conn, project_id)
-        conn.execute(
-            "UPDATE projects SET status = 'active' WHERE id = ?",
-            (project_id,),
-        )
+        clear_project_decide(conn, project_id)
+        conn.execute("UPDATE projects SET status = 'active' WHERE id = ?", (project_id,))
 
-        updated_project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-        updated_intent = conn.execute(
-            "SELECT * FROM intents WHERE id = ? AND project_id = ?",
-            (intent_id, project_id),
-        ).fetchone()
-        assert updated_project is not None
-        assert updated_intent is not None
+        updated_project = get_project_or_404(conn, project_id)
+        goal_row = get_root_goal_or_404(conn, project_id)
         return ReopenResponse(
             project=project_meta_from_row(updated_project),
-            fact=Fact(id=fact_id, description=description),
-            intent=intent_to_model(conn, updated_intent, project_id),
+            fact=Fact(id=fact_id, description=body.description),
+            goal=goal_to_model(goal_row),
         )

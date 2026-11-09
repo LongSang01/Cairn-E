@@ -1,0 +1,297 @@
+from fastapi import APIRouter, HTTPException
+
+from cairn.contracts.models import (
+    TERMINAL_STEP_STATUSES,
+    Fact,
+    Finding,
+    Step,
+)
+from cairn.server.db import get_conn
+from cairn.server.models import (
+    ConcludeStepRequest,
+    ConcludeStepResponse,
+    CreateStepRequest,
+    HeartbeatRequest,
+    UpdateStepRequest,
+)
+from cairn.server.services.documents import (
+    insert_document,
+    utcnow,
+)
+from cairn.server.services.evidence import (
+    resolve_evidence,
+    store_finding_evidence,
+)
+from cairn.server.services.graph import (
+    find_fact_by_content,
+    step_to_model,
+)
+from cairn.server.services.guards import (
+    check_project_active,
+    expire_steps,
+    get_claimable_step_or_404,
+    get_releasable_step_or_404,
+    get_step_or_404,
+    validate_creator_worker,
+    validate_facts_exist,
+    validate_goal_exists,
+)
+from cairn.server.services.ids import (
+    next_fact_id,
+    next_finding_id,
+    next_step_id,
+)
+
+router = APIRouter(tags=["steps"])
+
+
+def _refresh_step(conn, project_id: str, step_id: str) -> Step:
+    row = conn.execute(
+        "SELECT * FROM steps WHERE id = ? AND project_id = ?", (step_id, project_id)
+    ).fetchone()
+    return step_to_model(conn, row, project_id)
+
+
+@router.post("/projects/{project_id}/steps", response_model=Step, status_code=201)
+def create_step(project_id: str, body: CreateStepRequest):
+    with get_conn() as conn:
+        check_project_active(conn, project_id)
+        validate_facts_exist(conn, project_id, body.from_)
+        if body.goal is not None:
+            validate_goal_exists(conn, project_id, body.goal)
+        validate_creator_worker(body.creator, body.worker)
+
+        now = utcnow()
+        sid = next_step_id(conn, project_id)
+        claimed = body.worker is not None
+        conn.execute(
+            """
+            INSERT INTO steps (
+                id, project_id, goal_id, kind, title, description, asset, batch, rationale,
+                priority, status, creator, worker, last_heartbeat_at, created_at,
+                concluded_at, result_fact_id, note
+            ) VALUES (?, ?, ?, 'action', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+            """,
+            (
+                sid,
+                project_id,
+                body.goal,
+                body.title,
+                body.description,
+                body.asset,
+                body.batch,
+                body.rationale,
+                body.priority,
+                "running" if claimed else "pending",
+                body.creator,
+                body.worker,
+                now if claimed else None,
+                now,
+            ),
+        )
+        for fid in body.from_:
+            conn.execute(
+                "INSERT INTO step_sources (step_id, project_id, fact_id) VALUES (?, ?, ?)",
+                (sid, project_id, fid),
+            )
+        return _refresh_step(conn, project_id, sid)
+
+
+@router.post("/projects/{project_id}/steps/{step_id}/heartbeat", response_model=Step)
+def heartbeat(project_id: str, step_id: str, body: HeartbeatRequest):
+    with get_conn() as conn:
+        check_project_active(conn, project_id)
+        get_claimable_step_or_404(conn, project_id, step_id, body.worker)
+
+        conn.execute(
+            """
+            UPDATE steps SET worker = ?, status = 'running', last_heartbeat_at = ?
+            WHERE id = ? AND project_id = ?
+            """,
+            (body.worker, utcnow(), step_id, project_id),
+        )
+        return _refresh_step(conn, project_id, step_id)
+
+
+@router.post("/projects/{project_id}/steps/{step_id}/release", response_model=Step)
+def release(project_id: str, step_id: str, body: HeartbeatRequest):
+    with get_conn() as conn:
+        check_project_active(conn, project_id)
+        row = get_releasable_step_or_404(conn, project_id, step_id, body.worker)
+
+        if row["worker"] == body.worker:
+            conn.execute(
+                "UPDATE steps SET worker = NULL, status = 'pending' WHERE id = ? AND project_id = ?",
+                (step_id, project_id),
+            )
+        return _refresh_step(conn, project_id, step_id)
+
+
+@router.post("/projects/{project_id}/steps/{step_id}/update", response_model=Step)
+def update_step(project_id: str, step_id: str, body: UpdateStepRequest):
+    """Decide's reprioritize / abandon / cancel operation. Steps are never deleted.
+
+    A ``running`` step cannot be *abandoned*: abandoning it would kill a run whose
+    result is already on its way, and the finished work would be dropped instead of
+    closing the step (proj_008). But it can be *cancelled* deliberately — the planner
+    kill, equivalent to ARTEX's ``kill_work``. Cancellation keeps the owner on the row
+    so the executor's next heartbeat gets a 409; the heartbeat kills the process, and
+    a stale conclusion is rejected because the step is terminal. The work it had not
+    submitted is discarded on purpose.
+    """
+    with get_conn() as conn:
+        check_project_active(conn, project_id)
+        expire_steps(conn, project_id)
+        row = get_step_or_404(conn, project_id, step_id)
+        if row["status"] in TERMINAL_STEP_STATUSES:
+            return step_to_model(conn, row, project_id)
+        if body.status == "abandoned" and row["status"] == "running":
+            raise HTTPException(
+                409,
+                f"Step {step_id} is running; its executor must conclude it before it can be abandoned",
+            )
+        if body.status == "cancelled" and row["status"] != "running":
+            raise HTTPException(
+                409,
+                f"Step {step_id} is {row['status']}; only a running step can be cancelled",
+            )
+
+        now = utcnow()
+        if body.priority is not None:
+            conn.execute(
+                "UPDATE steps SET priority = ? WHERE id = ? AND project_id = ?",
+                (body.priority, step_id, project_id),
+            )
+        if body.note is not None and body.status != "abandoned":
+            # A note on a live step is guidance for whoever executes it next.
+            conn.execute(
+                "UPDATE steps SET note = ? WHERE id = ? AND project_id = ?",
+                (body.note, step_id, project_id),
+            )
+        if body.status == "abandoned":
+            conn.execute(
+                """
+                UPDATE steps
+                SET status = 'abandoned', worker = NULL, concluded_at = ?, note = ?
+                WHERE id = ? AND project_id = ?
+                """,
+                (now, body.note, step_id, project_id),
+            )
+        if body.status == "cancelled":
+            conn.execute(
+                """
+                UPDATE steps
+                SET status = 'cancelled', concluded_at = ?, note = ?
+                WHERE id = ? AND project_id = ?
+                """,
+                (now, body.note, step_id, project_id),
+            )
+        return _refresh_step(conn, project_id, step_id)
+
+
+@router.post(
+    "/projects/{project_id}/steps/{step_id}/conclude",
+    response_model=ConcludeStepResponse,
+)
+def conclude(project_id: str, step_id: str, body: ConcludeStepRequest):
+    """Execute's submit_fact / submit_finding and step closure in one atomic write."""
+    with get_conn() as conn:
+        check_project_active(conn, project_id)
+        get_claimable_step_or_404(conn, project_id, step_id, body.worker)
+
+        now = utcnow()
+        facts: list[Fact] = []
+        findings: list[Finding] = []
+
+        for submitted in body.submitted_facts():
+            # Restating a known fact must not grow the graph: reuse the row and only
+            # attach any new documents to it.
+            existing = find_fact_by_content(
+                conn, project_id, submitted.title, submitted.description
+            )
+            if existing is not None:
+                fid = existing["id"]
+            else:
+                fid = next_fact_id(conn, project_id)
+                conn.execute(
+                    """
+                    INSERT INTO facts (id, project_id, title, description, step_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (fid, project_id, submitted.title, submitted.description, step_id, now),
+                )
+            for document in submitted.documents:
+                insert_document(
+                    conn,
+                    project_id,
+                    title=document.title,
+                    content=document.content,
+                    fact_id=fid,
+                    step_id=step_id,
+                    created_at=now,
+                )
+            facts.append(Fact(id=fid, description=submitted.description, title=submitted.title))
+
+        for submitted in body.findings or []:
+            did = next_finding_id(conn, project_id)
+            # Only references that resolve to stored bytes count as proof; a
+            # `confirmed` claim without any is downgraded rather than rejected.
+            evidence = resolve_evidence(conn, project_id, submitted.evidence)
+            status = submitted.status if evidence else "tentative"
+            conn.execute(
+                """
+                INSERT INTO findings (
+                    id, project_id, step_id, kind, severity, status,
+                    description, creator, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    did,
+                    project_id,
+                    step_id,
+                    submitted.kind,
+                    submitted.severity,
+                    status,
+                    submitted.description,
+                    body.worker,
+                    now,
+                ),
+            )
+            store_finding_evidence(conn, project_id, did, evidence)
+            findings.append(
+                Finding(
+                    id=did,
+                    kind=submitted.kind,
+                    description=submitted.description,
+                    severity=submitted.severity,
+                    status=status,
+                    evidence=evidence,
+                    step=step_id,
+                    creator=body.worker,
+                    created_at=now,
+                )
+            )
+
+        conn.execute(
+            """
+            UPDATE steps
+            SET status = ?, worker = ?, last_heartbeat_at = ?, concluded_at = ?,
+                result_fact_id = ?, note = ?
+            WHERE id = ? AND project_id = ?
+            """,
+            (
+                body.status,
+                body.worker,
+                now,
+                now,
+                facts[0].id if facts else None,
+                body.note,
+                step_id,
+                project_id,
+            ),
+        )
+        return ConcludeStepResponse(
+            facts=facts,
+            findings=findings,
+            step=_refresh_step(conn, project_id, step_id),
+        )

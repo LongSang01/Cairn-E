@@ -7,7 +7,29 @@ from fastapi.staticfiles import StaticFiles
 
 from cairn import __version__
 from cairn.server import db
-from cairn.server.routers import export, hints, intents, projects, settings
+from cairn.server.auth import UIAuthMiddleware
+from cairn.server.middleware import RequestIdMiddleware
+from cairn.server.routers import (
+    constraints,
+    context,
+    documents,
+    export,
+    findings,
+    goals,
+    health,
+    hints,
+    metrics,
+    projects,
+    questions,
+    recall,
+    scope,
+    sessions,
+    settings,
+    steers,
+    steps,
+    tool_guard,
+    usage,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -20,16 +42,35 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Cairn",
-    description="Fact-graph based collaborative exploration protocol",
+    description="Fact-Goal-Step graph based collaborative exploration protocol",
     version=__version__,
     lifespan=lifespan,
 )
 
+app.include_router(health.router)
+app.include_router(metrics.router)
 app.include_router(settings.router)
 app.include_router(projects.router)
 app.include_router(hints.router)
-app.include_router(intents.router)
+app.include_router(constraints.router)
+app.include_router(steers.router)
+app.include_router(scope.router)
+app.include_router(goals.router)
+app.include_router(steps.router)
+app.include_router(sessions.router)
+app.include_router(questions.router)
+app.include_router(context.router)
+app.include_router(documents.router)
+app.include_router(recall.router)
+app.include_router(findings.router)
+app.include_router(usage.router)
 app.include_router(export.router)
+app.include_router(tool_guard.router)
+
+# Added first so RequestIdMiddleware stays the outer layer: a 401 from the auth
+# middleware still gets a correlation id and an access line.
+app.add_middleware(UIAuthMiddleware)
+app.add_middleware(RequestIdMiddleware)
 
 
 @app.get("/", include_in_schema=False)
