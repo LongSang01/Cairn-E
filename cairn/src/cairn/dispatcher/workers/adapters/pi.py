@@ -7,6 +7,8 @@ from typing import Any
 from cairn.dispatcher.config import WorkerConfig
 from cairn.dispatcher.workers.base import DriverResult, WorkerDriver
 from cairn.dispatcher.workers.health import HealthResult, http_ping, proxies_from_env
+from cairn.dispatcher.workers.stream import iter_json_events
+from cairn.dispatcher.workers.usage import Usage, add_usage, normalize_usage
 
 
 class PiDriver(WorkerDriver):
@@ -24,12 +26,19 @@ class PiDriver(WorkerDriver):
         model = env["PI_MODEL"]
         api = env["PI_PROVIDER_API"]
         proxies = proxies_from_env(env)
-        headers = {"Authorization": f"Bearer {env['PI_API_KEY']}", "content-type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {env['PI_API_KEY']}",
+            "content-type": "application/json",
+        }
         if "anthropic" in api:
             return http_ping(
                 f"{base}/v1/messages",
                 headers={**headers, "anthropic-version": "2023-06-01"},
-                json_body={"model": model, "max_tokens": 10, "messages": [{"role": "user", "content": "ping"}]},
+                json_body={
+                    "model": model,
+                    "max_tokens": 10,
+                    "messages": [{"role": "user", "content": "ping"}],
+                },
                 timeout=timeout,
                 proxies=proxies,
             )
@@ -37,7 +46,11 @@ class PiDriver(WorkerDriver):
             return http_ping(
                 f"{base}/responses",
                 headers=headers,
-                json_body={"model": model, "input": [{"role": "user", "content": "ping"}], "stream": False},
+                json_body={
+                    "model": model,
+                    "input": [{"role": "user", "content": "ping"}],
+                    "stream": False,
+                },
                 timeout=timeout,
                 proxies=proxies,
             )
@@ -45,7 +58,11 @@ class PiDriver(WorkerDriver):
         return http_ping(
             f"{base}/chat/completions",
             headers=headers,
-            json_body={"model": model, "max_tokens": 10, "messages": [{"role": "user", "content": "ping"}]},
+            json_body={
+                "model": model,
+                "max_tokens": 10,
+                "messages": [{"role": "user", "content": "ping"}],
+            },
             timeout=timeout,
             proxies=proxies,
         )
@@ -95,7 +112,9 @@ class PiDriver(WorkerDriver):
 
     def _local_argv(self, worker: WorkerConfig, prompt: str, session: str | None) -> list[str]:
         # Native pi: no models.json injection and no --provider/--model overrides, so pi uses
-        # its own host configuration. A tiny sh wrapper just ensures the session dir exists.
+        # its own host configuration. The command guard is still loaded explicitly: local mode
+        # is not a trusted mode, and without `-e` the extension is never discovered, leaving
+        # every shell command unaudited while the dispatcher reports the guard as installed.
         session_dir = self._session_dir(worker)
         pi_argv = [
             "--mode",
@@ -113,8 +132,16 @@ class PiDriver(WorkerDriver):
         if session:
             pi_argv.extend(["--session", session])
         pi_argv.extend(["-p", prompt])
-        script = 'sdir="$1"\nshift\nmkdir -p "$sdir"\nexec pi "$@"\n'
-        return ["/bin/sh", "-lc", script, "--", session_dir, *pi_argv]
+        script = (
+            'guard="$1"\n'
+            "shift\n"
+            'mkdir -p "$(dirname "$guard")"\n'
+            'if [ -f "$guard" ]; then\n'
+            '  exec pi --no-extensions -e "$guard" "$@"\n'
+            "fi\n"
+            'exec pi --no-extensions "$@"\n'
+        )
+        return ["/bin/sh", "-lc", script, "--", str(self.guard_extension(worker)), *pi_argv]
 
     def extract_session(self, session: str | None, stdout: str, stderr: str) -> str | None:
         if session:
@@ -158,18 +185,45 @@ class PiDriver(WorkerDriver):
                 parts.append(text)
         return "\n".join(parts).strip() or stdout
 
-    def _wrap_with_models(self, worker: WorkerConfig, pi_argv: list[str], *, enable_tools: bool = True) -> list[str]:
+    def extract_usage(self, stdout: str, stderr: str) -> Usage | None:
+        """pi reports usage per message; `agent_end` repeats the whole run."""
+        turn_usage: Usage | None = None
+        for event in self._iter_events(stdout):
+            event_type = event.get("type")
+            if event_type == "agent_end":
+                total: Usage | None = None
+                for message in event.get("messages") or []:
+                    if isinstance(message, dict):
+                        total = add_usage(total, normalize_usage(message.get("usage")))
+                if total is not None:
+                    return total
+            elif event_type == "turn_end":
+                message = event.get("message")
+                found = normalize_usage(message.get("usage")) if isinstance(message, dict) else None
+                if found is None:
+                    found = normalize_usage(event.get("usage"))
+                turn_usage = add_usage(turn_usage, found)
+        return turn_usage
+
+    def _wrap_with_models(
+        self, worker: WorkerConfig, pi_argv: list[str], *, enable_tools: bool = True
+    ) -> list[str]:
+        # Extension discovery stays off; the only extension ever loaded is the one
+        # the dispatcher wrote for the command guard, and only when it exists.
         script = (
             'agent_dir="$1"\n'
             'models_json="$2"\n'
-            "shift 2\n"
+            'guard="$3"\n'
+            "shift 3\n"
             'mkdir -p "$agent_dir"\n'
             'mkdir -p "$agent_dir/sessions"\n'
             'printf "%s" "$models_json" > "$agent_dir/models.json"\n'
-            'exec env PI_CODING_AGENT_DIR="$agent_dir" pi "$@"\n'
+            'if [ -f "$guard" ]; then\n'
+            '  exec env PI_CODING_AGENT_DIR="$agent_dir" pi --no-extensions -e "$guard" "$@"\n'
+            "fi\n"
+            'exec env PI_CODING_AGENT_DIR="$agent_dir" pi --no-extensions "$@"\n'
         )
         argv = [
-            "--no-extensions",
             "--no-skills",
             "--no-prompt-templates",
             "--no-themes",
@@ -184,6 +238,7 @@ class PiDriver(WorkerDriver):
             "--",
             self._agent_dir(worker),
             self._models_json(worker),
+            str(self.guard_extension(worker)),
             *argv,
             *pi_argv,
         ]
@@ -193,23 +248,17 @@ class PiDriver(WorkerDriver):
         return str(PurePosixPath("/tmp/cairn-pi") / worker.name)
 
     @staticmethod
+    def guard_extension(worker: WorkerConfig) -> PurePosixPath:
+        """Path of the command-guard extension, written by ``pi_guard.install``."""
+        return PurePosixPath(PiDriver._agent_dir(worker)) / "extensions" / "cairn-guard.ts"
+
+    @staticmethod
     def _session_dir(worker: WorkerConfig) -> str:
         return str(PurePosixPath(PiDriver._agent_dir(worker)) / "sessions")
 
     @staticmethod
     def _iter_events(stdout: str) -> list[dict[str, Any]]:
-        events: list[dict[str, Any]] = []
-        for line in stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                events.append(payload)
-        return events
+        return list(iter_json_events(stdout))
 
     @staticmethod
     def _models_json(worker: WorkerConfig) -> str:
