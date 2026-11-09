@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 
 import pytest
+from conftest import make_config
 from pydantic import ValidationError
 
-from cairn.dispatcher.config import DispatchConfig, WorkerConfig, validate_prompt_resources
-from cairn.dispatcher.workers.adapters.codex import CodexDriver
+from cairn.dispatcher.config import (
+    DispatchConfig,
+    WorkerConfig,
+    validate_prompt_resources,
+)
 from cairn.dispatcher.workers.adapters.pi import PiDriver
-
-from conftest import make_config
 
 
 def test_dispatch_config_merges_common_env_with_worker_override() -> None:
@@ -46,13 +48,45 @@ def test_dispatch_config_rejects_duplicate_workers_and_excess_project_parallelis
         DispatchConfig.model_validate(payload)
 
 
+def test_dispatch_config_web_auth_accepts_plaintext_users_and_rejects_bad_entries() -> None:
+    payload = make_config().model_dump()
+    payload["web"] = {
+        "auth": {
+            "realm": "Cairn",
+            "users": [{"name": "admin", "password": "secret"}],
+        }
+    }
+
+    config = DispatchConfig.model_validate(payload)
+
+    assert config.web is not None and config.web.auth is not None
+    assert config.web.auth.realm == "Cairn"
+    assert config.web.auth.users[0].password == "secret"
+
+    payload["web"]["auth"]["users"][0]["password"] = ""
+    with pytest.raises(ValidationError):
+        DispatchConfig.model_validate(payload)
+
+    payload["web"]["auth"]["users"][0] = {"name": "admin"}
+    with pytest.raises(ValidationError):
+        DispatchConfig.model_validate(payload)
+
+    payload["web"]["auth"]["users"][0] = {"name": "bad:name", "password": "secret"}
+    with pytest.raises(ValidationError, match="user name"):
+        DispatchConfig.model_validate(payload)
+
+    payload["web"] = {"basic_auth": {}}
+    with pytest.raises(ValidationError):
+        DispatchConfig.model_validate(payload)
+
+
 def test_pi_worker_rejects_invalid_context_window() -> None:
     with pytest.raises(ValidationError, match="PI_MODEL_CONTEXT_WINDOW must be greater than 0"):
         WorkerConfig.model_validate(
             {
                 "name": "pi",
                 "type": "pi",
-                "task_types": ["explore"],
+                "task_types": ["execute"],
                 "max_running": 1,
                 "priority": 0,
                 "env": {
@@ -72,7 +106,7 @@ def test_mock_worker_rejects_unknown_phase_configuration() -> None:
             {
                 "name": "mock",
                 "type": "mock",
-                "task_types": ["explore"],
+                "task_types": ["execute"],
                 "max_running": 1,
                 "priority": 0,
                 "env": {"MOCK_UNKNOWN": "{}"},
@@ -90,7 +124,7 @@ def test_pi_driver_models_json_and_execute_argv_include_context_window_and_tools
         {
             "name": "pi-worker",
             "type": "pi",
-            "task_types": ["explore"],
+            "task_types": ["execute"],
             "max_running": 1,
             "priority": 0,
             "env": {
@@ -109,27 +143,3 @@ def test_pi_driver_models_json_and_execute_argv_include_context_window_and_tools
     assert models["providers"]["cairn"]["models"][0]["contextWindow"] == 131072
     assert "--tools" in result.argv
     assert result.argv[-2:] == ["-p", "prompt"]
-
-
-def test_codex_driver_execute_argv_passes_model_endpoint_and_prompt() -> None:
-    worker = WorkerConfig.model_validate(
-        {
-            "name": "codex",
-            "type": "codex",
-            "task_types": ["reason"],
-            "max_running": 1,
-            "priority": 0,
-            "env": {
-                "CODEX_MODEL": "gpt-test",
-                "CODEX_BASE_URL": "http://api/v1",
-                "OPENAI_API_KEY": "secret",
-            },
-        }
-    )
-
-    argv = CodexDriver().build_execute(worker, "prompt", None).argv
-
-    assert "--model" in argv
-    assert "gpt-test" in argv
-    assert 'model_providers.cairn.base_url="http://api/v1"' in argv
-    assert argv[-2:] == ["--", "prompt"]

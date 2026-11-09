@@ -5,20 +5,17 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import FakeClient, make_config, make_project, make_step
 from pydantic import ValidationError
 
 from cairn.dispatcher.config import DispatchConfig, LocalConfig, WorkerConfig
+from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.local_backend import LocalBackend
 from cairn.dispatcher.runtime.local_process import LocalProcess
 from cairn.dispatcher.scheduler import loop as loop_module
-from cairn.dispatcher.tasks import common, explore
-from cairn.dispatcher.runtime.cancellation import TaskCancellation
-from cairn.dispatcher.workers.adapters.codex import CodexDriver
+from cairn.dispatcher.tasks import common, execute
 from cairn.dispatcher.workers.adapters.pi import PiDriver
 from cairn.dispatcher.workers.registry import get_driver
-
-from conftest import FakeClient, make_config, make_intent, make_project
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -39,6 +36,22 @@ def test_local_process_captures_stdout_and_exit_code() -> None:
     assert result.stdout.strip() == "hello"
     assert result.returncode == 3
     assert not result.timed_out
+
+
+def test_local_process_streams_stdout_before_exit() -> None:
+    seen: list[str] = []
+    process = LocalProcess(
+        ["python3", "-c", "import sys; print('first', flush=True); print('second', flush=True)"],
+        cwd=os.getcwd(),
+        env=dict(os.environ),
+        timeout_seconds=10,
+        on_stdout=seen.append,
+    )
+    process.start()
+    result = process.communicate(timeout=20)
+
+    assert "".join(seen) == result.stdout
+    assert "first" in result.stdout
 
 
 def test_local_process_inherits_cwd(tmp_path: Path) -> None:
@@ -153,7 +166,7 @@ def test_local_common_env_reaches_worker_subprocess(tmp_path: Path, monkeypatch)
         "all_proxy": "http://127.0.0.1:7897",
     }
     config = DispatchConfig.model_validate(payload)
-    worker = next(w for w in config.workers if w.type == "claudecode")
+    worker = next(w for w in config.workers if w.type == "pi")
     assert worker.env["https_proxy"] == "http://127.0.0.1:7897"
 
     assert config.local is not None
@@ -224,14 +237,24 @@ def _local_payload() -> dict:
             "prompt_group": "default",
         },
         "tasks": {
-            "bootstrap": {"timeout": 10, "conclude_timeout": 5},
-            "reason": {"timeout": 10, "max_intents": 3},
-            "explore": {"timeout": 10, "conclude_timeout": 5},
+            "decide": {"timeout": 10, "max_steps": 3},
+            "execute": {"timeout": 10, "conclude_timeout": 5},
         },
         "workers": [
-            {"name": "local-claude", "type": "claudecode", "task_types": ["explore"], "max_running": 1, "priority": 0},
-            {"name": "local-codex", "type": "codex", "task_types": ["explore"], "max_running": 1, "priority": 1},
-            {"name": "local-pi", "type": "pi", "task_types": ["reason"], "max_running": 1, "priority": 2},
+            {
+                "name": "local-pi",
+                "type": "pi",
+                "task_types": ["execute"],
+                "max_running": 1,
+                "priority": 0,
+            },
+            {
+                "name": "local-mock",
+                "type": "mock",
+                "task_types": ["decide"],
+                "max_running": 1,
+                "priority": 1,
+            },
         ],
     }
 
@@ -293,7 +316,9 @@ def _bare_loop(config: DispatchConfig) -> loop_module.DispatcherLoop:
 
 def test_local_cli_check_passes_when_cli_present() -> None:
     payload = _local_payload()
-    payload["workers"] = [{"name": "m", "type": "mock", "task_types": ["reason"], "max_running": 1, "priority": 0}]
+    payload["workers"] = [
+        {"name": "m", "type": "mock", "task_types": ["decide"], "max_running": 1, "priority": 0}
+    ]
     config = DispatchConfig.model_validate(payload)
 
     _bare_loop(config)._run_local_binary_check()  # mock -> python3 --help runs; must not raise
@@ -312,22 +337,14 @@ def test_local_cli_check_exits_when_no_cli_installed(monkeypatch) -> None:
 
 def _bare_worker(worker_type: str) -> WorkerConfig:
     return WorkerConfig.model_validate(
-        {"name": worker_type, "type": worker_type, "task_types": ["explore"], "max_running": 1, "priority": 0}
+        {
+            "name": worker_type,
+            "type": worker_type,
+            "task_types": ["execute"],
+            "max_running": 1,
+            "priority": 0,
+        }
     )
-
-
-def test_codex_local_driver_omits_provider_injection() -> None:
-    worker = _bare_worker("codex")
-    argv = CodexDriver(local=True).build_execute(worker, "PROMPT", None).argv
-
-    assert argv == ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--", "PROMPT"]
-    assert not any("model_providers" in part for part in argv)
-    assert "--model" not in argv
-
-    conclude = CodexDriver(local=True).build_conclude(worker, "PROMPT", "sess-1")
-    assert conclude[:4] == ["codex", "exec", "resume", "sess-1"]
-    assert conclude[-2:] == ["--", "PROMPT"]
-    assert not any("model_providers" in part for part in conclude)
 
 
 def test_pi_local_driver_omits_models_json_and_provider() -> None:
@@ -342,11 +359,9 @@ def test_pi_local_driver_omits_models_json_and_provider() -> None:
 
 
 def test_get_driver_selects_local_or_container_variant() -> None:
-    assert get_driver("codex", "local").local is True
-    assert get_driver("codex").local is False
     assert get_driver("pi", "local").local is True
-    # claudecode and mock are shared instances across both modes
-    assert get_driver("claudecode", "local") is get_driver("claudecode")
+    assert get_driver("pi").local is False
+    # mock is a shared instance across both modes
     assert get_driver("mock", "local") is get_driver("mock")
 
 
@@ -368,12 +383,17 @@ def _local_config_for_worker(name: str, worker_type: str) -> DispatchConfig:
                 "prompt_group": "default",
             },
             "tasks": {
-                "bootstrap": {"timeout": 30, "conclude_timeout": 10},
-                "reason": {"timeout": 30, "max_intents": 3},
-                "explore": {"timeout": 30, "conclude_timeout": 10},
+                "decide": {"timeout": 30, "max_steps": 3},
+                "execute": {"timeout": 30, "conclude_timeout": 10},
             },
             "workers": [
-                {"name": name, "type": worker_type, "task_types": ["explore"], "max_running": 1, "priority": 0}
+                {
+                    "name": name,
+                    "type": worker_type,
+                    "task_types": ["execute"],
+                    "max_running": 1,
+                    "priority": 0,
+                }
             ],
         }
     )
@@ -388,67 +408,72 @@ def _install_fake_cli(tmp_path: Path, monkeypatch, name: str, body: str) -> None
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
 
-def test_explore_runs_real_local_cli_end_to_end(tmp_path: Path, monkeypatch) -> None:
-    # A fake `claude` on PATH stands in for the real CLI: the whole local path is exercised
+def test_execute_runs_real_local_cli_end_to_end(tmp_path: Path, monkeypatch) -> None:
+    # A fake `pi` on PATH stands in for the real CLI: the whole local path is exercised
     # for real — driver argv -> LocalBackend -> LocalProcess subprocess -> stdout parsing.
     _install_fake_cli(
         tmp_path,
         monkeypatch,
-        "claude",
-        "echo '{\"accepted\":true,\"data\":{\"description\":\"local fake fact\"}}'",
+        "pi",
+        "printf '%s\\n' '"
+        '{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text",'
+        '"text":"{\\"accepted\\":true,\\"data\\":{\\"facts\\":[{\\"description\\":'
+        '\\"local fake fact\\"}]}}"}]}}\'',
     )
     monkeypatch.setattr(common, "GRAPH_SNAPSHOT_ROOT", str(tmp_path / "prompts"))
 
-    config = _local_config_for_worker("test-worker", "claudecode")
+    config = _local_config_for_worker("test-worker", "pi")
     backend = LocalBackend(LocalConfig(workspace_root=str(tmp_path / "work")))
-    intent = make_intent()
-    project = make_project(intents=[intent])
+    step = make_step(status="running", worker="test-worker")
+    project = make_project(steps=[step])
     client = FakeClient(project)
 
-    outcome = explore.run_explore_task(
+    outcome = execute.run_execute_task(
         config,
         client,
         backend,
         project,
         "facts:\n- id: f001\n",
-        intent,
+        step,
         config.workers[0],
         TaskCancellation(),
     )
 
     assert outcome == "success"
-    assert client.concluded == [("proj_001", "i001", "test-worker", "local fake fact")]
+    assert client.concluded == [("proj_001", "s001", "test-worker", ["local fake fact"], [])]
     # graph snapshot was materialised on the host under the patched root
     snapshot_root = tmp_path / "prompts"
     assert any(p.name == "graph.yaml" for p in snapshot_root.rglob("*"))
 
 
-def test_explore_local_cli_rejection_releases_intent(tmp_path: Path, monkeypatch) -> None:
+def test_execute_local_cli_rejection_releases_step(tmp_path: Path, monkeypatch) -> None:
     _install_fake_cli(
         tmp_path,
         monkeypatch,
-        "claude",
-        "echo '{\"accepted\":false,\"reason\":\"policy_refusal\"}'",
+        "pi",
+        "printf '%s\\n' '"
+        '{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text",'
+        '"text":"{\\"accepted\\":false,\\"reason\\":\\"policy_refusal\\"}"}]}}\'',
     )
     monkeypatch.setattr(common, "GRAPH_SNAPSHOT_ROOT", str(tmp_path / "prompts"))
 
-    config = _local_config_for_worker("test-worker", "claudecode")
+    config = _local_config_for_worker("test-worker", "pi")
     backend = LocalBackend(LocalConfig(workspace_root=str(tmp_path / "work")))
-    intent = make_intent()
-    project = make_project(intents=[intent])
+    step = make_step(status="running", worker="test-worker")
+    project = make_project(steps=[step])
     client = FakeClient(project)
 
-    outcome = explore.run_explore_task(
+    outcome = execute.run_execute_task(
         config,
         client,
         backend,
         project,
         "facts:\n- id: f001\n",
-        intent,
+        step,
         config.workers[0],
         TaskCancellation(),
     )
 
     assert outcome == "rejected"
     assert client.concluded == []
-    assert client.released == [("proj_001", "i001", "test-worker")]
+    assert client.released == [("proj_001", "s001", "test-worker")]

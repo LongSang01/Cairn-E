@@ -61,7 +61,7 @@ def test_task_cancellation_keeps_first_reason_and_cancels_late_process() -> None
 
 def test_heartbeat_conflict_failure_kills_attached_process() -> None:
     process = FakeProcess()
-    lease = HeartbeatLease(lambda: ApiResult(409, text="lost"), "intent", "worker", interval=60)
+    lease = HeartbeatLease(lambda: ApiResult(409, text="lost"), "step", "worker", interval=60)
     lease.attach_process(process)
 
     lease._fail(409, "lost")
@@ -76,7 +76,9 @@ def test_container_manager_build_exec_process_wraps_command_with_timeout() -> No
     container = FakeContainer()
     manager._require_container = lambda _name: container
 
-    process = manager.build_exec_process("container", {"A": "B"}, ["agent", "-p", "prompt"], timeout_seconds=300)
+    process = manager.build_exec_process(
+        "container", {"A": "B"}, ["agent", "-p", "prompt"], timeout_seconds=300
+    )
 
     assert process.command == ["timeout", "-k", "5s", "300s", "agent", "-p", "prompt"]
     assert process.env == {"A": "B"}
