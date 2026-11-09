@@ -36,9 +36,17 @@ class ApiResult:
 
 
 class CairnClient:
-    def __init__(self, base_url: str, timeout: float = 10.0):
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 10.0,
+        auth: tuple[str, str] | None = None,
+    ):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        # The server enforces web.auth for every UI request, and the dispatcher talks to
+        # the same endpoints as a browser does. Without credentials every call would 401.
+        self._auth = auth
         self._summary_adapter = TypeAdapter(list[ProjectSummary])
         self._questions_adapter = TypeAdapter(list[Question])
         self._local = threading.local()
@@ -414,6 +422,8 @@ class CairnClient:
             return session
 
         session = requests.Session()
+        if self._auth is not None:
+            session.auth = self._auth
         adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, pool_block=False)
         session.mount("http://", adapter)
         session.mount("https://", adapter)

@@ -3,12 +3,15 @@ from __future__ import annotations
 from typing import ClassVar
 
 import requests
+from conftest import make_config
 
+from cairn.dispatcher.config import DispatchConfig
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.startup_healthcheck import (
     StartupHealthcheckResult,
     format_failure_summary,
 )
+from cairn.dispatcher.scheduler.loop.core import _server_auth
 
 
 def test_client_request_failure_returns_status_zero() -> None:
@@ -57,6 +60,40 @@ def test_session_heartbeat_posts_without_a_body() -> None:
     assert session.calls == [
         ("POST", "http://server/projects/proj_001/sessions/x001/heartbeat", None)
     ]
+
+
+def test_client_sends_web_auth_credentials_on_every_session() -> None:
+    client = CairnClient("http://server/", auth=("admin", "s3cret"))
+    try:
+        assert client._session().auth == ("admin", "s3cret")
+    finally:
+        client.close()
+
+
+def test_client_without_web_auth_sends_no_credentials() -> None:
+    client = CairnClient("http://server/")
+    try:
+        assert client._session().auth is None
+    finally:
+        client.close()
+
+
+def test_server_auth_reads_first_web_user_and_is_optional() -> None:
+    assert _server_auth(make_config()) is None
+
+    payload = make_config().model_dump()
+    payload["web"] = {
+        "auth": {
+            "realm": "Cairn",
+            "users": [
+                {"name": "admin", "password": "s3cret"},
+                {"name": "guest", "password": "x"},
+            ],
+        }
+    }
+    config = DispatchConfig.model_validate(payload)
+
+    assert _server_auth(config) == ("admin", "s3cret")
 
 
 def test_startup_healthcheck_failure_summary_includes_worker_details() -> None:

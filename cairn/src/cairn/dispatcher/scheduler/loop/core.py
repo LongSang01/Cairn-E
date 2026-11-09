@@ -28,11 +28,23 @@ from ._base import LoopBase
 LOG = logging.getLogger("cairn.dispatcher.scheduler.loop")
 
 
+def _server_auth(config: DispatchConfig) -> tuple[str, str] | None:
+    """The Basic Auth credentials the server expects from the UI channel.
+
+    ``web.auth`` is normally a single operator account; the first entry is used. It is
+    never logged: the same block also protects the browser UI.
+    """
+    auth = config.web.auth if config.web is not None else None
+    if auth is None or not auth.users:
+        return None
+    return auth.users[0].name, auth.users[0].password
+
+
 class CoreMixin(LoopBase):
     def __init__(self, config_path: Path):
         self.config_path = config_path
         self.config = DispatchConfig.load(config_path)
-        self.client = CairnClient(self.config.server)
+        self.client = CairnClient(self.config.server, auth=_server_auth(self.config))
         if self.config.runtime.execution == "local":
             self.container_manager: ExecutionBackend = LocalBackend(
                 self.config.local or LocalConfig()

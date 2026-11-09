@@ -9,8 +9,9 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# The web-auth schema is shared with the server, which enforces it; the dispatcher only
-# parses and validates the block so a malformed file fails at boot, not at request time.
+# The web-auth schema is shared with the server, which enforces it; the dispatcher also
+# reads it to authenticate its own calls to the server's UI endpoints (it talks to the
+# same routes as a browser), and validates it so a malformed file fails at boot.
 from cairn.contracts.web import WebConfig
 
 TaskType = Literal["decide", "execute"]
